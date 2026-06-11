@@ -49,6 +49,7 @@
 #include <QClipboard>
 #include <QStyleFactory>
 #include <QTextDocument>
+#include <QPainter>
 
 #include <vector>
 #include <fstream>
@@ -573,6 +574,114 @@ private:
     float zoom = 3.0f;
 };
 
+class ImageEditor : public QWidget {
+public:
+    ImageEditor(QWidget* parent = nullptr) : QWidget(parent) {
+        QVBoxLayout* layout = new QVBoxLayout(this);
+        
+        QHBoxLayout* tools = new QHBoxLayout();
+        QPushButton* btnDraw = new QPushButton("Toggle Draw");
+        QPushButton* btnClear = new QPushButton("Clear");
+        QPushButton* btnSave = new QPushButton("Save");
+        tools->addWidget(btnDraw);
+        tools->addWidget(btnClear);
+        tools->addWidget(btnSave);
+        tools->addStretch();
+        layout->addLayout(tools);
+        
+        imageLabel = new QLabel();
+        imageLabel->setAlignment(Qt::AlignCenter);
+        layout->addWidget(imageLabel, 1);
+        
+        connect(btnDraw, &QPushButton::clicked, this, [this, btnDraw]() { 
+            isDrawing = !isDrawing; 
+            btnDraw->setText(isDrawing ? "Stop Drawing" : "Toggle Draw");
+        });
+        connect(btnClear, &QPushButton::clicked, this, [this]() { currentImage = originalImage; updateDisplay(); });
+        connect(btnSave, &QPushButton::clicked, this, [this]() {
+            if (!currentPath.isEmpty() && !currentImage.isNull()) {
+                currentImage.save(currentPath);
+                QMessageBox::information(this, "Saved", "Image saved!");
+            }
+        });
+        
+        imageLabel->installEventFilter(this);
+    }
+    
+    void loadImage(const QString& path, const QImage& img) {
+        currentPath = path;
+        originalImage = img;
+        currentImage = img;
+        updateDisplay();
+    }
+    
+    void clear() {
+        imageLabel->clear();
+        currentPath.clear();
+        currentImage = QImage();
+    }
+
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (obj == imageLabel && isDrawing && !currentImage.isNull()) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                QMouseEvent* me = static_cast<QMouseEvent*>(event);
+                lastPoint = getMappedPoint(me->pos());
+                drawingNow = true;
+                return true;
+            } else if (event->type() == QEvent::MouseMove) {
+                QMouseEvent* me = static_cast<QMouseEvent*>(event);
+                if (drawingNow) {
+                    QPoint pt = getMappedPoint(me->pos());
+                    QPainter painter(&currentImage);
+                    painter.setPen(QPen(Qt::red, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    painter.drawLine(lastPoint, pt);
+                    lastPoint = pt;
+                    updateDisplay();
+                }
+                return true;
+            } else if (event->type() == QEvent::MouseButtonRelease) {
+                drawingNow = false;
+                return true;
+            }
+        }
+        return QWidget::eventFilter(obj, event);
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        updateDisplay();
+        QWidget::resizeEvent(event);
+    }
+    
+private:
+    void updateDisplay() {
+        if (!currentImage.isNull() && imageLabel->width() > 0 && imageLabel->height() > 0) {
+            imageLabel->setPixmap(QPixmap::fromImage(currentImage).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+    }
+    
+    QPoint getMappedPoint(const QPoint& p) {
+        if (imageLabel->pixmap().isNull()) return p;
+        QRect r = imageLabel->rect();
+        int w = currentImage.width();
+        int h = currentImage.height();
+        QSize scaledSize = currentImage.size().scaled(r.size(), Qt::KeepAspectRatio);
+        int offsetX = (r.width() - scaledSize.width()) / 2;
+        int offsetY = (r.height() - scaledSize.height()) / 2;
+        int x = (p.x() - offsetX) * w / scaledSize.width();
+        int y = (p.y() - offsetY) * h / scaledSize.height();
+        return QPoint(x, y);
+    }
+    
+    QLabel* imageLabel;
+    QImage originalImage;
+    QImage currentImage;
+    QString currentPath;
+    bool isDrawing = false;
+    bool drawingNow = false;
+    QPoint lastPoint;
+};
+
 class QscSyntaxHighlighter : public QSyntaxHighlighter {
 public:
     QscSyntaxHighlighter(QTextDocument *parent = nullptr) : QSyntaxHighlighter(parent) {
@@ -728,12 +837,12 @@ private:
                             for (int i = 0; i < arr.size(); ++i) {
                                 QJsonObject obj = arr[i].toObject();
                                 if (obj["ModelId"].toString() == word) {
-                                    info = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+                                    info = "Model Name: " + obj["ModelName"].toString();
                                     break;
                                 }
                             }
                         } else if (fullDoc.isObject() && fullDoc.object().contains(word)) {
-                            info = QJsonDocument(fullDoc.object()[word].toObject()).toJson(QJsonDocument::Indented);
+                            info = "Model Name: " + fullDoc.object()[word].toObject()["ModelName"].toString();
                         }
                     }
                 }
@@ -760,18 +869,23 @@ public:
         resize(1200, 800);
 
         fileModel = new QFileSystemModel(this);
-        fileModel->setRootPath("");
+        QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        QString lastFolder = QSettings(iniPath, QSettings::IniFormat).value("LastFolder", QCoreApplication::applicationDirPath()).toString();
+        if (!QDir(lastFolder).exists()) lastFolder = QCoreApplication::applicationDirPath();
+        fileModel->setRootPath(lastFolder);
+        
         proxyModel = new QSortFilterProxyModel(this);
         proxyModel->setSourceModel(fileModel);
         proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
         // Standard Menu Bar
         QMenu* fileMenu = menuBar()->addMenu("&File");
-        fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this]() {
+        fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this, iniPath]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
             if (!dir.isEmpty()) {
                 fileModel->setRootPath(dir);
                 treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
+                QSettings(iniPath, QSettings::IniFormat).setValue("LastFolder", dir);
                 QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
                 if (tempDir.exists()) tempDir.removeRecursively();
                 logMessage("[INFO] Workspace changed. Smart cache cleared.");
@@ -790,6 +904,26 @@ public:
                         QProcess::execute(cmd, QStringList() << "qsc" << "compile" << tempQscPath << "-o" << currentFile);
                         logMessage("[INFO] Compiled QSC to QVM and saved successfully!");
                         QMessageBox::information(this, "Saved", "Compiled and saved QVM successfully!");
+                    }
+                } else if (viewModeCombo->currentIndex() == 2) { // Hex View
+                    QString text = viewerEdit->toPlainText();
+                    QByteArray data;
+                    QStringList lines = text.split("\n");
+                    for (const QString& line : lines) {
+                        if (line.isEmpty() || line.startsWith("...")) continue;
+                        int pipe = line.indexOf("|");
+                        if (pipe == -1) continue;
+                        QString hexPart = line.mid(10, pipe - 10);
+                        QStringList bytes = hexPart.split(" ", Qt::SkipEmptyParts);
+                        for (const QString& b : bytes) {
+                            data.append((char)b.toInt(nullptr, 16));
+                        }
+                    }
+                    QFile f(currentFile);
+                    if (f.open(QIODevice::WriteOnly)) {
+                        f.write(data);
+                        logMessage("[INFO] Hex File saved successfully!");
+                        QMessageBox::information(this, "Saved", "Hex File saved successfully!");
                     }
                 } else {
                     QFile f(currentFile);
@@ -826,12 +960,13 @@ public:
 
         QMenu* viewMenu = menuBar()->addMenu("&View");
         viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
-        viewMenu->addAction("Text View", [this]() { viewModeCombo->setCurrentIndex(1); });
-        viewMenu->addAction("Hex View", [this]() { viewModeCombo->setCurrentIndex(2); });
+        viewMenu->addAction("Text", [this]() { viewModeCombo->setCurrentIndex(1); });
+        viewMenu->addAction("Hex", [this]() { viewModeCombo->setCurrentIndex(2); });
         viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
         viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
         viewMenu->addSeparator();
-        viewMenu->addAction("Light Theme", [this]() {
+        viewMenu->addAction("Light Theme", [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("Theme", "Light");
             QPalette lightPalette;
             lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
             lightPalette.setColor(QPalette::WindowText, Qt::black);
@@ -848,7 +983,8 @@ public:
             lightPalette.setColor(QPalette::HighlightedText, Qt::white);
             qApp->setPalette(lightPalette);
         });
-        viewMenu->addAction("Dark Theme", [this]() {
+        viewMenu->addAction("Dark Theme", [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("Theme", "Dark");
             QPalette darkPalette;
             darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
             darkPalette.setColor(QPalette::WindowText, Qt::white);
@@ -866,7 +1002,7 @@ public:
             qApp->setPalette(darkPalette);
         });
 
-        QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+
         QSettings settings(iniPath, QSettings::IniFormat);
         globalLevelMtpPath = settings.value("LevelMTP", "").toString();
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
@@ -956,7 +1092,7 @@ public:
         });
         treeView = new QTreeView(leftWidget);
         treeView->setModel(proxyModel);
-        treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(QDir::currentPath())));
+        treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(lastFolder)));
         treeView->setColumnWidth(0, 250);
         treeView->setContextMenuPolicy(Qt::CustomContextMenu);
         leftLayout->addWidget(treeView);
@@ -1030,9 +1166,9 @@ public:
         });
 
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
-        viewModeLayout->addWidget(new QLabel("View Mode:"));
+        viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
-        viewModeCombo->addItems({"Auto", "Text View", "Hex View", "Image View", "3D View"});
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image View", "3D View"});
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
@@ -1041,13 +1177,13 @@ public:
         viewerEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         viewerEdit->hide();
         
-        imageLabel = new QLabel();
-        imageLabel->setAlignment(Qt::AlignCenter);
+        imageEditor = new ImageEditor(this);
+        imageEditor->hide();
 
         modelViewer = new ModelViewer();
 
         rightLayout->addWidget(viewerEdit, 3);
-        rightLayout->addWidget(imageLabel, 3);
+        rightLayout->addWidget(imageEditor, 3);
         rightLayout->addWidget(modelViewer, 3);
 
         // Debug Output
@@ -1109,7 +1245,7 @@ private:
     QLineEdit* textSearchBox;
     QComboBox* viewModeCombo;
     CodeEditor* viewerEdit;
-    QLabel* imageLabel;
+    ImageEditor* imageEditor;
     ModelViewer* modelViewer;
     QTextEdit* consoleEdit;
     QString currentFile;
@@ -1122,7 +1258,7 @@ private:
 
     void hideAllViewers() {
         viewerEdit->hide();
-        imageLabel->hide();
+        imageEditor->hide();
         modelViewer->hide();
     }
 
@@ -1218,14 +1354,14 @@ private:
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
             menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
         } else if (ext == "qsc") {
-            menu.addAction("Compile to QVM", [this, path]() { loadFile(path); executeCommand("qsc compile"); });
+            menu.addAction("Compile",        [this, path]() { loadFile(path); executeCommand("qsc compile"); });
             menu.addAction("Validate",       [this, path]() { loadFile(path); executeCommand("qsc validate"); });
         } else if (ext == "qvm") {
-            menu.addAction("Decompile to QSC", [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
-            menu.addAction("Disasm",           [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
-            menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("qvm info"); });
+            menu.addAction("Decompile",      [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
+            menu.addAction("Disasm",         [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
+            menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
-            menu.addAction("Export to OBJ",    [this, path]() { loadFile(path); executeCommand("mef export"); });
+            menu.addAction("Export",         [this, path]() { loadFile(path); executeCommand("mef export"); });
             menu.addAction("Apply Textures (This MEF)", [this, path]() {
                 currentFile = path;
                 executeCommand("mef bundle");
@@ -1248,11 +1384,11 @@ private:
             menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
             menu.addAction("Unpack",  [this, path]() { loadFile(path); executeCommand("res unpack"); });
         } else if (ext == "mtp") {
-            menu.addAction("Export to DAT", [this, path]() { loadFile(path); executeCommand("mtp to-dat"); });
+            menu.addAction("Convert",       [this, path]() { loadFile(path); executeCommand("mtp to-dat"); });
             menu.addAction("Dump",          [this, path]() { loadFile(path); executeCommand("mtp dump"); });
             menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("mtp info"); });
         } else if (ext == "dat") {
-            menu.addAction("Export to MTP", [this, path]() { loadFile(path); executeCommand("dat to-mtp"); });
+            menu.addAction("Convert",       [this, path]() { loadFile(path); executeCommand("dat to-mtp"); });
             menu.addAction("Export",        [this, path]() { loadFile(path); executeCommand("dat export"); });
             menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("dat info"); });
         } else if (ext == "fnt") {
@@ -1329,7 +1465,7 @@ private:
                 if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
                 viewerEdit->setPlainText(hexView);
             }
-            viewerEdit->setReadOnly(true);
+            viewerEdit->setReadOnly(false);
             viewerEdit->show();
         } else if (mode == 3) { // Image
             if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
@@ -1356,17 +1492,19 @@ private:
                             }
                         }
                     }
-                    imageLabel->setPixmap(QPixmap::fromImage(qimg).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                    imageEditor->loadImage(path, qimg);
+                } else {
+                    imageEditor->clear();
                 }
             } else {
                 QImage img = loadImageSafe(path);
                 if (!img.isNull()) {
-                    imageLabel->setPixmap(QPixmap::fromImage(img).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                    imageEditor->loadImage(path, img);
                 } else {
-                    imageLabel->setText("Failed to load image");
+                    imageEditor->clear();
                 }
             }
-            imageLabel->show();
+            imageEditor->show();
         } else if (mode == 4) { // 3D
             modelViewer->loadModel(path);
             modelViewer->show();
@@ -1443,21 +1581,42 @@ int run_gui() {
 
     QApplication app(argc, argv);
     app.setStyle("Fusion");
-    QPalette darkPalette;
-    darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
-    darkPalette.setColor(QPalette::WindowText, Qt::white);
-    darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
-    darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
-    darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
-    darkPalette.setColor(QPalette::ToolTipText, Qt::white);
-    darkPalette.setColor(QPalette::Text, Qt::white);
-    darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
-    darkPalette.setColor(QPalette::ButtonText, Qt::white);
-    darkPalette.setColor(QPalette::BrightText, Qt::red);
-    darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
-    darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
-    darkPalette.setColor(QPalette::HighlightedText, Qt::black);
-    app.setPalette(darkPalette);
+    QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+    QString theme = QSettings(iniPath, QSettings::IniFormat).value("Theme", "Dark").toString();
+    
+    if (theme == "Light") {
+        QPalette lightPalette;
+        lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::WindowText, Qt::black);
+        lightPalette.setColor(QPalette::Base, Qt::white);
+        lightPalette.setColor(QPalette::AlternateBase, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::ToolTipBase, Qt::white);
+        lightPalette.setColor(QPalette::ToolTipText, Qt::black);
+        lightPalette.setColor(QPalette::Text, Qt::black);
+        lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::ButtonText, Qt::black);
+        lightPalette.setColor(QPalette::BrightText, Qt::red);
+        lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
+        lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
+        lightPalette.setColor(QPalette::HighlightedText, Qt::white);
+        app.setPalette(lightPalette);
+    } else {
+        QPalette darkPalette;
+        darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::WindowText, Qt::white);
+        darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
+        darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
+        darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+        darkPalette.setColor(QPalette::Text, Qt::white);
+        darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::ButtonText, Qt::white);
+        darkPalette.setColor(QPalette::BrightText, Qt::red);
+        darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
+        darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+        darkPalette.setColor(QPalette::HighlightedText, Qt::black);
+        app.setPalette(darkPalette);
+    }
 
     MainWindow window;
     window.show();
