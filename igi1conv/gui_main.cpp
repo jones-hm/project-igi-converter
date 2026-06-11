@@ -574,13 +574,19 @@ public:
         setWindowTitle("IGI Game Asset Converter (Qt Advanced UI)");
         resize(1200, 800);
 
+        fileModel = new QFileSystemModel(this);
+        fileModel->setRootPath("");
+        proxyModel = new QSortFilterProxyModel(this);
+        proxyModel->setSourceModel(fileModel);
+        proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
         // Standard Menu Bar
         QMenu* fileMenu = menuBar()->addMenu("&File");
         fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
             if (!dir.isEmpty()) {
                 fileModel->setRootPath(dir);
-                treeView->setRootIndex(fileModel->index(dir));
+                treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
             }
         }, QKeySequence::Open);
         
@@ -604,6 +610,17 @@ public:
         editMenu->addAction("Cut", this, [this](){ viewerEdit->cut(); }, QKeySequence::Cut);
         editMenu->addAction("Copy", this, [this](){ viewerEdit->copy(); }, QKeySequence::Copy);
         editMenu->addAction("Paste", this, [this](){ viewerEdit->paste(); }, QKeySequence::Paste);
+        editMenu->addSeparator();
+        editMenu->addAction("Find File", this, [this](){
+            fileSearchBox->setVisible(!fileSearchBox->isVisible());
+            if (fileSearchBox->isVisible()) fileSearchBox->setFocus();
+            else { fileSearchBox->clear(); treeView->setFocus(); }
+        }, QKeySequence("Ctrl+F"));
+        editMenu->addAction("Find in Text", this, [this](){
+            textSearchWidget->setVisible(!textSearchWidget->isVisible());
+            if (textSearchWidget->isVisible()) textSearchBox->setFocus();
+            else textSearchWidget->hide();
+        }, QKeySequence("Ctrl+Shift+F"));
 
         QMenu* viewMenu = menuBar()->addMenu("&View");
         viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
@@ -644,7 +661,7 @@ public:
             QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
             if (!dir.isEmpty()) {
                 fileModel->setRootPath(dir);
-                treeView->setRootIndex(fileModel->index(dir));
+                treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
             }
         });
 
@@ -654,15 +671,11 @@ public:
         // Left side: File browser
         QWidget* leftWidget = new QWidget(splitter);
         QVBoxLayout* leftLayout = new QVBoxLayout(leftWidget);
+        leftLayout->setContentsMargins(0,0,0,0);
         fileSearchBox = new QLineEdit();
         fileSearchBox->setPlaceholderText("Search file by name...");
+        fileSearchBox->hide();
         leftLayout->addWidget(fileSearchBox);
-
-        fileModel = new QFileSystemModel(this);
-        fileModel->setRootPath("");
-        proxyModel = new QSortFilterProxyModel(this);
-        proxyModel->setSourceModel(fileModel);
-        proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
         connect(fileSearchBox, &QLineEdit::textChanged, proxyModel, &QSortFilterProxyModel::setFilterWildcard);
 
@@ -679,12 +692,15 @@ public:
         QWidget* rightWidget = new QWidget(splitter);
         QVBoxLayout* rightLayout = new QVBoxLayout(rightWidget);
 
-        QHBoxLayout* textSearchLayout = new QHBoxLayout();
+        textSearchWidget = new QWidget();
+        QHBoxLayout* textSearchLayout = new QHBoxLayout(textSearchWidget);
+        textSearchLayout->setContentsMargins(0,0,0,0);
         textSearchBox = new QLineEdit();
         textSearchBox->setPlaceholderText("Search text inside file...");
         QPushButton* findNextBtn = new QPushButton("Find Next");
         textSearchLayout->addWidget(textSearchBox);
         textSearchLayout->addWidget(findNextBtn);
+        textSearchWidget->hide();
         connect(findNextBtn, &QPushButton::clicked, this, [this]() {
             QString query = textSearchBox->text();
             if (!query.isEmpty() && viewerEdit->isVisible()) {
@@ -694,7 +710,7 @@ public:
                 }
             }
         });
-        rightLayout->addLayout(textSearchLayout);
+        rightLayout->addWidget(textSearchWidget);
 
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("View Mode:"));
@@ -753,6 +769,7 @@ private:
     QSortFilterProxyModel* proxyModel;
     QTreeView* treeView;
     QLineEdit* fileSearchBox;
+    QWidget* textSearchWidget;
     QLineEdit* textSearchBox;
     QComboBox* viewModeCombo;
     QTextEdit* viewerEdit;
