@@ -994,8 +994,11 @@ public:
 
         fileModel = new QFileSystemModel(this);
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
-        QString lastFolder = QSettings(iniPath, QSettings::IniFormat).value("LastFolder", QCoreApplication::applicationDirPath()).toString();
-        if (!QDir(lastFolder).exists()) lastFolder = QCoreApplication::applicationDirPath();
+        QString defaultFolder = "D:/Software/IGI-Game";
+        QString lastFolder = QSettings(iniPath, QSettings::IniFormat).value("LastFolder", defaultFolder).toString();
+        if (!QDir(lastFolder).exists()) {
+            lastFolder = QDir(defaultFolder).exists() ? defaultFolder : QCoreApplication::applicationDirPath();
+        }
         fileModel->setRootPath(lastFolder);
         
         proxyModel = new QSortFilterProxyModel(this);
@@ -1216,6 +1219,8 @@ public:
         treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(lastFolder)));
         treeView->setColumnWidth(0, 250);
         treeView->setContextMenuPolicy(Qt::CustomContextMenu);
+        treeView->setSelectionMode(QAbstractItemView::ExtendedSelection); // Multi-selection
+        treeView->setSelectionBehavior(QAbstractItemView::SelectRows);
         leftLayout->addWidget(treeView);
 
         connect(treeView, &QTreeView::customContextMenuRequested, this, &MainWindow::showContextMenu);
@@ -1336,6 +1341,37 @@ public:
                 loadFile(fileModel->filePath(srcIndex));
             }
         });
+        
+        // Multi-select: copy/cut/paste using keyboard on selection
+        QShortcut *copySelShortcut = new QShortcut(QKeySequence::Copy, treeView);
+        connect(copySelShortcut, &QShortcut::activated, this, [this]() {
+            auto indexes = treeView->selectionModel()->selectedRows();
+            if (!indexes.isEmpty()) {
+                clipboardFilePath = fileModel->filePath(proxyModel->mapToSource(indexes.first()));
+                clipboardIsCut = false;
+                logMessage(QString("[INFO] Copied %1 item(s) to clipboard").arg(indexes.size()));
+            }
+        });
+        QShortcut *cutSelShortcut = new QShortcut(QKeySequence::Cut, treeView);
+        connect(cutSelShortcut, &QShortcut::activated, this, [this]() {
+            auto indexes = treeView->selectionModel()->selectedRows();
+            if (!indexes.isEmpty()) {
+                clipboardFilePath = fileModel->filePath(proxyModel->mapToSource(indexes.first()));
+                clipboardIsCut = true;
+                logMessage(QString("[INFO] Cut %1 item(s) to clipboard").arg(indexes.size()));
+            }
+        });
+        QShortcut *deleteSelShortcut = new QShortcut(QKeySequence::Delete, treeView);
+        connect(deleteSelShortcut, &QShortcut::activated, this, [this]() {
+            auto indexes = treeView->selectionModel()->selectedRows();
+            if (indexes.isEmpty()) return;
+            if (QMessageBox::question(this, "Delete", QString("Delete %1 selected item(s)?").arg(indexes.size())) != QMessageBox::Yes) return;
+            for (auto& idx : indexes) {
+                QString path = fileModel->filePath(proxyModel->mapToSource(idx));
+                if (QFileInfo(path).isDir()) QDir(path).removeRecursively();
+                else QFile(path).remove();
+            }
+        });
 
         connect(viewModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
             if (!currentFile.isEmpty()) {
@@ -1401,7 +1437,60 @@ private:
         QString ext = QFileInfo(path).suffix().toLower();
         bool isDir = fileModel->isDir(srcIndex);
 
+        // Get all selected items
+        auto selectedIndexes = treeView->selectionModel()->selectedRows();
+        bool multiSelect = selectedIndexes.size() > 1;
+
         QMenu menu;
+        
+        // Multi-selection operations
+        if (multiSelect) {
+            menu.addAction(QString("Selected %1 items").arg(selectedIndexes.size()))->setEnabled(false);
+            menu.addSeparator();
+            menu.addAction("Delete Selected", [this, selectedIndexes]() {
+                if (QMessageBox::question(this, "Delete", QString("Delete %1 selected items?").arg(selectedIndexes.size())) != QMessageBox::Yes) return;
+                for (auto& idx : selectedIndexes) {
+                    QString p = fileModel->filePath(proxyModel->mapToSource(idx));
+                    if (QFileInfo(p).isDir()) QDir(p).removeRecursively();
+                    else QFile(p).remove();
+                }
+            });
+            menu.addAction("Copy Selected", [this, selectedIndexes]() {
+                clipboardFilePath = fileModel->filePath(proxyModel->mapToSource(selectedIndexes.first()));
+                clipboardIsCut = false;
+                logMessage(QString("[INFO] Copied %1 item(s)").arg(selectedIndexes.size()));
+            });
+            menu.addAction("Cut Selected", [this, selectedIndexes]() {
+                clipboardFilePath = fileModel->filePath(proxyModel->mapToSource(selectedIndexes.first()));
+                clipboardIsCut = true;
+                logMessage(QString("[INFO] Cut %1 item(s)").arg(selectedIndexes.size()));
+            });
+            if (!clipboardFilePath.isEmpty()) {
+                menu.addAction("Paste Here", [this, path, isDir]() {
+                    QString destDir = isDir ? path : QFileInfo(path).absolutePath();
+                    QString dest = destDir + "/" + QFileInfo(clipboardFilePath).fileName();
+                    int copyCount = 1;
+                    while (QFileInfo::exists(dest) && (!clipboardIsCut || dest != clipboardFilePath)) {
+                        QString base = QFileInfo(clipboardFilePath).completeBaseName();
+                        QString suf = QFileInfo(clipboardFilePath).suffix();
+                        if (!suf.isEmpty()) suf = "." + suf;
+                        dest = destDir + "/" + base + (copyCount == 1 ? "_copy" : "_copy" + QString::number(copyCount)) + suf;
+                        copyCount++;
+                    }
+                    if (clipboardIsCut) {
+                        QFile::rename(clipboardFilePath, dest);
+                        clipboardFilePath = "";
+                    } else {
+                        QFile::copy(clipboardFilePath, dest);
+                    }
+                });
+            }
+            menu.exec(treeView->mapToGlobal(pos));
+            return;
+        }
+
+
+        // Single item context menu
         if (!isDir) {
             menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
@@ -1412,6 +1501,7 @@ private:
             viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
             menu.addSeparator();
         }
+
 
         menu.addSeparator();
         menu.addAction("Rename...", [this, path]() {
@@ -1681,7 +1771,8 @@ private:
         if (cmd == "tex decode-batch") {
             args.clear();
             args << "tex" << "decode" << info.absoluteDir().absolutePath() << "-o" << outDir << "--batch";
-        } else if (cmd == "mef bundle" || cmd == "mef bundle-all") {
+        } else if (cmd == "mef bundle") {
+            // Single MEF bundle
             QString target = currentFile;
             QString tempDir = QDir::tempPath() + "/igi_temp_mef";
             QString outBundle = tempDir + "/bundle";
@@ -1690,16 +1781,75 @@ private:
                 datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
             }
             if (datFile.isEmpty()) return;
-            
             QString texDir = globalTextureDir;
             if (texDir.isEmpty()) {
                 texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", outDir);
             }
             if (texDir.isEmpty()) return;
-            
             logMessage(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
             args.clear();
             args << "mef" << "bundle" << target << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
+        } else if (cmd == "mef bundle-all") {
+            // Bundle ALL .mef files in the folder one by one
+            QString folderPath = currentFile; // must be a directory
+            if (!QFileInfo(folderPath).isDir()) folderPath = QFileInfo(folderPath).absolutePath();
+            
+            QString datFile = globalLevelDatPath;
+            if (datFile.isEmpty()) {
+                datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", folderPath, "DAT Files (*.dat)");
+            }
+            if (datFile.isEmpty()) return;
+            QString texDir = globalTextureDir;
+            if (texDir.isEmpty()) {
+                texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", folderPath);
+            }
+            if (texDir.isEmpty()) return;
+            
+            QString tempDir = QDir::tempPath() + "/igi_temp_mef";
+            QString outBundle = tempDir + "/bundle";
+            QDir bundleDir(outBundle);
+            bundleDir.mkpath(".");
+            
+            QDir dir(folderPath);
+            QStringList mefs = dir.entryList(QStringList() << "*.mef" << "*.MEF", QDir::Files);
+            logMessage(QString("[INFO] Apply Textures to All: found %1 MEF files in %2").arg(mefs.size()).arg(folderPath));
+            
+            QString firstModel;
+            int bundled = 0;
+            for (const QString& mefName : mefs) {
+                QString mefPath = folderPath + "/" + mefName;
+                QString mefBase = QFileInfo(mefName).completeBaseName();
+                QStringList bargs;
+                bargs << "mef" << "bundle" << mefPath << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
+                logMessage(QString("> igi1conv %1").arg(bargs.join(" ")));
+                QProcess proc;
+                proc.setProgram(qApp->applicationFilePath());
+                proc.setArguments(bargs);
+                proc.start();
+                proc.waitForFinished(30000);
+                QString out = proc.readAllStandardOutput();
+                QString err = proc.readAllStandardError();
+                if (!out.isEmpty()) logMessage(out.trimmed());
+                if (!err.isEmpty()) logMessage("ERROR: " + err.trimmed());
+                
+                QString objPath = outBundle + "/" + mefBase + "/" + mefBase + ".obj";
+                if (firstModel.isEmpty() && QFile::exists(objPath)) {
+                    firstModel = objPath;
+                }
+                bundled++;
+            }
+            logMessage(QString("[INFO] Bundle-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
+            if (!firstModel.isEmpty()) {
+                modelViewer->loadModel(firstModel);
+                viewModeCombo->blockSignals(true);
+                viewModeCombo->setCurrentIndex(4);
+                viewModeCombo->blockSignals(false);
+                hideAllViewers();
+                modelViewer->show();
+                logMessage("[INFO] Loaded first bundled MEF in 3D View: " + firstModel);
+            }
+            return; // Already ran all sub-processes above
+
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
         } else {
