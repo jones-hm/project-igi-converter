@@ -2,7 +2,7 @@
 //
 // The suite spawns the freshly built igi1conv.exe (next to igi1conv_tests.exe) and
 // drives it against a corpus of real IGI game files.  The corpus directory is
-// taken from the IGI1CONV_TEST_CORPUS environment variable, defaulting to
+// taken from the IGI_GAME_PATH environment variable, defaulting to
 // D:\IGI1\full_test.  Tests that need a file which is absent are SKIPPED (not
 // failed) so the suite stays green on machines without the corpus.
 #pragma once
@@ -35,7 +35,7 @@ inline std::string IGI1ConvExe() {
 inline std::string CorpusDir() {
     char* env = nullptr;
     size_t len = 0;
-    if (_dupenv_s(&env, &len, "IGI1CONV_TEST_CORPUS") == 0 && env) {
+    if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
         std::string v(env);
         free(env);
         if (!v.empty()) return v;
@@ -179,5 +179,5 @@ protected:
     std::string var = ::igi1conv_test::FindCorpusFileByRegex(pattern);     \
     if (var.empty())                                                    \
         GTEST_SKIP() << "corpus file missing for regex: " << pattern    \
-                     << " (set IGI1CONV_TEST_CORPUS)"
+                     << " (set IGI_GAME_PATH)"
 
