@@ -560,35 +560,33 @@ private:
     void executeAction(int actionIndex) {
         if (currentFile.isEmpty()) return;
 
-        QString outArg = QFileInfo(currentFile).absolutePath();
+        QFileInfo info(currentFile);
+        QString outDir = info.absolutePath();
+        QString baseName = info.completeBaseName();
 
         QStringList args;
 
         if (currentExt == "qsc" && actionIndex == 1) {
-            args << "qsc" << "compile" << currentFile;
+            args << "qsc" << "compile" << currentFile << "-o" << (outDir + "/" + baseName + ".qvm");
         } else if (currentExt == "qvm" && actionIndex == 1) {
-            args << "qvm" << "decompile" << currentFile;
+            args << "qvm" << "decompile" << currentFile << "-o" << (outDir + "/" + baseName + ".qsc");
         } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 1) {
-            args << "tex" << "to-png" << currentFile;
+            args << "tex" << "to-png" << currentFile; // Omitting -o automatically places it in same dir with .png
         } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 2) {
-            args << "tex" << "to-tga" << currentFile;
+            args << "tex" << "to-tga" << currentFile; // Same for .tga
         } else if (currentExt == "mef" && actionIndex == 1) {
-            args << "mef" << "export" << currentFile;
+            args << "mef" << "export" << currentFile << "-o" << (outDir + "/" + baseName + ".obj");
         } else if (currentExt == "res" && actionIndex == 1) {
-            args << "res" << "extract" << currentFile;
+            args << "res" << "extract" << currentFile << "-o" << outDir;
         } else if (currentExt == "dat" && actionIndex == 1) {
             args << "dat" << "info" << currentFile;
         } else if (currentExt == "fnt" && actionIndex == 1) {
-            args << "fnt" << "export" << currentFile;
+            args << "fnt" << "export" << currentFile << "-o" << (outDir + "/" + baseName + ".png");
         } else if (currentExt == "fnt" && actionIndex == 2) {
             args << "fnt" << "info" << currentFile;
         }
 
         if (args.isEmpty()) return;
-
-        if (!outArg.isEmpty() && currentExt != "dat" && !(currentExt == "fnt" && actionIndex == 2)) {
-            args << "-o" << outArg;
-        }
 
         QProcess process;
         process.setProgram("igi1conv");
