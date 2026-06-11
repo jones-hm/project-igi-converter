@@ -67,3 +67,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# gtest discovery artifacts
+cmake_test_discovery_*.json
+bin/
