@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
@@ -90,7 +91,6 @@ static void LoadSelectedFile() {
             std::vector<uint8_t> rgba(tex.images[0].width * tex.images[0].height * 4, 255);
             const auto& img = tex.images[0];
             if (img.mode == 3) {
-                // ARGB8888 -> RGBA8888
                 for (size_t i = 0; i < img.pixels.size() / 4; ++i) {
                     rgba[i*4 + 0] = img.pixels[i*4 + 1]; // R
                     rgba[i*4 + 1] = img.pixels[i*4 + 2]; // G
@@ -98,7 +98,6 @@ static void LoadSelectedFile() {
                     rgba[i*4 + 3] = img.pixels[i*4 + 0]; // A
                 }
             } else if (img.mode == 2) {
-                // RGB565 -> RGBA8888
                 for (size_t i = 0; i < img.pixels.size() / 2; ++i) {
                     uint16_t p = (img.pixels[i*2+1] << 8) | img.pixels[i*2];
                     rgba[i*4 + 0] = ((p >> 11) & 0x1F) * 255 / 31;
@@ -135,6 +134,56 @@ static void glfw_error_callback(int error, const char* description)
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
 }
 
+static void ApplyModernTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 5.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 4.0f;
+    style.ScrollbarRounding = 9.0f;
+    style.GrabRounding = 4.0f;
+    style.TabRounding = 4.0f;
+    
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text]                   = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
+    colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    colors[ImGuiCol_WindowBg]               = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+    colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.11f, 0.11f, 0.14f, 0.92f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.25f, 0.25f, 0.27f, 0.50f);
+    colors[ImGuiCol_FrameBg]                = ImVec4(0.20f, 0.20f, 0.22f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.27f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.33f, 1.00f);
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.05f, 0.05f, 0.05f, 0.54f);
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.34f, 0.34f, 0.34f, 0.54f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.40f, 0.40f, 0.40f, 0.54f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.56f, 0.56f, 0.56f, 0.54f);
+    colors[ImGuiCol_CheckMark]              = ImVec4(0.33f, 0.67f, 0.86f, 1.00f);
+    colors[ImGuiCol_SliderGrab]             = ImVec4(0.34f, 0.34f, 0.34f, 0.54f);
+    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.56f, 0.56f, 0.56f, 0.54f);
+    colors[ImGuiCol_Button]                 = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
+    colors[ImGuiCol_ButtonActive]           = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
+    colors[ImGuiCol_Header]                 = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
+    colors[ImGuiCol_Separator]              = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
+    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
+    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
+    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+    colors[ImGuiCol_TabHovered]             = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
+    colors[ImGuiCol_TabActive]              = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+    colors[ImGuiCol_DockingPreview]         = ImVec4(0.33f, 0.67f, 0.86f, 0.70f);
+    colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+}
+
 int run_gui()
 {
     glfwSetErrorCallback(glfw_error_callback);
@@ -158,7 +207,13 @@ int run_gui()
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
-    ImGui::StyleColorsDark();
+    // Load custom font if available
+    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
+    if (!font) {
+        font = io.Fonts->AddFontDefault();
+    }
+
+    ApplyModernTheme();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -171,7 +226,41 @@ int run_gui()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
+        ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+        window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground;
+        
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("MainDockSpace", nullptr, window_flags);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
+
+        ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+        
+        static bool first_time = true;
+        if (first_time) {
+            first_time = false;
+            ImGui::DockBuilderRemoveNode(dockspace_id); 
+            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+            ImGuiID dock_main_id = dockspace_id;
+            ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
+            ImGuiID dock_id_bottom_left = ImGui::DockBuilderSplitNode(dock_id_left, ImGuiDir_Down, 0.30f, nullptr, &dock_id_left);
+
+            ImGui::DockBuilderDockWindow("Asset Browser", dock_id_left);
+            ImGui::DockBuilderDockWindow("Convert", dock_id_bottom_left);
+            ImGui::DockBuilderDockWindow("Viewer", dock_main_id);
+            ImGui::DockBuilderFinish(dockspace_id);
+        }
+        ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
+        ImGui::End();
 
         ImGui::Begin("Asset Browser");
         ImGui::Text("Current Dir: %s", current_dir.string().c_str());
@@ -259,7 +348,6 @@ int run_gui()
                         ImVec2 sp2 = ImVec2(pos.x + (p2.x + 1.0f) * 0.5f * avail.x, pos.y + (1.0f - p2.y) * 0.5f * avail.y);
                         ImVec2 sp3 = ImVec2(pos.x + (p3.x + 1.0f) * 0.5f * avail.x, pos.y + (1.0f - p3.y) * 0.5f * avail.y);
 
-                        // Backface culling
                         float area = (sp2.x - sp1.x) * (sp3.y - sp1.y) - (sp3.x - sp1.x) * (sp2.y - sp1.y);
                         if (area > 0) {
                             draw_list->AddTriangle(sp1, sp2, sp3, IM_COL32(0, 255, 0, 128));
@@ -286,22 +374,22 @@ int run_gui()
             for (auto& c : ext) c = tolower(c);
             
             if (ext == ".tex" || ext == ".spr" || ext == ".pic") {
-                if (ImGui::Button("Convert to PNG")) {
+                if (ImGui::Button("Convert to PNG", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv tex to-png \"" + selected_file.string() + "\"";
                     system(cmd.c_str());
                 }
             } else if (ext == ".qvm") {
-                if (ImGui::Button("Decompile to QSC")) {
+                if (ImGui::Button("Decompile to QSC", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv qvm decompile \"" + selected_file.string() + "\"";
                     system(cmd.c_str());
                 }
             } else if (ext == ".qsc") {
-                if (ImGui::Button("Compile to QVM")) {
+                if (ImGui::Button("Compile to QVM", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv qsc compile \"" + selected_file.string() + "\"";
                     system(cmd.c_str());
                 }
             } else if (ext == ".mef") {
-                if (ImGui::Button("Export to OBJ")) {
+                if (ImGui::Button("Export to OBJ", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv mef export \"" + selected_file.string() + "\"";
                     system(cmd.c_str());
                 }
@@ -310,7 +398,7 @@ int run_gui()
             ImGui::Separator();
             ImGui::TextWrapped("System commands will be executed in the background. Check CLI output for details.");
         } else {
-            ImGui::Text("Select a file to see conversion options.");
+            ImGui::TextWrapped("Select a file to see conversion options.");
         }
         ImGui::End();
 
