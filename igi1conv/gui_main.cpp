@@ -665,34 +665,35 @@ public:
             qApp->setPalette(darkPalette);
         });
 
-        QSettings settings("IGI1Conv", "GuiSettings");
+        QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        QSettings settings(iniPath, QSettings::IniFormat);
         globalLevelMtpPath = settings.value("LevelMTP", "").toString();
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* levelMenu = menuBar()->addMenu("&Level Settings");
-        levelMenu->addAction("Select Level MTP...", this, [this]() {
+        levelMenu->addAction("Select Level MTP...", this, [this, iniPath]() {
             globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
-            QSettings().setValue("LevelMTP", globalLevelMtpPath);
+            QSettings(iniPath, QSettings::IniFormat).setValue("LevelMTP", globalLevelMtpPath);
             consoleEdit->append("[INFO] Level MTP set to: " + globalLevelMtpPath);
         });
-        levelMenu->addAction("Select Level DAT...", this, [this]() {
+        levelMenu->addAction("Select Level DAT...", this, [this, iniPath]() {
             globalLevelDatPath = QFileDialog::getOpenFileName(this, "Select DAT", "", "DAT Files (*.dat)");
-            QSettings().setValue("LevelDAT", globalLevelDatPath);
+            QSettings(iniPath, QSettings::IniFormat).setValue("LevelDAT", globalLevelDatPath);
             consoleEdit->append("[INFO] Level DAT set to: " + globalLevelDatPath);
         });
-        levelMenu->addAction("Select Texture Directory...", this, [this]() {
+        levelMenu->addAction("Select Texture Directory...", this, [this, iniPath]() {
             globalTextureDir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
-            QSettings().setValue("TextureDir", globalTextureDir);
+            QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
             consoleEdit->append("[INFO] Texture Directory set to: " + globalTextureDir);
         });
-        levelMenu->addAction("Log Level: INFO", this, [this]() {
-            QSettings().setValue("LOGS_LEVEL", "INFO");
+        levelMenu->addAction("Log Level: INFO", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "INFO");
             consoleEdit->append("[INFO] LOGS_LEVEL set to INFO");
         });
-        levelMenu->addAction("Log Level: DEBUG", this, [this]() {
-            QSettings().setValue("LOGS_LEVEL", "DEBUG");
+        levelMenu->addAction("Log Level: DEBUG", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "DEBUG");
             consoleEdit->append("[INFO] LOGS_LEVEL set to DEBUG");
         });
 
@@ -1034,9 +1035,11 @@ private:
                 consoleEdit->append("[INFO] Level settings detected! Automatically converting MEF to OBJ and applying textures...");
                 QString tempDir = QDir::tempPath() + "/igi_temp_mef";
                 QDir().mkpath(tempDir);
+                QString baseName = QFileInfo(path).completeBaseName();
+                QString outDir = tempDir + "/bundle";
                 QString cmd = qApp->applicationFilePath();
-                QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << tempDir + "/model" << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
-                modelPath = tempDir + "/model.obj";
+                QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << outDir << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
+                modelPath = outDir + "/" + baseName + "/" + baseName + ".obj";
                 consoleEdit->append("[DEBUG] Temp bundled OBJ created at: " + modelPath);
             } else {
                 consoleEdit->append("[DEBUG] Level settings not fully configured, loading raw MEF: " + modelPath);
