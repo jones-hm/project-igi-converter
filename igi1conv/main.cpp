@@ -30,7 +30,7 @@ static void print_help()
         "Commands:\n"
         "  tex      TEX/SPR/PIC texture operations (decode, info, to-png, to-tga)\n"
         "  mef      MEF 3D mesh operations (export to OBJ, bundle, dump, info)\n"
-        "  qsc      QSC quest script (compile to QVM, validate)\n"
+        "  qsc      QSC QScript (compile to QVM, validate)\n"
         "  qvm      QVM bytecode (decompile to QSC, disasm, info)\n"
         "  res      RES archive (list, extract, compile, pack, unpack)\n"
         "  mtp      MTP terrain properties (dump to JSON, info, to-dat)\n"
@@ -43,12 +43,24 @@ static void print_help()
         "Run 'igi1conv <command> --help' for command-specific help.\n";
 }
 
+#include "gui_main.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 int main(int argc, char** argv)
 {
-    if (argc < 2)
+    if (argc < 2 || (argc == 2 && std::string(argv[1]) == "--gui"))
     {
-        print_help();
-        return 1;
+#ifdef _WIN32
+        HWND consoleWnd = GetConsoleWindow();
+        if (consoleWnd) {
+            ShowWindow(consoleWnd, SW_HIDE);
+        }
+#endif
+        return run_gui();
     }
 
     std::string cmd = argv[1];
