@@ -676,9 +676,14 @@ public:
         fileSearchBox->setPlaceholderText("Search file by name...");
         fileSearchBox->hide();
         leftLayout->addWidget(fileSearchBox);
+        proxyModel->setRecursiveFilteringEnabled(true);
 
-        connect(fileSearchBox, &QLineEdit::textChanged, proxyModel, &QSortFilterProxyModel::setFilterWildcard);
-
+        connect(fileSearchBox, &QLineEdit::textChanged, this, [this](const QString& text) {
+            proxyModel->setFilterWildcard(text);
+            QString currentRoot = fileModel->rootPath();
+            if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
+            treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+        });
         treeView = new QTreeView(leftWidget);
         treeView->setModel(proxyModel);
         treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(QDir::currentPath())));
@@ -701,6 +706,7 @@ public:
         textSearchLayout->addWidget(textSearchBox);
         textSearchLayout->addWidget(findNextBtn);
         textSearchWidget->hide();
+        connect(textSearchBox, &QLineEdit::returnPressed, findNextBtn, &QPushButton::click);
         connect(findNextBtn, &QPushButton::clicked, this, [this]() {
             QString query = textSearchBox->text();
             if (!query.isEmpty() && viewerEdit->isVisible()) {
