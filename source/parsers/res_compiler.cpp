@@ -47,7 +47,7 @@ static void WriteResChunk(std::ostream& os, uint32_t fourcc,
 bool RES_GenerateQSC(const std::string& inputDir, const std::string& outQscPath, const std::string& outResName, std::string& error) {
     std::ofstream out(outQscPath);
     if (!out) {
-        error = "Failed to create " + outQscPath;
+        error = "Failed to create " + outQscPath + " (errno=" + std::to_string(errno) + ")";
         return false;
     }
 

@@ -97,7 +97,7 @@ if (IGI1CONV_BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
     )
 
-    target_link_libraries(igi1conv_tests PRIVATE gtest_main)
+    target_link_libraries(igi1conv_tests PRIVATE gtest)
 
     include(GoogleTest)
     gtest_discover_tests(igi1conv_tests WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

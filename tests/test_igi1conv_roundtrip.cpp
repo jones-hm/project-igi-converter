@@ -23,7 +23,7 @@ TEST_F(IGI1ConvTest, RoundtripQvmQscQvm) {
 TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
     IGI1CONV_NEED(dat, "^(?!.*graph).*\\.dat$");
     TempDir tmp;
-    std::string mtp  = tmp / "\\.mtp$";
+    std::string mtp  = tmp / "common.mtp";
     std::string dat2 = tmp / "common_back.dat";
 
     ASSERT_EQ(RunIGI1Conv("dat to-mtp " + Q(dat) + " -o " + Q(mtp)), 0);
@@ -36,7 +36,7 @@ TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
 TEST_F(IGI1ConvTest, RoundtripMtpDatMtp) {
     IGI1CONV_NEED(mtp, "\\.mtp$");
     TempDir tmp;
-    std::string dat  = tmp / "^(?!.*graph).*\\.dat$";
+    std::string dat  = tmp / "common.dat";
     std::string mtp2 = tmp / "common_back.mtp";
 
     ASSERT_EQ(RunIGI1Conv("mtp to-dat " + Q(mtp) + " -o " + Q(dat)), 0);
