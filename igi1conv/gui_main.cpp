@@ -578,8 +578,12 @@ class ImageEditor : public QWidget {
 public:
     ImageEditor(QWidget* parent = nullptr) : QWidget(parent) {
         QVBoxLayout* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(2);
         
-        QHBoxLayout* tools = new QHBoxLayout();
+        QWidget* toolsWidget = new QWidget();
+        QHBoxLayout* tools = new QHBoxLayout(toolsWidget);
+        tools->setContentsMargins(5, 5, 5, 5);
         QPushButton* btnDraw = new QPushButton("Toggle Draw");
         QPushButton* btnClear = new QPushButton("Clear");
         QPushButton* btnSave = new QPushButton("Save");
@@ -587,7 +591,7 @@ public:
         tools->addWidget(btnClear);
         tools->addWidget(btnSave);
         tools->addStretch();
-        layout->addLayout(tools);
+        layout->addWidget(toolsWidget);
         
         imageLabel = new QLabel();
         imageLabel->setAlignment(Qt::AlignCenter);
@@ -600,8 +604,16 @@ public:
         connect(btnClear, &QPushButton::clicked, this, [this]() { currentImage = originalImage; updateDisplay(); });
         connect(btnSave, &QPushButton::clicked, this, [this]() {
             if (!currentPath.isEmpty() && !currentImage.isNull()) {
-                currentImage.save(currentPath);
-                QMessageBox::information(this, "Saved", "Image saved!");
+                QString savePath = currentPath;
+                if (savePath.endsWith(".tex", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
+                else if (savePath.endsWith(".spr", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
+                else if (savePath.endsWith(".pic", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
+                
+                if (currentImage.save(savePath)) {
+                    QMessageBox::information(this, "Saved", "Image saved to " + savePath);
+                } else {
+                    QMessageBox::critical(this, "Error", "Failed to save image to " + savePath);
+                }
             }
         });
         
@@ -790,8 +802,71 @@ public:
         connect(this, &QWidget::customContextMenuRequested, this, &CodeEditor::showCustomContextMenu);
     }
 
+    bool isHexMode = false;
+    
 protected:
     void keyPressEvent(QKeyEvent *e) override {
+        if (isHexMode) {
+            if (e->key() == Qt::Key_Left || e->key() == Qt::Key_Right || e->key() == Qt::Key_Up || e->key() == Qt::Key_Down) {
+                QTextEdit::keyPressEvent(e);
+                return;
+            }
+            if (e->text().isEmpty()) {
+                QTextEdit::keyPressEvent(e);
+                return;
+            }
+            if (e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Delete || e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+                return;
+            }
+            
+            QTextCursor cursor = textCursor();
+            int col = cursor.positionInBlock();
+            QString text = e->text();
+            QChar inputChar = text[0];
+            
+            if (col >= 60 && col < 76) {
+                // Editing ASCII
+                char c = inputChar.toLatin1();
+                QString hexStr = QString("%1").arg((quint8)c, 2, 16, QChar('0')).toUpper();
+                
+                int hexPos = 10 + (col - 60) * 3;
+                cursor.setPosition(cursor.block().position() + hexPos);
+                cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 2);
+                cursor.insertText(hexStr);
+                
+                cursor.setPosition(cursor.block().position() + col);
+                cursor.deleteChar();
+                cursor.insertText(QString((c >= 32 && c < 127) ? c : '.'));
+                
+                cursor.setPosition(cursor.block().position() + col + 1);
+                setTextCursor(cursor);
+            } else if (col >= 10 && col < 58) {
+                // Editing HEX
+                if (!inputChar.isLetterOrNumber() || !QString("0123456789ABCDEFabcdef").contains(inputChar)) return;
+                
+                inputChar = inputChar.toUpper();
+                cursor.deleteChar();
+                cursor.insertText(inputChar);
+                
+                int byteStartCol = 10 + ((col - 10) / 3) * 3;
+                cursor.setPosition(cursor.block().position() + byteStartCol);
+                cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 2);
+                QString byteHex = cursor.selectedText();
+                
+                char c = (char)byteHex.toInt(nullptr, 16);
+                
+                int asciiPos = 60 + (byteStartCol - 10) / 3;
+                cursor.setPosition(cursor.block().position() + asciiPos);
+                cursor.deleteChar();
+                cursor.insertText(QString((c >= 32 && c < 127) ? c : '.'));
+                
+                cursor.setPosition(cursor.block().position() + col + 1);
+                if ((col - 10) % 3 == 1) cursor.movePosition(QTextCursor::Right);
+                setTextCursor(cursor);
+            }
+            return;
+        }
+
         if (e->key() == Qt::Key_Tab) {
             QTextCursor cursor = textCursor();
             cursor.select(QTextCursor::WordUnderCursor);
@@ -1033,11 +1108,8 @@ public:
                 QStringList resFiles = texDir.entryList(QStringList() << "*.res", QDir::Files);
                 for (const QString& res : resFiles) {
                     QString resPath = texDir.absoluteFilePath(res);
-                    QString outPath = texDir.absoluteFilePath(QFileInfo(res).completeBaseName() + "_unpacked");
-                    if (!QDir(outPath).exists()) {
-                        logMessage("[INFO] Unpacking " + res + " to " + outPath + "...");
-                        QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "unpack" << resPath << outPath);
-                    }
+                    logMessage("[INFO] Extracting " + res + " to " + globalTextureDir + "...");
+                    QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "extract" << resPath << "-o" << globalTextureDir);
                 }
             }
         });
@@ -1192,6 +1264,15 @@ public:
         consoleEdit = new QTextEdit();
         consoleEdit->setReadOnly(true);
         consoleEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        consoleEdit->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(consoleEdit, &QTextEdit::customContextMenuRequested, this, [this](const QPoint& pos) {
+            QMenu menu;
+            menu.addAction("Copy", consoleEdit, &QTextEdit::copy);
+            menu.addAction("Select All", consoleEdit, &QTextEdit::selectAll);
+            menu.addSeparator();
+            menu.addAction("Clear", consoleEdit, &QTextEdit::clear);
+            menu.exec(consoleEdit->mapToGlobal(pos));
+        });
         debugLayout->addWidget(consoleEdit);
 
         rightLayout->addWidget(debugGroup, 1);
@@ -1433,6 +1514,7 @@ private:
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 viewerEdit->setPlainText(QString::fromUtf8(file.readAll()));
             }
+            viewerEdit->isHexMode = false;
             viewerEdit->setReadOnly(false);
             viewerEdit->show();
         } else if (mode == 2) { // Hex
@@ -1465,6 +1547,7 @@ private:
                 if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
                 viewerEdit->setPlainText(hexView);
             }
+            viewerEdit->isHexMode = true;
             viewerEdit->setReadOnly(false);
             viewerEdit->show();
         } else if (mode == 3) { // Image
