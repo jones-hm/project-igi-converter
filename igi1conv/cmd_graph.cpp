@@ -6,8 +6,8 @@ static void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  gconv graph export <input.dat> -o <output.json>\n"
-        "  gconv graph info <input.dat>\n";
+        "  igi1conv graph export <input.dat> -o <output.json>\n"
+        "  igi1conv graph info <input.dat>\n";
 }
 
 // Return value of named option, or nullptr.

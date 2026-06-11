@@ -8,13 +8,13 @@ static void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  gconv res list <input.res>\n"
-        "  gconv res extract <input.res> -o <output_dir>\n"
-        "  gconv res extract <input.res> --file <name> -o <output_dir>\n"
-        "  gconv res compile <file.qsc>\n"
-        "  gconv res pack <dir> <out.res>\n"
-        "  gconv res unpack <file.res> <dir>\n"
-        "  gconv res append <input.res> <file1> [file2...] -o <out.res> [--prefix LOCAL:textures/]\n";
+        "  igi1conv res list <input.res>\n"
+        "  igi1conv res extract <input.res> -o <output_dir>\n"
+        "  igi1conv res extract <input.res> --file <name> -o <output_dir>\n"
+        "  igi1conv res compile <file.qsc>\n"
+        "  igi1conv res pack <dir> <out.res>\n"
+        "  igi1conv res unpack <file.res> <dir>\n"
+        "  igi1conv res append <input.res> <file1> [file2...] -o <out.res> [--prefix LOCAL:textures/]\n";
 }
 
 // Return the value of a named option (e.g. "-o", "--file"), or nullptr if absent.
@@ -158,7 +158,7 @@ int cmd_res(int argc, char** argv)
     {
         if (argc < 4)
         {
-            std::cerr << "res pack: usage: gconv res pack <dir> <out.res>\n";
+            std::cerr << "res pack: usage: igi1conv res pack <dir> <out.res>\n";
             return 1;
         }
         std::string dir     = argv[2];
@@ -193,7 +193,7 @@ int cmd_res(int argc, char** argv)
     {
         if (argc < 4)
         {
-            std::cerr << "res unpack: usage: gconv res unpack <file.res> <dir>\n";
+            std::cerr << "res unpack: usage: igi1conv res unpack <file.res> <dir>\n";
             return 1;
         }
         std::string res_path = argv[2];
@@ -239,10 +239,10 @@ int cmd_res(int argc, char** argv)
     // ── append ────────────────────────────────────────────────────────────────
     if (sub == "append")
     {
-        // gconv res append <input.res> <file1> [file2...] -o <out.res> [--prefix <p>]
+        // igi1conv res append <input.res> <file1> [file2...] -o <out.res> [--prefix <p>]
         if (argc < 5)
         {
-            std::cerr << "res append: usage: gconv res append <input.res> <file1> [file2 ...] -o <out.res> [--prefix LOCAL:textures/]\n";
+            std::cerr << "res append: usage: igi1conv res append <input.res> <file1> [file2 ...] -o <out.res> [--prefix LOCAL:textures/]\n";
             return 1;
         }
         std::string src_res = argv[2];

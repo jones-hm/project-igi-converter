@@ -1,8 +1,8 @@
-// gconv_test_util.h — self-contained helpers for the gconv CLI test suite.
+// igi1conv_test_util.h — self-contained helpers for the igi1conv CLI test suite.
 //
-// The suite spawns the freshly built gconv.exe (next to gconv_tests.exe) and
+// The suite spawns the freshly built igi1conv.exe (next to igi1conv_tests.exe) and
 // drives it against a corpus of real IGI game files.  The corpus directory is
-// taken from the GCONV_TEST_CORPUS environment variable, defaulting to
+// taken from the IGI1CONV_TEST_CORPUS environment variable, defaulting to
 // D:\IGI1\full_test.  Tests that need a file which is absent are SKIPPED (not
 // failed) so the suite stays green on machines without the corpus.
 #pragma once
@@ -16,9 +16,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-namespace gconv_test {
+namespace igi1conv_test {
 
-// Directory of the running test executable (gconv.exe lives alongside it).
+// Directory of the running test executable (igi1conv.exe lives alongside it).
 inline std::string ExeDir() {
     char buf[MAX_PATH] = {};
     GetModuleFileNameA(nullptr, buf, MAX_PATH);
@@ -26,15 +26,15 @@ inline std::string ExeDir() {
     return p.parent_path().string();
 }
 
-inline std::string GConvExe() {
-    return ExeDir() + "\\gconv.exe";
+inline std::string IGI1ConvExe() {
+    return ExeDir() + "\\igi1conv.exe";
 }
 
 // Root of the test corpus (env override, else the canonical full_test dir).
 inline std::string CorpusDir() {
     char* env = nullptr;
     size_t len = 0;
-    if (_dupenv_s(&env, &len, "GCONV_TEST_CORPUS") == 0 && env) {
+    if (_dupenv_s(&env, &len, "IGI1CONV_TEST_CORPUS") == 0 && env) {
         std::string v(env);
         free(env);
         if (!v.empty()) return v;
@@ -53,7 +53,7 @@ public:
         char buf[MAX_PATH];
         GetTempPathA(MAX_PATH, buf);
         static unsigned counter = 0;
-        path_ = std::string(buf) + "gconv_test_" +
+        path_ = std::string(buf) + "igi1conv_test_" +
                 std::to_string(GetCurrentProcessId()) + "_" +
                 std::to_string(++counter);
         std::filesystem::create_directories(path_);
@@ -68,12 +68,12 @@ private:
     std::string path_;
 };
 
-// Run gconv.exe with the given (already-quoted where needed) argument string.
+// Run igi1conv.exe with the given (already-quoted where needed) argument string.
 // If captureOut is non-null, the child's stdout+stderr are written there.
 // Returns the process exit code, or -1 if the process could not be started.
-inline int RunGConv(const std::string& args, std::string* captureOut = nullptr,
+inline int RunIGI1Conv(const std::string& args, std::string* captureOut = nullptr,
                     DWORD timeoutMs = 30000) {
-    const std::string exePath = GConvExe();
+    const std::string exePath = IGI1ConvExe();
     std::string cmdLine = "\"" + exePath + "\" " + args;
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
@@ -141,21 +141,21 @@ inline bool NonEmptyFile(const std::string& p) {
     return std::filesystem::exists(p) && std::filesystem::file_size(p, ec) > 0;
 }
 
-// Base fixture: ensures gconv.exe exists.
-class GConvTest : public ::testing::Test {
+// Base fixture: ensures igi1conv.exe exists.
+class IGI1ConvTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        ASSERT_TRUE(std::filesystem::exists(GConvExe()))
-            << "gconv.exe not found next to test exe: " << GConvExe();
+        ASSERT_TRUE(std::filesystem::exists(IGI1ConvExe()))
+            << "igi1conv.exe not found next to test exe: " << IGI1ConvExe();
     }
 };
 
-} // namespace gconv_test
+} // namespace igi1conv_test
 
 // Declare a corpus path and SKIP the current test if the file is absent.
 // Used in a (void) test body so GTEST_SKIP returns from the test correctly.
-#define GCONV_NEED(var, rel)                                            \
-    std::string var = ::gconv_test::Corpus(rel);                        \
+#define IGI1CONV_NEED(var, rel)                                            \
+    std::string var = ::igi1conv_test::Corpus(rel);                        \
     if (!std::filesystem::exists(var))                                  \
         GTEST_SKIP() << "corpus file missing: " << var                 \
-                     << " (set GCONV_TEST_CORPUS)"
+                     << " (set IGI1CONV_TEST_CORPUS)"

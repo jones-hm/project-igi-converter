@@ -7,11 +7,11 @@ static void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  gconv mtp dump <input.mtp> [-o <output.json>]\n"
-        "  gconv mtp info <input.mtp>\n"
-        "  gconv mtp to-dat <input.mtp> [-o <out.dat>]\n"
-        "  gconv mtp repair <input.mtp>              (sync VNAM/GTT counts)\n"
-        "  gconv mtp sync <input.mtp> <input.dat>    (add DAT models missing from MTP)\n";
+        "  igi1conv mtp dump <input.mtp> [-o <output.json>]\n"
+        "  igi1conv mtp info <input.mtp>\n"
+        "  igi1conv mtp to-dat <input.mtp> [-o <out.dat>]\n"
+        "  igi1conv mtp repair <input.mtp>              (sync VNAM/GTT counts)\n"
+        "  igi1conv mtp sync <input.mtp> <input.dat>    (add DAT models missing from MTP)\n";
 }
 
 // Minimal JSON string escaping

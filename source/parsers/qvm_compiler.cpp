@@ -116,7 +116,7 @@ struct Gen {
       emitOp(QVMOpType::PUSHM);
       return;
     }
-    // PUSHB / PUSHW use SIGNED ranges to match legacy GConv output.
+    // PUSHB / PUSHW use SIGNED ranges to match legacy IGI1Conv output.
     // E.g. 255 must use PUSHW (4 bytes) — PUSHB would re-interpret as -1.
     if (v >= -128 && v <= 127) {
       emitOp(QVMOpType::PUSHB);
@@ -201,7 +201,7 @@ struct Gen {
       pushFloat(node.f_val);
       return;
     case NodeKind::BoolLit:
-      // Legacy GConv treats TRUE/FALSE as ordinary interned
+      // Legacy IGI1Conv treats TRUE/FALSE as ordinary interned
       // identifiers (resolved to runtime globals), NOT as PUSH1/0
       // literals. Match that to preserve identifier-pool parity.
       pushIdent(node.b_val ? "TRUE" : "FALSE");

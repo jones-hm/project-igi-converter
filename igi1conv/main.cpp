@@ -17,16 +17,16 @@
 //   3 = parse error
 //   4 = write error
 
-#ifndef GCONV_VERSION
-#define GCONV_VERSION "1.0.0"
+#ifndef IGI1CONV_VERSION
+#define IGI1CONV_VERSION "1.0.0"
 #endif
 
 static void print_help()
 {
     std::cout <<
-        "gconv v" GCONV_VERSION " \xe2\x80\x94 IGI Game Asset Converter\n"
+        "igi1conv v" IGI1CONV_VERSION " \xe2\x80\x94 IGI Game Asset Converter\n"
         "\n"
-        "Usage: gconv <command> [options]\n"
+        "Usage: igi1conv <command> [options]\n"
         "\n"
         "Commands:\n"
         "  tex      TEX/SPR/PIC texture operations (decode, info, to-png, to-tga)\n"
@@ -40,7 +40,7 @@ static void print_help()
         "  dat      DAT model-texture data (info, export, to-mtp)\n"
         "  fnt      FNT font file (info, export PNG)\n"
         "\n"
-        "Run 'gconv <command> --help' for command-specific help.\n";
+        "Run 'igi1conv <command> --help' for command-specific help.\n";
 }
 
 int main(int argc, char** argv)
@@ -61,7 +61,7 @@ int main(int argc, char** argv)
 
     if (cmd == "--version" || cmd == "-v")
     {
-        std::cout << "gconv version " GCONV_VERSION "\n";
+        std::cout << "igi1conv version " IGI1CONV_VERSION "\n";
         return 0;
     }
 
@@ -80,7 +80,7 @@ int main(int argc, char** argv)
     if (cmd == "dat")     return cmd_dat(sub_argc, sub_argv);
     if (cmd == "fnt")     return cmd_fnt(sub_argc, sub_argv);
 
-    std::cerr << "gconv: unknown command '" << cmd << "'\n";
-    std::cerr << "Run 'gconv --help' for usage.\n";
+    std::cerr << "igi1conv: unknown command '" << cmd << "'\n";
+    std::cerr << "Run 'igi1conv --help' for usage.\n";
     return 1;
 }
