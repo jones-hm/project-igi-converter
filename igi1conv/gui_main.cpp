@@ -22,6 +22,7 @@
 #include <QAction>
 #include <QFileDialog>
 #include <QMenu>
+#include <QMenuBar>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QOpenGLWidget>
@@ -39,7 +40,8 @@
 #include <algorithm>
 
 #include "tex_parser.h"
-#include "parsers/mef_parser.h"
+#include "mef_parser.h"
+#include "mef_native.h"
 
 class ModelViewer : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
@@ -63,28 +65,24 @@ public:
         QString ext = info.suffix().toLower();
         
         if (ext == "mef") {
-            MEFParser parser;
-            auto objects = parser.parse_file(path.toStdString());
-            for (const auto& obj : objects) {
-                for (const auto& f : obj.faces) {
-                    auto addVert = [&](int vIdx, int nIdx) {
-                        if (vIdx >= 0 && vIdx < obj.vertices.size()) {
-                            auto v = obj.vertices[vIdx];
-                            vertices.push_back(v[0]); vertices.push_back(v[1]); vertices.push_back(v[2]);
+            try {
+                ParsedGeometry geo = ParseMefFile(path.toStdString());
+                for (const auto& tri : geo.triangles) {
+                    auto addVert = [&](uint32_t idx) {
+                        if (idx < geo.vertices.size()) {
+                            const auto& v = geo.vertices[idx];
+                            vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
+                            normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
+                            uvs.push_back(v.uv.x); uvs.push_back(v.uv.y);
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
-                        }
-                        if (nIdx >= 0 && nIdx < obj.normals.size()) {
-                            auto n = obj.normals[nIdx];
-                            normals.push_back(n[0]); normals.push_back(n[1]); normals.push_back(n[2]);
-                        } else {
                             normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                            uvs.push_back(0); uvs.push_back(0);
                         }
-                        uvs.push_back(0); uvs.push_back(0);
                     };
-                    addVert(f.v0, f.n0); addVert(f.v1, f.n1); addVert(f.v2, f.n2);
+                    addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
                 }
-            }
+            } catch (...) {}
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;
@@ -122,8 +120,18 @@ public:
                         while (!mfile.atEnd()) {
                             QString mline = mfile.readLine().trimmed();
                             if (mline.startsWith("map_Kd ")) {
-                                QString texPath = info.absolutePath() + "/" + mline.mid(7).trimmed();
+                                QString texStr = mline.mid(7).trimmed();
+                                texStr.replace("\\", "/");
+                                QString texPath = info.absolutePath() + "/" + texStr;
                                 QImage img(texPath);
+                                if (img.isNull()) {
+                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).fileName();
+                                    img.load(texPath);
+                                }
+                                if (img.isNull()) {
+                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".png";
+                                    img.load(texPath);
+                                }
                                 if (!img.isNull()) {
                                     texture.reset(new QOpenGLTexture(img.mirrored()));
                                     texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
@@ -326,6 +334,49 @@ public:
         setWindowTitle("IGI Game Asset Converter (Qt Advanced UI)");
         resize(1200, 800);
 
+        // Standard Menu Bar
+        QMenu* fileMenu = menuBar()->addMenu("&File");
+        fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this]() {
+            QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
+            if (!dir.isEmpty()) {
+                fileModel->setRootPath(dir);
+                treeView->setRootIndex(fileModel->index(dir));
+            }
+        }, QKeySequence::Open);
+        
+        fileMenu->addAction(QIcon::fromTheme("document-save"), "&Save", this, [this]() {
+            if (viewerEdit->isVisible() && !currentFile.isEmpty() && !viewerEdit->isReadOnly()) {
+                QFile f(currentFile);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    f.write(viewerEdit->toPlainText().toUtf8());
+                    QMessageBox::information(this, "Saved", "File saved successfully!");
+                }
+            }
+        }, QKeySequence::Save);
+        
+        fileMenu->addSeparator();
+        fileMenu->addAction("E&xit", this, &QWidget::close, QKeySequence::Quit);
+
+        QMenu* editMenu = menuBar()->addMenu("&Edit");
+        editMenu->addAction("Undo", this, [this](){ viewerEdit->undo(); }, QKeySequence::Undo);
+        editMenu->addAction("Redo", this, [this](){ viewerEdit->redo(); }, QKeySequence::Redo);
+        editMenu->addSeparator();
+        editMenu->addAction("Cut", this, [this](){ viewerEdit->cut(); }, QKeySequence::Cut);
+        editMenu->addAction("Copy", this, [this](){ viewerEdit->copy(); }, QKeySequence::Copy);
+        editMenu->addAction("Paste", this, [this](){ viewerEdit->paste(); }, QKeySequence::Paste);
+
+        QMenu* viewMenu = menuBar()->addMenu("&View");
+        viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
+        viewMenu->addAction("Text View", [this]() { viewModeCombo->setCurrentIndex(1); });
+        viewMenu->addAction("Hex View", [this]() { viewModeCombo->setCurrentIndex(2); });
+        viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
+        viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
+
+        QMenu* helpMenu = menuBar()->addMenu("&Help");
+        helpMenu->addAction("About", this, [this]() {
+            QMessageBox::about(this, "About", "IGI Game Asset Converter (Qt)\nVersion 1.1\nAdvanced Edition\nWith MEF Native Viewer and full CLI action integration.");
+        });
+
         QToolBar* toolbar = addToolBar("Main Toolbar");
         QAction* openAction = toolbar->addAction("Open Folder");
         connect(openAction, &QAction::triggered, this, [this]() {
@@ -440,21 +491,31 @@ private:
         menu.addSeparator();
 
         if (ext == "tex" || ext == "spr" || ext == "pic") {
-            menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeAction(1); });
-            menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeAction(2); });
+            menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeCommand("tex to-png"); });
+            menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
+            menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
+            menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
         } else if (ext == "qsc") {
-            menu.addAction("Compile to QVM", [this, path]() { loadFile(path); executeAction(1); });
+            menu.addAction("Compile to QVM", [this, path]() { loadFile(path); executeCommand("qsc compile"); });
+            menu.addAction("Validate",       [this, path]() { loadFile(path); executeCommand("qsc validate"); });
         } else if (ext == "qvm") {
-            menu.addAction("Decompile to QSC", [this, path]() { loadFile(path); executeAction(1); });
+            menu.addAction("Decompile to QSC", [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
+            menu.addAction("Disasm",           [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
+            menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
-            menu.addAction("Export to OBJ", [this, path]() { loadFile(path); executeAction(1); });
+            menu.addAction("Export to OBJ",    [this, path]() { loadFile(path); executeCommand("mef export"); });
+            menu.addAction("Bundle OBJ+TEX",   [this, path]() { loadFile(path); executeCommand("mef bundle"); });
+            menu.addAction("Dump to TXT",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
+            menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("mef info"); });
         } else if (ext == "res") {
-            menu.addAction("Extract RES", [this, path]() { loadFile(path); executeAction(1); });
+            menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
+            menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
+            menu.addAction("Unpack",  [this, path]() { loadFile(path); executeCommand("res unpack"); });
         } else if (ext == "dat") {
-            menu.addAction("Dump DAT Info", [this, path]() { loadFile(path); executeAction(1); });
+            menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("dat info"); });
         } else if (ext == "fnt") {
-            menu.addAction("Export PNG", [this, path]() { loadFile(path); executeAction(1); });
-            menu.addAction("FNT Info", [this, path]() { loadFile(path); executeAction(2); });
+            menu.addAction("Export PNG", [this, path]() { loadFile(path); executeCommand("fnt export"); });
+            menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -487,6 +548,7 @@ private:
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 viewerEdit->setPlainText(QString::fromUtf8(file.readAll()));
             }
+            viewerEdit->setReadOnly(false);
             viewerEdit->show();
         } else if (mode == 2) { // Hex
             QFile file(path);
@@ -518,6 +580,7 @@ private:
                 if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
                 viewerEdit->setPlainText(hexView);
             }
+            viewerEdit->setReadOnly(true);
             viewerEdit->show();
         } else if (mode == 3) { // Image
             if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
@@ -557,33 +620,37 @@ private:
         }
     }
 
-    void executeAction(int actionIndex) {
+    void executeCommand(const QString& cmd) {
         if (currentFile.isEmpty()) return;
 
         QFileInfo info(currentFile);
         QString outDir = info.absolutePath();
         QString baseName = info.completeBaseName();
 
-        QStringList args;
+        QStringList args = cmd.split(" ", Qt::SkipEmptyParts);
 
-        if (currentExt == "qsc" && actionIndex == 1) {
-            args << "qsc" << "compile" << currentFile << "-o" << (outDir + "/" + baseName + ".qvm");
-        } else if (currentExt == "qvm" && actionIndex == 1) {
-            args << "qvm" << "decompile" << currentFile << "-o" << (outDir + "/" + baseName + ".qsc");
-        } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 1) {
-            args << "tex" << "to-png" << currentFile; // Omitting -o automatically places it in same dir with .png
-        } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 2) {
-            args << "tex" << "to-tga" << currentFile; // Same for .tga
-        } else if (currentExt == "mef" && actionIndex == 1) {
-            args << "mef" << "export" << currentFile << "-o" << (outDir + "/" + baseName + ".obj");
-        } else if (currentExt == "res" && actionIndex == 1) {
-            args << "res" << "extract" << currentFile << "-o" << outDir;
-        } else if (currentExt == "dat" && actionIndex == 1) {
-            args << "dat" << "info" << currentFile;
-        } else if (currentExt == "fnt" && actionIndex == 1) {
-            args << "fnt" << "export" << currentFile << "-o" << (outDir + "/" + baseName + ".png");
-        } else if (currentExt == "fnt" && actionIndex == 2) {
-            args << "fnt" << "info" << currentFile;
+        if (cmd == "tex decode-batch") {
+            args.clear();
+            args << "tex" << "decode" << info.absoluteDir().absolutePath() << "-o" << outDir << "--batch";
+        } else if (cmd == "mef bundle") {
+            QString outBundle = outDir + "/" + baseName + "_bundle";
+            QString datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
+            if (datFile.isEmpty()) return;
+            QString texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", outDir);
+            if (texDir.isEmpty()) return;
+            
+            args << currentFile << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
+        } else if (cmd == "res unpack") {
+            args << currentFile << (outDir + "/" + baseName + "_unpacked");
+        } else {
+            args << currentFile;
+            if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");
+            else if (cmd == "qvm decompile") args << "-o" << (outDir + "/" + baseName + ".qsc");
+            else if (cmd == "mef export") args << "-o" << (outDir + "/" + baseName + ".obj");
+            else if (cmd == "mef dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
+            else if (cmd == "res extract") args << "-o" << outDir;
+            else if (cmd == "fnt export") args << "-o" << (outDir + "/" + baseName + ".png");
+            else if (cmd == "qvm disasm") args << "-o" << (outDir + "/" + baseName + "_disasm.txt");
         }
 
         if (args.isEmpty()) return;
