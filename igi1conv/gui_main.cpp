@@ -65,9 +65,27 @@ static QImage loadImageSafe(const QString& path) {
     return img;
 }
 
+static QString formatJson(const QJsonObject& obj, int indent = 0) {
+    QString result;
+    QString ind(indent, ' ');
+    for (auto it = obj.begin(); it != obj.end(); ++it) {
+        if (it.value().isObject()) {
+            result += ind + it.key() + ":\n" + formatJson(it.value().toObject(), indent + 2);
+        } else if (it.value().isArray()) {
+            result += ind + it.key() + ": [Array]\n";
+        } else {
+            result += ind + it.key() + ": " + it.value().toVariant().toString() + "\n";
+        }
+    }
+    return result;
+}
+
 class ModelViewer : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
     QTextEdit* infoOverlay;
+    QString currentModelName;
+    QString currentModelId;
+    QString currentJsonInfo;
 
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
@@ -270,6 +288,7 @@ protected:
     }
 
     void updateModelInfo(const QString& baseName) {
+        currentModelId = baseName;
         if (baseName.isEmpty()) {
             infoOverlay->hide();
             return;
@@ -292,37 +311,26 @@ protected:
             }
         }
 
-        QString info = "Model ID: " + baseName + "\n\n";
-
         // Find Model Name from IGIModels.json
         QString modelName = "Unknown";
         for (const QJsonValue& val : modelsArray) {
             QJsonObject obj = val.toObject();
-            if (obj["ModelId"].toString() == baseName || obj["ModelId"].toString().toLower() == baseName.toLower()) {
+            if (obj["ModelId"].toString().toLower() == baseName.toLower()) {
                 modelName = obj["ModelName"].toString();
                 break;
             }
         }
-        info += "Model Name: " + modelName + "\n\n";
+        currentModelName = modelName;
 
-        // Find instances in IGIModelsAllLevel.json
-        info += "--- Level Instances ---\n";
-        int totalInstances = 0;
+        QJsonObject firstInstance;
+        bool found = false;
         
-        for (auto it = allLevelsObj.begin(); it != allLevelsObj.end(); ++it) {
-            QString levelName = it.key();
+        for (auto it = allLevelsObj.begin(); it != allLevelsObj.end() && !found; ++it) {
             QJsonObject levelObj = it.value().toObject();
-            
-            int levelInstances = 0;
-            QString levelDetails = "";
-
-            for (auto catIt = levelObj.begin(); catIt != levelObj.end(); ++catIt) {
-                QString catName = catIt.key();
+            for (auto catIt = levelObj.begin(); catIt != levelObj.end() && !found; ++catIt) {
                 QJsonArray items = catIt.value().toArray();
-                
                 for (const QJsonValue& itemVal : items) {
                     QJsonObject item = itemVal.toObject();
-                    
                     bool match = false;
                     if (item.contains("Model ID") && item["Model ID"].toString().toLower() == baseName.toLower()) {
                         match = true;
@@ -331,32 +339,21 @@ protected:
                     }
 
                     if (match) {
-                        levelInstances++;
-                        totalInstances++;
-                        if (levelInstances <= 5) {
-                            QString name = item["Name"].toString();
-                            if (name.isEmpty() && item.contains("Type")) name = item["Type"].toString();
-                            double px = item.contains("Pos X") ? item["Pos X"].toDouble() : item["Position"].toObject()["X"].toDouble();
-                            double py = item.contains("Pos Y") ? item["Pos Y"].toDouble() : item["Position"].toObject()["Y"].toDouble();
-                            double pz = item.contains("Pos Z") ? item["Pos Z"].toDouble() : item["Position"].toObject()["Z"].toDouble();
-                            levelDetails += QString("- %1 (%2)\n  Pos: %3, %4, %5\n")
-                                .arg(name).arg(catName).arg(px, 0, 'f', 1).arg(py, 0, 'f', 1).arg(pz, 0, 'f', 1);
-                        }
+                        firstInstance = item;
+                        found = true;
+                        break;
                     }
                 }
             }
-            if (levelInstances > 0) {
-                info += levelName + " (" + QString::number(levelInstances) + " instances):\n" + levelDetails;
-                if (levelInstances > 5) {
-                    info += QString("  ... and %1 more in this level\n").arg(levelInstances - 5);
-                }
-                info += "\n";
-            }
         }
 
-        info += "Total Instances in Game: " + QString::number(totalInstances) + "\n";
+        currentJsonInfo = "";
+        if (found) {
+            currentJsonInfo = formatJson(firstInstance);
+        }
 
-        infoOverlay->setPlainText(info);
+        infoOverlay->setPlainText(QString("Model Name: %1\nModel ID: %2\n\n--- Properties ---\n%3")
+            .arg(currentModelName).arg(currentModelId).arg(currentJsonInfo));
         infoOverlay->show();
     }
 
@@ -478,13 +475,19 @@ protected:
         }
         update();
         lastPos = event->pos();
-        QToolTip::showText(event->globalPos(), QString("Rot X/Alpha: %1\nRot Y/Beta: %2\nRot Z/Gamma: %3\nPan: %4, %5\nZoom: %6")
-                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1).arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(zoom, 0, 'f', 1), this);
+        QToolTip::showText(event->globalPos(), QString("%1. ID: %2\nPosition XYZ: %3, %4, %5\nOrientation ABG: %6, %7, %8")
+                           .arg(currentModelName).arg(currentModelId)
+                           .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
+                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1), this);
     }
     void wheelEvent(QWheelEvent *event) override {
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
         if (zoom < 0.1f) zoom = 0.1f;
         update();
+        QToolTip::showText(event->globalPosition().toPoint(), QString("%1. ID: %2\nPosition XYZ: %3, %4, %5\nOrientation ABG: %6, %7, %8")
+                           .arg(currentModelName).arg(currentModelId)
+                           .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
+                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1), this);
     }
 
 private:
