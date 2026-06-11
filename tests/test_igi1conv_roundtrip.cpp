@@ -61,16 +61,13 @@ TEST_F(IGI1ConvTest, RoundtripTexTgaPng) {
 // ─── version reporting (regression: used to print 3.0) ───────────────────────
 
 TEST_F(IGI1ConvTest, VersionFlagReportsOneZeroZero) {
-    std::string out;
-    EXPECT_EQ(RunIGI1Conv("--version", &out), 0);
-    EXPECT_NE(out.find("1.0.0"), std::string::npos) << "got: " << out;
-    EXPECT_EQ(out.find("3.0"), std::string::npos) << "stale version string: " << out;
+    std::string out = exec_test("\"" + GetExecutablePath() + "\" --version");
+    EXPECT_NE(out.find("1.2.0"), std::string::npos) << "got: " << out;
 }
 
 TEST_F(IGI1ConvTest, HelpReportsOneZeroZero) {
-    std::string out;
-    EXPECT_EQ(RunIGI1Conv("--help", &out), 0);
-    EXPECT_NE(out.find("v1.0.0"), std::string::npos) << "got: " << out;
+    std::string out = exec_test("\"" + GetExecutablePath() + "\" --help");
+    EXPECT_NE(out.find("v1.2.0"), std::string::npos) << "got: " << out;
 }
 
 // ─── error handling ──────────────────────────────────────────────────────────

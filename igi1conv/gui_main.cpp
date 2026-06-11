@@ -591,7 +591,7 @@ public:
                 treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
                 QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
                 if (tempDir.exists()) tempDir.removeRecursively();
-                if (consoleEdit) consoleEdit->append("[INFO] Workspace changed. Smart cache cleared.");
+                logMessage("[INFO] Workspace changed. Smart cache cleared.");
             }
         }, QKeySequence::Open);
         
@@ -682,19 +682,19 @@ public:
         levelMenu->addAction("Select Level MTP...", this, [this, iniPath]() {
             globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
             QSettings(iniPath, QSettings::IniFormat).setValue("LevelMTP", globalLevelMtpPath);
-            consoleEdit->append("[INFO] Level MTP set to: " + globalLevelMtpPath);
+            logMessage("[INFO] Level MTP set to: " + globalLevelMtpPath);
         });
         levelMenu->addAction("Select Level DAT...", this, [this, iniPath]() {
             globalLevelDatPath = QFileDialog::getOpenFileName(this, "Select DAT", "", "DAT Files (*.dat)");
             QSettings(iniPath, QSettings::IniFormat).setValue("LevelDAT", globalLevelDatPath);
-            consoleEdit->append("[INFO] Level DAT set to: " + globalLevelDatPath);
+            logMessage("[INFO] Level DAT set to: " + globalLevelDatPath);
         });
         levelMenu->addAction("Select Texture Directory...", this, [this, iniPath]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
             if (!dir.isEmpty()) {
                 globalTextureDir = dir;
                 QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
-                consoleEdit->append("[INFO] Texture Directory set to: " + globalTextureDir);
+                logMessage("[INFO] Texture Directory set to: " + globalTextureDir);
                 
                 QDir texDir(globalTextureDir);
                 QStringList resFiles = texDir.entryList(QStringList() << "*.res", QDir::Files);
@@ -702,7 +702,7 @@ public:
                     QString resPath = texDir.absoluteFilePath(res);
                     QString outPath = texDir.absoluteFilePath(QFileInfo(res).completeBaseName() + "_unpacked");
                     if (!QDir(outPath).exists()) {
-                        consoleEdit->append("[INFO] Unpacking " + res + " to " + outPath + "...");
+                        logMessage("[INFO] Unpacking " + res + " to " + outPath + "...");
                         QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "unpack" << resPath << outPath);
                     }
                 }
@@ -712,25 +712,25 @@ public:
         QMenu* logsMenu = settingsMenu->addMenu("&Logs");
         logsMenu->addAction("Enable Logs", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_ENABLED", true);
-            consoleEdit->append("[INFO] Logs Enabled");
+            logMessage("[INFO] Logs Enabled");
         });
         logsMenu->addAction("Disable Logs", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_ENABLED", false);
-            consoleEdit->append("[INFO] Logs Disabled");
+            logMessage("[INFO] Logs Disabled");
         });
 
         QMenu* logsLevelMenu = logsMenu->addMenu("Logs Level");
         logsLevelMenu->addAction("INFO", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "INFO");
-            consoleEdit->append("[INFO] LOGS_LEVEL set to INFO");
+            logMessage("[INFO] LOGS_LEVEL set to INFO");
         });
         logsLevelMenu->addAction("DEBUG", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "DEBUG");
-            consoleEdit->append("[INFO] LOGS_LEVEL set to DEBUG");
+            logMessage("[INFO] LOGS_LEVEL set to DEBUG");
         });
         logsLevelMenu->addAction("ERROR", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "ERROR");
-            consoleEdit->append("[INFO] LOGS_LEVEL set to ERROR");
+            logMessage("[INFO] LOGS_LEVEL set to ERROR");
         });
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
@@ -847,6 +847,20 @@ public:
         QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
         if (tempDir.exists()) tempDir.removeRecursively();
         QMainWindow::closeEvent(event);
+    }
+
+    void logMessage(const QString& msg) {
+        if (consoleEdit) {
+            consoleEdit->append(msg);
+        }
+        QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        if (QSettings(iniPath, QSettings::IniFormat).value("LOGS_ENABLED", true).toBool()) {
+            QFile logFile(QCoreApplication::applicationDirPath() + "/igi1conv.logs");
+            if (logFile.open(QIODevice::Append | QIODevice::Text)) {
+                QTextStream out(&logFile);
+                out << msg << "\n";
+            }
+        }
     }
 
 private:
@@ -966,7 +980,17 @@ private:
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
             menu.addAction("Export to OBJ",    [this, path]() { loadFile(path); executeCommand("mef export"); });
-            menu.addAction("Apply Textures (This MEF)", [this, path]() { loadFile(path); executeCommand("mef bundle"); });
+            menu.addAction("Apply Textures (This MEF)", [this, path]() {
+                currentFile = path;
+                executeCommand("mef bundle");
+                QString baseName = QFileInfo(path).completeBaseName();
+                QString modelPath = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
+                if (QFile::exists(modelPath)) {
+                    modelViewer->loadModel(modelPath);
+                    modelViewer->show();
+                    logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
+                }
+            });
             menu.addAction("Apply Textures (All in Folder)", [this, path]() {
                 currentFile = QFileInfo(path).absolutePath();
                 executeCommand("mef bundle-all");
@@ -1117,7 +1141,8 @@ private:
             args << "tex" << "decode" << info.absoluteDir().absolutePath() << "-o" << outDir << "--batch";
         } else if (cmd == "mef bundle" || cmd == "mef bundle-all") {
             QString target = currentFile;
-            QString outBundle = outDir + "/bundle";
+            QString tempDir = QDir::tempPath() + "/igi_temp_mef";
+            QString outBundle = tempDir + "/bundle";
             QString datFile = globalLevelDatPath;
             if (datFile.isEmpty()) {
                 datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
@@ -1130,7 +1155,7 @@ private:
             }
             if (texDir.isEmpty()) return;
             
-            consoleEdit->append(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
+            logMessage(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
             args.clear();
             args << "mef" << "bundle" << target << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
         } else if (cmd == "res unpack") {
