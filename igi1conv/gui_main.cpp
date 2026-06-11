@@ -630,7 +630,21 @@ public:
         viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
         viewMenu->addSeparator();
         viewMenu->addAction("Light Theme", [this]() {
-            qApp->setPalette(qApp->style()->standardPalette());
+            QPalette lightPalette;
+            lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+            lightPalette.setColor(QPalette::WindowText, Qt::black);
+            lightPalette.setColor(QPalette::Base, Qt::white);
+            lightPalette.setColor(QPalette::AlternateBase, QColor(240, 240, 240));
+            lightPalette.setColor(QPalette::ToolTipBase, Qt::white);
+            lightPalette.setColor(QPalette::ToolTipText, Qt::black);
+            lightPalette.setColor(QPalette::Text, Qt::black);
+            lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
+            lightPalette.setColor(QPalette::ButtonText, Qt::black);
+            lightPalette.setColor(QPalette::BrightText, Qt::red);
+            lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
+            lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
+            lightPalette.setColor(QPalette::HighlightedText, Qt::white);
+            qApp->setPalette(lightPalette);
         });
         viewMenu->addAction("Dark Theme", [this]() {
             QPalette darkPalette;
@@ -652,7 +666,18 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Asset Converter (Qt)\nVersion 1.2.0\nAdvanced Edition\nWith MEF Native Viewer and full CLI action integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.2.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+        });
+
+        QMenu* levelMenu = menuBar()->addMenu("&Level Settings");
+        levelMenu->addAction("Select Level MTP...", this, [this]() {
+            globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
+        });
+        levelMenu->addAction("Select Level DAT...", this, [this]() {
+            globalLevelDatPath = QFileDialog::getOpenFileName(this, "Select DAT", "", "DAT Files (*.dat)");
+        });
+        levelMenu->addAction("Select Texture Directory...", this, [this]() {
+            globalTextureDir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
         });
 
         QToolBar* toolbar = addToolBar("Main Toolbar");
@@ -786,6 +811,9 @@ private:
     QString currentExt;
     QString clipboardFilePath;
     bool clipboardIsCut = false;
+    QString globalLevelMtpPath;
+    QString globalLevelDatPath;
+    QString globalTextureDir;
 
     void hideAllViewers() {
         viewerEdit->hide();
@@ -811,23 +839,23 @@ private:
         viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
         menu.addSeparator();
 
-        QMenu* editFileMenu = menu.addMenu("File Operations");
-        editFileMenu->addAction("Rename...", [this, path]() {
+        menu.addSeparator();
+        menu.addAction("Rename...", [this, path]() {
             bool ok;
             QString newName = QInputDialog::getText(this, "Rename File", "New name:", QLineEdit::Normal, QFileInfo(path).fileName(), &ok);
             if (ok && !newName.isEmpty()) {
                 QFile::rename(path, QFileInfo(path).absolutePath() + "/" + newName);
             }
         });
-        editFileMenu->addAction("Delete", [this, path]() {
+        menu.addAction("Delete", [this, path]() {
             if (QMessageBox::question(this, "Delete", "Are you sure you want to delete " + QFileInfo(path).fileName() + "?") == QMessageBox::Yes) {
                 QFile(path).remove();
             }
         });
-        editFileMenu->addAction("Cut", [this, path]() { clipboardFilePath = path; clipboardIsCut = true; });
-        editFileMenu->addAction("Copy", [this, path]() { clipboardFilePath = path; clipboardIsCut = false; });
+        menu.addAction("Cut", [this, path]() { clipboardFilePath = path; clipboardIsCut = true; });
+        menu.addAction("Copy", [this, path]() { clipboardFilePath = path; clipboardIsCut = false; });
         if (!clipboardFilePath.isEmpty()) {
-            editFileMenu->addAction("Paste Here", [this, path]() {
+            menu.addAction("Paste Here", [this, path]() {
                 QString dest = QFileInfo(path).absolutePath() + "/" + QFileInfo(clipboardFilePath).fileName();
                 QFile::copy(clipboardFilePath, dest);
                 if (clipboardIsCut) {
@@ -852,15 +880,21 @@ private:
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
             menu.addAction("Export to OBJ",    [this, path]() { loadFile(path); executeCommand("mef export"); });
-            menu.addAction("Bundle OBJ+TEX",   [this, path]() { loadFile(path); executeCommand("mef bundle"); });
+            menu.addAction("Apply Textures",   [this, path]() { loadFile(path); executeCommand("mef bundle"); });
             menu.addAction("Dump to TXT",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("mef info"); });
         } else if (ext == "res") {
             menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
             menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
             menu.addAction("Unpack",  [this, path]() { loadFile(path); executeCommand("res unpack"); });
+        } else if (ext == "mtp") {
+            menu.addAction("Export to DAT", [this, path]() { loadFile(path); executeCommand("mtp to-dat"); });
+            menu.addAction("Dump",          [this, path]() { loadFile(path); executeCommand("mtp dump"); });
+            menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("mtp info"); });
         } else if (ext == "dat") {
-            menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("dat info"); });
+            menu.addAction("Export to MTP", [this, path]() { loadFile(path); executeCommand("dat to-mtp"); });
+            menu.addAction("Export",        [this, path]() { loadFile(path); executeCommand("dat export"); });
+            menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("dat info"); });
         } else if (ext == "fnt") {
             menu.addAction("Export PNG", [this, path]() { loadFile(path); executeCommand("fnt export"); });
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
@@ -892,7 +926,13 @@ private:
         }
 
         if (mode == 1) { // Text
-            QFile file(path);
+            QString loadPath = path;
+            if (currentExt == "qvm") {
+                loadPath = QDir::tempPath() + "/igi_temp.qsc";
+                QString cmd = "igi1conv qvm decompile \"" + path + "\" -o \"" + loadPath + "\"";
+                system(cmd.toUtf8().constData());
+            }
+            QFile file(loadPath);
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 viewerEdit->setPlainText(QString::fromUtf8(file.readAll()));
             }
@@ -967,7 +1007,15 @@ private:
             }
             imageLabel->show();
         } else if (mode == 4) { // 3D
-            modelViewer->loadModel(path);
+            QString modelPath = path;
+            if (currentExt == "mef" && !globalLevelDatPath.isEmpty() && !globalTextureDir.isEmpty()) {
+                QString tempDir = QDir::tempPath() + "/igi_temp_mef";
+                QDir().mkpath(tempDir);
+                QString cmd = "igi1conv mef bundle \"" + path + "\" -o \"" + tempDir + "/model\" --dat \"" + globalLevelDatPath + "\" --texdir \"" + globalTextureDir + "\"";
+                system(cmd.toUtf8().constData());
+                modelPath = tempDir + "/model.obj";
+            }
+            modelViewer->loadModel(modelPath);
             modelViewer->show();
         }
     }
