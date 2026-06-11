@@ -50,6 +50,9 @@
 #include <QStyleFactory>
 #include <QTextDocument>
 #include <QPainter>
+#include <QScrollArea>
+#include <QSpinBox>
+#include <QColorDialog>
 
 #include <vector>
 #include <fstream>
@@ -103,22 +106,42 @@ public:
 
     QTextEdit* infoOverlay;
     QLabel* coordsOverlay;
+    QLabel* statsOverlay;
     QString currentModelName;
     QString currentModelId;
     QString currentJsonInfo;
     std::vector<SubMesh> submeshes;
     std::map<QString, std::shared_ptr<QOpenGLTexture>> textureCache;
+    bool showWireframe = false;
+    bool showGrid = true;
+    QString currentModelPath;
 
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
+        
         infoOverlay = new QTextEdit(this);
         infoOverlay->setReadOnly(true);
-        infoOverlay->setStyleSheet("background-color: rgba(0, 20, 0, 200); color: #00FF66; border: 1px solid #00FF66; padding: 5px; font-family: monospace;");
+        infoOverlay->setStyleSheet("background-color: rgba(0,20,0,210); color: #00FF88; border: 1px solid #00AA44; padding:6px; font-family:'Consolas',monospace; font-size:11px;");
         infoOverlay->hide();
 
         coordsOverlay = new QLabel(this);
-        coordsOverlay->setStyleSheet("background-color: rgba(0, 0, 0, 150); color: white; padding: 4px; font-family: monospace;");
+        coordsOverlay->setStyleSheet("background-color: rgba(0,0,0,180); color:#AAFFCC; padding:4px 8px; font-family:'Consolas',monospace; font-size:10px; border:1px solid #444;");
         coordsOverlay->hide();
+        
+        statsOverlay = new QLabel(this);
+        statsOverlay->setStyleSheet("background-color: rgba(0,0,0,160); color:#FFCC66; padding:4px 8px; font-family:'Consolas',monospace; font-size:10px; border:1px solid #444; border-radius:3px;");
+        statsOverlay->hide();
+        
+        // Keyboard shortcuts for 3D viewer
+        auto addKey = [this](Qt::Key k, auto fn) {
+            QShortcut* sc = new QShortcut(k, this);
+            sc->setContext(Qt::WidgetShortcut);
+            connect(sc, &QShortcut::activated, fn);
+        };
+        addKey(Qt::Key_W, [this]() { showWireframe = !showWireframe; update(); });
+        addKey(Qt::Key_G, [this]() { showGrid = !showGrid; update(); });
+        addKey(Qt::Key_R, [this]() { rotX=rotY=rotZ=0; transX=transY=0; zoom=3.0f; update(); updateCoordsOverlay(); });
+        addKey(Qt::Key_I, [this]() { infoOverlay->setVisible(!infoOverlay->isVisible()); });
     }
     
     ~ModelViewer() {
@@ -161,10 +184,13 @@ public:
 
     void updateCoordsOverlay() {
         if (!coordsOverlay->isVisible()) coordsOverlay->show();
-        coordsOverlay->setText(QString("%1. ID: %2\nPos: %3, %4, %5\nRot: %6, %7, %8")
+        coordsOverlay->setText(QString(
+            "Model: %1 (%2)\n"
+            "Cam: X%3 Y%4 Z%5 | Rot: X%6 Y%7 Z%8\n"
+            "[W]ire [G]rid [R]eset [I]nfo | LMB=Rotate RMB=Pan Wheel=Zoom")
             .arg(currentModelName).arg(currentModelId)
-            .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
-            .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1));
+            .arg(transX, 0,'f',2).arg(transY, 0,'f',2).arg(-zoom, 0,'f',2)
+            .arg(rotX, 0,'f',0).arg(rotY, 0,'f',0).arg(rotZ, 0,'f',0));
     }
 
     void loadModel(const QString& path) {
@@ -172,6 +198,7 @@ public:
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
         textureCache.clear();
+        currentModelPath = path;
         
         QFileInfo info(path);
         QString ext = info.suffix().toLower();
@@ -420,9 +447,21 @@ protected:
             currentJsonInfo = formatJson(firstInstance);
         }
 
-        infoOverlay->setPlainText(QString("Model Name: %1\nModel ID: %2\n\n--- Properties ---\n%3")
-            .arg(currentModelName).arg(currentModelId).arg(currentJsonInfo));
+        infoOverlay->setPlainText(QString(
+            "=== %1 (%2) ===\n"
+            "%3\n"
+            "--- DAT Properties ---\n%4")
+            .arg(currentModelName).arg(currentModelId)
+            .arg(currentModelPath.isEmpty() ? "" : "Path: " + currentModelPath)
+            .arg(currentJsonInfo));
         infoOverlay->show();
+        
+        // Update stats overlay
+        statsOverlay->show();
+        statsOverlay->setText(QString("V:%1 T:%2 M:%3")
+            .arg(vertices.size()/3)
+            .arg(vertices.size()/9)
+            .arg(submeshes.size()));
     }
 
     void initializeGL() override {
@@ -526,8 +565,9 @@ protected:
 
     void resizeEvent(QResizeEvent *event) override {
         QOpenGLWidget::resizeEvent(event);
-        infoOverlay->setGeometry(10, 10, 320, height() - 20);
-        coordsOverlay->setGeometry(10, height() - 70, 400, 60);
+        infoOverlay->setGeometry(10, 10, 300, height() - 90);
+        coordsOverlay->setGeometry(0, height() - 72, width(), 72);
+        statsOverlay->setGeometry(width() - 250, 10, 240, 60);
     }
 
     float wrapAngle(float angle) {
@@ -579,54 +619,132 @@ public:
     ImageEditor(QWidget* parent = nullptr) : QWidget(parent) {
         QVBoxLayout* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(2);
+        layout->setSpacing(0);
         
+        // ── Toolbar row ──────────────────────────────────────
         QWidget* toolsWidget = new QWidget();
+        toolsWidget->setStyleSheet("background:#2a2a2a; border-bottom:1px solid #444;");
         QHBoxLayout* tools = new QHBoxLayout(toolsWidget);
-        tools->setContentsMargins(5, 5, 5, 5);
-        QPushButton* btnDraw = new QPushButton("Toggle Draw");
-        QPushButton* btnClear = new QPushButton("Clear");
-        QPushButton* btnSave = new QPushButton("Save");
+        tools->setContentsMargins(6, 4, 6, 4);
+        tools->setSpacing(4);
+        
+        auto mkBtn = [](const QString& text, const QString& tip = "") {
+            QPushButton* b = new QPushButton(text);
+            b->setToolTip(tip);
+            b->setFixedHeight(26);
+            b->setStyleSheet("QPushButton{background:#3a3a3a;color:#ddd;border:1px solid #555;border-radius:3px;padding:2px 8px;}"
+                             "QPushButton:hover{background:#4a4a4a;}"
+                             "QPushButton:checked{background:#0066aa;border-color:#0088cc;}");
+            b->setCheckable(true);
+            return b;
+        };
+        auto mkBtnNorm = [](const QString& text, const QString& tip = "") {
+            QPushButton* b = new QPushButton(text);
+            b->setToolTip(tip);
+            b->setFixedHeight(26);
+            b->setStyleSheet("QPushButton{background:#3a3a3a;color:#ddd;border:1px solid #555;border-radius:3px;padding:2px 8px;}"
+                             "QPushButton:hover{background:#4a4a4a;}");
+            return b;
+        };
+        
+        btnDraw    = mkBtn("✏ Draw",   "Toggle pencil tool [D]");
+        btnEraser  = mkBtn("⌫ Erase",  "Toggle eraser tool [E]");
+        QPushButton* btnColor  = mkBtnNorm("🎨 Color",  "Pick pen color");
+        QPushButton* btnFit    = mkBtnNorm("⊡ Fit",     "Fit to window");
+        QPushButton* btnZoomIn = mkBtnNorm("+ Zoom",    "Zoom in");
+        QPushButton* btnZoomOut= mkBtnNorm("- Zoom",    "Zoom out");
+        QPushButton* btnClear  = mkBtnNorm("⟳ Reset",  "Reset to original");
+        QPushButton* btnSave   = mkBtnNorm("💾 Save",  "Save (Ctrl+S)");
+        
+        // Pen size spinner
+        QLabel* lblSize = new QLabel("Size:");
+        lblSize->setStyleSheet("color:#aaa; font-size:11px;");
+        QSpinBox* penSizeSpin = new QSpinBox();
+        penSizeSpin->setRange(1, 40);
+        penSizeSpin->setValue(3);
+        penSizeSpin->setFixedWidth(50);
+        penSizeSpin->setFixedHeight(24);
+        penSizeSpin->setStyleSheet("background:#333;color:#ddd;border:1px solid #555;border-radius:2px;");
+        
+        // Info label
+        infoLabel = new QLabel("No image");
+        infoLabel->setStyleSheet("color:#888;font-size:10px;font-family:Consolas;");
+        
         tools->addWidget(btnDraw);
+        tools->addWidget(btnEraser);
+        tools->addWidget(lblSize);
+        tools->addWidget(penSizeSpin);
+        tools->addWidget(btnColor);
+        tools->addSpacing(10);
+        tools->addWidget(btnFit);
+        tools->addWidget(btnZoomIn);
+        tools->addWidget(btnZoomOut);
+        tools->addSpacing(10);
         tools->addWidget(btnClear);
         tools->addWidget(btnSave);
         tools->addStretch();
+        tools->addWidget(infoLabel);
         layout->addWidget(toolsWidget);
         
+        // ── Scroll area for zoomable canvas ──────────────────
+        scrollArea = new QScrollArea();
+        scrollArea->setAlignment(Qt::AlignCenter);
+        scrollArea->setStyleSheet("background:#1a1a1a; border:none;");
         imageLabel = new QLabel();
         imageLabel->setAlignment(Qt::AlignCenter);
-        layout->addWidget(imageLabel, 1);
+        imageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        scrollArea->setWidget(imageLabel);
+        scrollArea->setWidgetResizable(false);
+        layout->addWidget(scrollArea, 1);
         
-        connect(btnDraw, &QPushButton::clicked, this, [this, btnDraw]() { 
-            isDrawing = !isDrawing; 
-            btnDraw->setText(isDrawing ? "Stop Drawing" : "Toggle Draw");
+        // ── Connect buttons ───────────────────────────────────
+        connect(btnDraw, &QPushButton::clicked, this, [this]() {
+            if (btnDraw->isChecked()) { isDrawing = true; isErasing = false; btnEraser->setChecked(false); }
+            else { isDrawing = false; }
         });
+        connect(btnEraser, &QPushButton::clicked, this, [this]() {
+            if (btnEraser->isChecked()) { isErasing = true; isDrawing = false; btnDraw->setChecked(false); }
+            else { isErasing = false; }
+        });
+        connect(btnColor, &QPushButton::clicked, this, [this]() {
+            QColor c = QColorDialog::getColor(penColor, this, "Pick Pen Color");
+            if (c.isValid()) penColor = c;
+        });
+        connect(btnFit, &QPushButton::clicked, this, [this]() {
+            if (!currentImage.isNull()) {
+                zoomFactor = std::min(
+                    (double)scrollArea->width()  / currentImage.width(),
+                    (double)scrollArea->height() / currentImage.height());
+                updateDisplay();
+            }
+        });
+        connect(btnZoomIn,  &QPushButton::clicked, this, [this]() { zoomFactor = qMin(zoomFactor * 1.25, 8.0); updateDisplay(); });
+        connect(btnZoomOut, &QPushButton::clicked, this, [this]() { zoomFactor = qMax(zoomFactor / 1.25, 0.1); updateDisplay(); });
+        connect(penSizeSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) { penSize = v; });
         connect(btnClear, &QPushButton::clicked, this, [this]() { currentImage = originalImage; updateDisplay(); });
         connect(btnSave, &QPushButton::clicked, this, [this]() {
             if (!currentPath.isEmpty() && !currentImage.isNull()) {
-                QString savePath = currentPath;
-                bool isGameFormat = savePath.endsWith(".tex", Qt::CaseInsensitive) || 
-                                    savePath.endsWith(".spr", Qt::CaseInsensitive) || 
-                                    savePath.endsWith(".pic", Qt::CaseInsensitive);
-                
+                bool isGameFormat = currentPath.endsWith(".tex", Qt::CaseInsensitive)
+                                 || currentPath.endsWith(".spr", Qt::CaseInsensitive)
+                                 || currentPath.endsWith(".pic", Qt::CaseInsensitive);
                 if (isGameFormat) {
-                    if (saveAsTex(currentImage, savePath)) {
-                        QMessageBox::information(this, "Saved", "Texture saved back to game format: " + savePath);
-                    } else {
-                        QMessageBox::critical(this, "Error", "Failed to save texture to " + savePath);
-                    }
+                    if (saveAsTex(currentImage, currentPath))
+                        QMessageBox::information(this, "Saved", "Saved to game format:\n" + currentPath);
+                    else
+                        QMessageBox::critical(this, "Error", "Failed to save:\n" + currentPath);
                 } else {
-                    if (currentImage.save(savePath)) {
-                        QMessageBox::information(this, "Saved", "Image saved to " + savePath);
-                    } else {
-                        QMessageBox::critical(this, "Error", "Failed to save image to " + savePath);
-                    }
+                    if (currentImage.save(currentPath))
+                        QMessageBox::information(this, "Saved", "Saved:\n" + currentPath);
+                    else
+                        QMessageBox::critical(this, "Error", "Failed to save:\n" + currentPath);
                 }
             }
         });
         
         imageLabel->installEventFilter(this);
+        scrollArea->viewport()->installEventFilter(this);
     }
+
     
     bool saveAsTex(const QImage& img, const QString& outPath) {
         // Write a valid LOOP v11 TEX file: 32-byte header + ARGB8888 pixels
@@ -681,17 +799,25 @@ public:
         currentPath = path;
         originalImage = img;
         currentImage = img;
+        zoomFactor = 1.0;
         updateDisplay();
+        if (infoLabel) {
+            infoLabel->setText(QString("%1x%2 | %3")
+                .arg(img.width()).arg(img.height())
+                .arg(QFileInfo(path).fileName()));
+        }
     }
     
     void clear() {
         imageLabel->clear();
         currentPath.clear();
         currentImage = QImage();
+        if (infoLabel) infoLabel->setText("No image");
     }
 
     bool eventFilter(QObject* obj, QEvent* event) override {
-        if (obj == imageLabel && isDrawing && !currentImage.isNull()) {
+        // Drawing on the image label
+        if (obj == imageLabel && (isDrawing || isErasing) && !currentImage.isNull()) {
             if (event->type() == QEvent::MouseButtonPress) {
                 QMouseEvent* me = static_cast<QMouseEvent*>(event);
                 lastPoint = getMappedPoint(me->pos());
@@ -702,7 +828,13 @@ public:
                 if (drawingNow) {
                     QPoint pt = getMappedPoint(me->pos());
                     QPainter painter(&currentImage);
-                    painter.setPen(QPen(Qt::red, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    painter.setRenderHint(QPainter::Antialiasing);
+                    if (isErasing) {
+                        painter.setCompositionMode(QPainter::CompositionMode_Source);
+                        painter.setPen(QPen(Qt::transparent, penSize * 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    } else {
+                        painter.setPen(QPen(penColor, penSize, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    }
                     painter.drawLine(lastPoint, pt);
                     lastPoint = pt;
                     updateDisplay();
@@ -710,6 +842,16 @@ public:
                 return true;
             } else if (event->type() == QEvent::MouseButtonRelease) {
                 drawingNow = false;
+                return true;
+            }
+        }
+        // Zoom with Ctrl+Wheel on scroll viewport
+        if (obj == scrollArea->viewport() && event->type() == QEvent::Wheel) {
+            QWheelEvent* we = static_cast<QWheelEvent*>(event);
+            if (we->modifiers() & Qt::ControlModifier) {
+                double factor = (we->angleDelta().y() > 0) ? 1.15 : (1.0/1.15);
+                zoomFactor = qBound(0.1, zoomFactor * factor, 8.0);
+                updateDisplay();
                 return true;
             }
         }
@@ -724,32 +866,39 @@ protected:
     
 private:
     void updateDisplay() {
-        if (!currentImage.isNull() && imageLabel->width() > 0 && imageLabel->height() > 0) {
-            imageLabel->setPixmap(QPixmap::fromImage(currentImage).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        }
+        if (currentImage.isNull()) return;
+        int dw = (int)(currentImage.width()  * zoomFactor);
+        int dh = (int)(currentImage.height() * zoomFactor);
+        imageLabel->setFixedSize(dw, dh);
+        imageLabel->setPixmap(QPixmap::fromImage(currentImage).scaled(dw, dh, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
     
     QPoint getMappedPoint(const QPoint& p) {
-        if (imageLabel->pixmap().isNull()) return p;
-        QRect r = imageLabel->rect();
-        int w = currentImage.width();
-        int h = currentImage.height();
-        QSize scaledSize = currentImage.size().scaled(r.size(), Qt::KeepAspectRatio);
-        int offsetX = (r.width() - scaledSize.width()) / 2;
-        int offsetY = (r.height() - scaledSize.height()) / 2;
-        int x = (p.x() - offsetX) * w / scaledSize.width();
-        int y = (p.y() - offsetY) * h / scaledSize.height();
-        return QPoint(x, y);
+        if (currentImage.isNull()) return p;
+        int dw = (int)(currentImage.width()  * zoomFactor);
+        int dh = (int)(currentImage.height() * zoomFactor);
+        int x = (int)((double)p.x() / dw * currentImage.width());
+        int y = (int)((double)p.y() / dh * currentImage.height());
+        return QPoint(qBound(0,x,currentImage.width()-1), qBound(0,y,currentImage.height()-1));
     }
     
-    QLabel* imageLabel;
+    QLabel*      imageLabel  = nullptr;
+    QLabel*      infoLabel   = nullptr;
+    QScrollArea* scrollArea  = nullptr;
+    QPushButton* btnDraw     = nullptr;
+    QPushButton* btnEraser   = nullptr;
     QImage originalImage;
     QImage currentImage;
     QString currentPath;
-    bool isDrawing = false;
+    bool isDrawing  = false;
+    bool isErasing  = false;
     bool drawingNow = false;
     QPoint lastPoint;
+    QColor penColor = Qt::red;
+    int    penSize  = 3;
+    double zoomFactor = 1.0;
 };
+
 
 class QscSyntaxHighlighter : public QSyntaxHighlighter {
 public:
@@ -1013,7 +1162,70 @@ public:
         proxyModel->setSourceModel(fileModel);
         proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
-        // Standard Menu Bar
+        // ─── Model Search Toolbar ───────────────────────────────────────────
+        QToolBar* searchToolBar = addToolBar("Model Search");
+        searchToolBar->setMovable(false);
+        searchToolBar->setStyleSheet("QToolBar{background:#252525;border-bottom:1px solid #444;spacing:4px;padding:2px 6px;}");
+        
+        QLabel* lblSearch = new QLabel("🔍 Model:");
+        lblSearch->setStyleSheet("color:#ccc;font-size:11px;");
+        searchToolBar->addWidget(lblSearch);
+        
+        QLineEdit* modelSearchBox = new QLineEdit();
+        modelSearchBox->setPlaceholderText("Search by name or ID (e.g. 'Jones' or '000_01_1' or '435')...");
+        modelSearchBox->setMinimumWidth(380);
+        modelSearchBox->setMaximumWidth(500);
+        modelSearchBox->setFixedHeight(24);
+        modelSearchBox->setStyleSheet("background:#333;color:#eee;border:1px solid #555;border-radius:3px;padding:2px 6px;font-family:Consolas;font-size:11px;");
+        searchToolBar->addWidget(modelSearchBox);
+        
+        QLabel* modelSearchResult = new QLabel("  Type to search...");
+        modelSearchResult->setStyleSheet("color:#888;font-size:11px;font-family:Consolas;min-width:300px;");
+        searchToolBar->addWidget(modelSearchResult);
+        
+        // Load IGIModels.json for bidirectional search
+        connect(modelSearchBox, &QLineEdit::textChanged, this, [this, modelSearchResult, iniPath](const QString& query) {
+            if (query.trimmed().isEmpty()) {
+                modelSearchResult->setText("  Type to search...");
+                modelSearchResult->setStyleSheet("color:#888;font-size:11px;font-family:Consolas;min-width:300px;");
+                return;
+            }
+            
+            static QJsonArray s_modelsArr;
+            static bool s_loaded = false;
+            if (!s_loaded) {
+                s_loaded = true;
+                QFile f(QCoreApplication::applicationDirPath() + "/IGIModels.json");
+                if (f.open(QIODevice::ReadOnly)) {
+                    s_modelsArr = QJsonDocument::fromJson(f.readAll()).array();
+                }
+            }
+            
+            QString q = query.trimmed().toLower();
+            QStringList results;
+            for (const QJsonValue& v : s_modelsArr) {
+                QJsonObject obj = v.toObject();
+                QString id   = obj["ModelId"].toString();
+                QString name = obj["ModelName"].toString();
+                bool idMatch   = id.toLower().contains(q) || id.left(3).toLower() == q.left(3);
+                bool nameMatch = name.toLower().contains(q);
+                if (idMatch || nameMatch) {
+                    results << QString("%1 → %2").arg(id, name);
+                    if (results.size() >= 8) break;
+                }
+            }
+            
+            if (results.isEmpty()) {
+                modelSearchResult->setText("  No results for: " + query);
+                modelSearchResult->setStyleSheet("color:#ff6666;font-size:11px;font-family:Consolas;min-width:300px;");
+            } else {
+                modelSearchResult->setText("  " + results.join("  |  "));
+                modelSearchResult->setStyleSheet("color:#66FFAA;font-size:11px;font-family:Consolas;min-width:300px;");
+                // Also log top matches
+                logMessage("[SEARCH] Query: " + query + "\n  " + results.join("\n  "));
+            }
+        });
+
         QMenu* fileMenu = menuBar()->addMenu("&File");
         fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this, iniPath]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
@@ -1643,47 +1855,54 @@ private:
                 executeCommand("mef info");
             });
             menu.addAction("Texture Map", [this, path]() {
-                // Show texture mapping from DAT for this MEF
                 QString baseName = QFileInfo(path).completeBaseName();
                 if (globalLevelDatPath.isEmpty()) {
-                    QMessageBox::warning(this, "No Level Set", "Please set a Level path in Settings > Level first.");
+                    logMessage("[ERROR] No Level Set. Please set a Level path in Settings > Level first.");
                     return;
                 }
+                
+                // 1. Get Texture Map from DAT export (JSON)
                 QProcess proc;
                 proc.setProgram(qApp->applicationFilePath());
-                proc.setArguments(QStringList() << "dat" << "info" << globalLevelDatPath);
+                proc.setArguments(QStringList() << "dat" << "export" << globalLevelDatPath);
                 proc.start();
                 proc.waitForFinished(10000);
                 QString datOut = proc.readAllStandardOutput();
                 
-                // Parse the DAT output for this model's textures
                 QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
-                bool inModel = false;
-                int texCount = 0;
-                for (const QString& line : datOut.split('\n')) {
-                    if (line.contains(baseName, Qt::CaseInsensitive)) {
-                        inModel = true;
-                        report += line.trimmed() + "\n";
-                    } else if (inModel && (line.startsWith("  tex[") || line.contains("texture"))) {
-                        report += line.trimmed() + "\n";
-                        texCount++;
-                    } else if (inModel && !line.trimmed().isEmpty() && !line.startsWith(" ")) {
-                        inModel = false;
-                    }
-                }
-                if (texCount == 0) report += "(No texture mapping found in DAT for this model)\n";
                 
-                // Also show MEF's own material count
+                // Quick hacky JSON extraction for the specific model
+                int modelIdx = datOut.indexOf(QString("\"modelName\": \"%1\"").arg(baseName), 0, Qt::CaseInsensitive);
+                if (modelIdx != -1) {
+                    int texStart = datOut.indexOf("\"textures\": [", modelIdx);
+                    if (texStart != -1) {
+                        int texEnd = datOut.indexOf("]", texStart);
+                        QString texArr = datOut.mid(texStart + 12, texEnd - texStart - 12);
+                        report += "Textures mapped in DAT:\n" + texArr.replace("\"", "").trimmed() + "\n";
+                    } else {
+                        report += "No textures found in DAT for this model.\n";
+                    }
+                } else {
+                    report += "(No texture mapping found in DAT for this model)\n";
+                }
+                
+                // 2. Dump MEF to ASCII to show internal materials and ATTA positions
                 QProcess mefProc;
                 mefProc.setProgram(qApp->applicationFilePath());
-                mefProc.setArguments(QStringList() << "mef" << "info" << path);
+                mefProc.setArguments(QStringList() << "mef" << "dump" << path);
                 mefProc.start();
                 mefProc.waitForFinished(5000);
                 QString mefOut = mefProc.readAllStandardOutput();
-                report += "\n=== MEF Native Info ===\n" + mefOut;
+                
+                report += "\n=== MEF Internal Info (Materials & ATTA) ===\n";
+                QStringList mefLines = mefOut.split('\n');
+                for (const QString& line : mefLines) {
+                    if (line.startsWith("material") || line.startsWith("ATTA") || line.startsWith("attachment")) {
+                        report += line.trimmed() + "\n";
+                    }
+                }
                 
                 logMessage(report);
-                QMessageBox::information(this, "Texture Map: " + baseName, report);
             });
             menu.addAction("Apply Textures (This MEF)", [this, path]() {
                 currentFile = path;
