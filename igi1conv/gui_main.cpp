@@ -5,6 +5,7 @@
 #include <sstream>
 #include <memory>
 #include <array>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -22,11 +23,12 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "tinygltf/stb_image.h"
+
 namespace fs = std::filesystem;
 
 static fs::path current_dir = fs::current_path();
 static fs::path selected_file;
-static std::string viewer_text;
 static GLuint current_texture = 0;
 static int current_tex_w = 0, current_tex_h = 0;
 static bool show_image = false;
@@ -37,10 +39,13 @@ static float mef_rot_x = 0.0f;
 static float mef_rot_y = 0.0f;
 static float mef_zoom = 1.0f;
 
+static std::vector<uint8_t> current_binary;
+static bool show_hex = false;
+
+static std::vector<char> text_buffer(10 * 1024 * 1024, 0); // 10MB text buffer
 static std::string console_output;
 static char output_dir_buf[512] = "";
 
-// Helper to execute command and return output
 static std::string exec(const char* cmd) {
 #ifdef _WIN32
     std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd, "r"), _pclose);
@@ -77,9 +82,12 @@ static void LoadTexture(const uint8_t* rgba, int w, int h) {
 }
 
 static void LoadSelectedFile() {
-    viewer_text.clear();
+    text_buffer[0] = '\0';
     show_image = false;
     show_mef = false;
+    show_hex = false;
+    current_binary.clear();
+    
     if (current_texture != 0) {
         glDeleteTextures(1, &current_texture);
         current_texture = 0;
@@ -93,18 +101,32 @@ static void LoadSelectedFile() {
     
     if (ext == ".qvm") {
         QVMFile qvm = QVM_Parse(selected_file.string());
+        std::string dec;
         if (qvm.valid) {
-            viewer_text = QVM_DecompileToString(qvm);
-            if (viewer_text.empty()) viewer_text = "// Decompilation failed";
+            dec = QVM_DecompileToString(qvm);
+            if (dec.empty()) dec = "// Decompilation failed";
         } else {
-            viewer_text = "Failed to parse QVM:\n" + qvm.error;
+            dec = "Failed to parse QVM:\n" + qvm.error;
         }
-    } else if (ext == ".qsc" || ext == ".txt" || ext == ".json" || ext == ".md" || ext == ".h" || ext == ".cpp") {
+        strncpy(text_buffer.data(), dec.c_str(), text_buffer.size() - 1);
+    } else if (ext == ".qsc" || ext == ".txt" || ext == ".json" || ext == ".md" || ext == ".h" || ext == ".cpp" || ext == ".dat") {
         std::ifstream ifs(selected_file, std::ios::binary);
         if (ifs) {
             std::ostringstream ss;
             ss << ifs.rdbuf();
-            viewer_text = ss.str();
+            std::string content = ss.str();
+            strncpy(text_buffer.data(), content.c_str(), text_buffer.size() - 1);
+        }
+    } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") {
+        int w, h, channels;
+        uint8_t* data = stbi_load(selected_file.string().c_str(), &w, &h, &channels, 4);
+        if (data) {
+            LoadTexture(data, w, h);
+            show_image = true;
+            stbi_image_free(data);
+        } else {
+            std::string err = "Failed to load image:\n" + std::string(stbi_failure_reason());
+            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
         }
     } else if (ext == ".tex" || ext == ".spr" || ext == ".pic") {
         TEXFile tex = TEX_Parse(selected_file.string());
@@ -129,25 +151,74 @@ static void LoadSelectedFile() {
             }
             LoadTexture(rgba.data(), img.width, img.height);
             show_image = true;
-            viewer_text = "Image Loaded: " + std::to_string(img.width) + "x" + std::to_string(img.height);
         } else {
-            viewer_text = "Failed to parse image:\n" + tex.error;
+            std::string err = "Failed to parse image:\n" + tex.error;
+            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
         }
     } else if (ext == ".mef") {
         try {
             current_mef = ParseMefFile(selected_file.string());
             show_mef = true;
-            viewer_text = "MEF Loaded: " + std::to_string(current_mef.vertices.size()) + " vertices, " + 
-                          std::to_string(current_mef.triangles.size()) + " triangles.";
             mef_rot_x = 0.0f;
             mef_rot_y = 0.0f;
             mef_zoom = 1.0f;
         } catch (std::exception& e) {
-            viewer_text = std::string("Failed to parse MEF:\n") + e.what();
+            std::string err = std::string("Failed to parse MEF:\n") + e.what();
+            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
         }
     } else {
-        viewer_text = "Preview not supported for " + ext + "\n(Binary or unknown format)";
+        std::ifstream ifs(selected_file, std::ios::binary);
+        if (ifs) {
+            current_binary = std::vector<uint8_t>(std::istreambuf_iterator<char>(ifs), {});
+            show_hex = true;
+        } else {
+            std::string err = "Preview not supported for " + ext + "\n(Binary or unknown format)";
+            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
+        }
     }
+}
+
+static void DrawHexViewer(const char* label, const std::vector<uint8_t>& data) {
+    ImGui::BeginChild(label, ImVec2(0, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    if (data.empty()) { ImGui::Text("File is empty."); ImGui::EndChild(); return; }
+
+    ImGuiListClipper clipper;
+    clipper.Begin((int)((data.size() + 15) / 16));
+    while (clipper.Step()) {
+        for (int line_i = clipper.DisplayStart; line_i < clipper.DisplayEnd; line_i++) {
+            size_t offset = (size_t)line_i * 16;
+            ImGui::Text("%08zX: ", offset);
+            ImGui::SameLine();
+
+            for (int n = 0; n < 16; n++) {
+                if (n > 0 && n % 4 == 0) ImGui::SameLine();
+                else if (n > 0) ImGui::SameLine(0, 4);
+
+                if (offset + n < data.size()) {
+                    ImGui::Text("%02X", data[offset + n]);
+                } else {
+                    ImGui::Text("  ");
+                }
+            }
+
+            ImGui::SameLine(0, 10);
+            ImGui::Text("| ");
+            ImGui::SameLine(0, 0);
+
+            char ascii[17];
+            for (int n = 0; n < 16; n++) {
+                if (offset + n < data.size()) {
+                    uint8_t c = data[offset + n];
+                    ascii[n] = (c >= 32 && c < 127) ? c : '.';
+                } else {
+                    ascii[n] = ' ';
+                }
+            }
+            ascii[16] = '\0';
+            ImGui::Text("%s", ascii);
+        }
+    }
+    ImGui::EndChild();
 }
 
 static void glfw_error_callback(int error, const char* description)
@@ -232,6 +303,9 @@ int run_gui()
     if (!font) {
         font = io.Fonts->AddFontDefault();
     }
+    // Fixed width font for hex viewer
+    ImFont* hex_font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 16.0f);
+    if (!hex_font) hex_font = font;
 
     ApplyModernTheme();
 
@@ -398,8 +472,12 @@ int run_gui()
                 }
             } else if (show_image && current_texture != 0) {
                 ImGui::Image((void*)(intptr_t)current_texture, ImVec2(current_tex_w, current_tex_h));
+            } else if (show_hex) {
+                ImGui::PushFont(hex_font);
+                DrawHexViewer("HexView", current_binary);
+                ImGui::PopFont();
             } else {
-                ImGui::InputTextMultiline("##source", &viewer_text[0], viewer_text.capacity(), ImVec2(-1.0f, -1.0f), ImGuiInputTextFlags_ReadOnly);
+                ImGui::InputTextMultiline("##source", text_buffer.data(), text_buffer.size(), ImVec2(-1.0f, -1.0f));
             }
         } else {
             ImGui::Text("No file selected.");
@@ -461,6 +539,16 @@ int run_gui()
                     std::string cmd = "igi1conv dat info \"" + selected_file.string() + "\"";
                     console_output = exec(cmd.c_str());
                 }
+            } else if (ext == ".fnt") {
+                if (ImGui::Button("Export PNG", ImVec2(-1, 0))) {
+                    std::string cmd = "igi1conv fnt export \"" + selected_file.string() + "\"";
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
+                }
+                if (ImGui::Button("FNT Info", ImVec2(-1, 0))) {
+                    std::string cmd = "igi1conv fnt info \"" + selected_file.string() + "\"";
+                    console_output = exec(cmd.c_str());
+                }
             } else {
                 ImGui::Text("No specific conversions for this format.");
             }
@@ -468,9 +556,11 @@ int run_gui()
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Text("Console Output:");
+            ImGui::PushFont(hex_font);
             ImGui::BeginChild("Console", ImVec2(-1, -1), true);
             ImGui::TextUnformatted(console_output.c_str());
             ImGui::EndChild();
+            ImGui::PopFont();
         } else {
             ImGui::TextWrapped("Select an asset to view conversion and extraction options.");
         }
