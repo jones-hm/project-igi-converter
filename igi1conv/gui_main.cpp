@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <memory>
+#include <array>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -34,6 +36,25 @@ static bool show_mef = false;
 static float mef_rot_x = 0.0f;
 static float mef_rot_y = 0.0f;
 static float mef_zoom = 1.0f;
+
+static std::string console_output;
+static char output_dir_buf[512] = "";
+
+// Helper to execute command and return output
+static std::string exec(const char* cmd) {
+#ifdef _WIN32
+    std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd, "r"), _pclose);
+#else
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
+#endif
+    if (!pipe) return "Error: Failed to run command!";
+    std::array<char, 128> buffer;
+    std::string result;
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) != nullptr) {
+        result += buffer.data();
+    }
+    return result;
+}
 
 static void LoadTexture(const uint8_t* rgba, int w, int h) {
     if (current_texture != 0) {
@@ -92,10 +113,10 @@ static void LoadSelectedFile() {
             const auto& img = tex.images[0];
             if (img.mode == 3) {
                 for (size_t i = 0; i < img.pixels.size() / 4; ++i) {
-                    rgba[i*4 + 0] = img.pixels[i*4 + 1]; // R
-                    rgba[i*4 + 1] = img.pixels[i*4 + 2]; // G
-                    rgba[i*4 + 2] = img.pixels[i*4 + 3]; // B
-                    rgba[i*4 + 3] = img.pixels[i*4 + 0]; // A
+                    rgba[i*4 + 0] = img.pixels[i*4 + 1];
+                    rgba[i*4 + 1] = img.pixels[i*4 + 2];
+                    rgba[i*4 + 2] = img.pixels[i*4 + 3];
+                    rgba[i*4 + 3] = img.pixels[i*4 + 0];
                 }
             } else if (img.mode == 2) {
                 for (size_t i = 0; i < img.pixels.size() / 2; ++i) {
@@ -207,7 +228,6 @@ int run_gui()
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
-    // Load custom font if available
     ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
     if (!font) {
         font = io.Fonts->AddFontDefault();
@@ -264,7 +284,7 @@ int run_gui()
 
         ImGui::Begin("Asset Browser");
         ImGui::Text("Current Dir: %s", current_dir.string().c_str());
-        if (ImGui::Button("..")) {
+        if (ImGui::Button("..", ImVec2(50, 0))) {
             current_dir = current_dir.parent_path();
         }
         ImGui::Separator();
@@ -283,6 +303,25 @@ int run_gui()
                         selected_file = entry.path();
                         LoadSelectedFile();
                     }
+                }
+                
+                if (ImGui::BeginPopupContextItem(name.c_str())) {
+                    if (ImGui::MenuItem("View / Load")) {
+                        if (is_dir) {
+                            current_dir = entry.path();
+                        } else {
+                            selected_file = entry.path();
+                            LoadSelectedFile();
+                        }
+                    }
+                    if (!is_dir) {
+                        if (ImGui::MenuItem("Open Convert Options")) {
+                            selected_file = entry.path();
+                            LoadSelectedFile();
+                            ImGui::SetWindowFocus("Convert");
+                        }
+                    }
+                    ImGui::EndPopup();
                 }
             }
         } catch (...) {}
@@ -316,7 +355,7 @@ int run_gui()
                         min_pt = glm::min(min_pt, v.pos);
                         max_pt = glm::max(max_pt, v.pos);
                     }
-                    if (min_pt.x > max_pt.x) { min_pt = glm::vec3(-1); max_pt = glm::vec3(1); } // Fallback
+                    if (min_pt.x > max_pt.x) { min_pt = glm::vec3(-1); max_pt = glm::vec3(1); }
                     
                     glm::vec3 center = (min_pt + max_pt) * 0.5f;
                     float size = glm::length(max_pt - min_pt);
@@ -354,7 +393,6 @@ int run_gui()
                             drawn_tris++;
                         }
                     }
-                    
                     ImGui::SetCursorScreenPos(pos);
                     ImGui::Text("Rendered %d / %d triangles", drawn_tris, (int)current_mef.triangles.size());
                 }
@@ -373,32 +411,68 @@ int run_gui()
             std::string ext = selected_file.extension().string();
             for (auto& c : ext) c = tolower(c);
             
+            ImGui::Text("File:");
+            ImGui::TextWrapped("%s", selected_file.string().c_str());
+            ImGui::Separator();
+            
+            ImGui::Text("Output Directory / File (Optional):");
+            ImGui::InputText("##outdir", output_dir_buf, sizeof(output_dir_buf));
+            std::string out_arg = std::string(output_dir_buf);
+            
+            ImGui::Spacing();
+            
             if (ext == ".tex" || ext == ".spr" || ext == ".pic") {
                 if (ImGui::Button("Convert to PNG", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv tex to-png \"" + selected_file.string() + "\"";
-                    system(cmd.c_str());
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
+                }
+                if (ImGui::Button("Convert to TGA", ImVec2(-1, 0))) {
+                    std::string cmd = "igi1conv tex to-tga \"" + selected_file.string() + "\"";
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
                 }
             } else if (ext == ".qvm") {
                 if (ImGui::Button("Decompile to QSC", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv qvm decompile \"" + selected_file.string() + "\"";
-                    system(cmd.c_str());
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
                 }
             } else if (ext == ".qsc") {
                 if (ImGui::Button("Compile to QVM", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv qsc compile \"" + selected_file.string() + "\"";
-                    system(cmd.c_str());
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
                 }
             } else if (ext == ".mef") {
                 if (ImGui::Button("Export to OBJ", ImVec2(-1, 0))) {
                     std::string cmd = "igi1conv mef export \"" + selected_file.string() + "\"";
-                    system(cmd.c_str());
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
                 }
+            } else if (ext == ".res") {
+                if (ImGui::Button("Extract RES", ImVec2(-1, 0))) {
+                    std::string cmd = "igi1conv res extract \"" + selected_file.string() + "\"";
+                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
+                    console_output = exec(cmd.c_str());
+                }
+            } else if (ext == ".dat") {
+                if (ImGui::Button("Dump DAT Info", ImVec2(-1, 0))) {
+                    std::string cmd = "igi1conv dat info \"" + selected_file.string() + "\"";
+                    console_output = exec(cmd.c_str());
+                }
+            } else {
+                ImGui::Text("No specific conversions for this format.");
             }
             
+            ImGui::Spacing();
             ImGui::Separator();
-            ImGui::TextWrapped("System commands will be executed in the background. Check CLI output for details.");
+            ImGui::Text("Console Output:");
+            ImGui::BeginChild("Console", ImVec2(-1, -1), true);
+            ImGui::TextUnformatted(console_output.c_str());
+            ImGui::EndChild();
         } else {
-            ImGui::TextWrapped("Select a file to see conversion options.");
+            ImGui::TextWrapped("Select an asset to view conversion and extraction options.");
         }
         ImGui::End();
 
