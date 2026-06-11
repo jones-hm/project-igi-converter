@@ -46,13 +46,13 @@ set_target_properties(igi1conv PROPERTIES
 
 # --- GUI Dependencies (Qt6) ---
 set(CMAKE_PREFIX_PATH "D:/Qt/6.5.3/msvc2019_64")
-find_package(Qt6 COMPONENTS Core Gui Widgets REQUIRED)
+find_package(Qt6 COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets REQUIRED)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-target_link_libraries(igi1conv PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+target_link_libraries(igi1conv PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
 # ---------------------------------------
 
 # Single source of truth for the version string (also stamped in assets/igi1conv.rc).
