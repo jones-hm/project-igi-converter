@@ -26,6 +26,7 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QSettings>
+#include <QCloseEvent>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
@@ -572,7 +573,7 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("IGI Game Asset Converter (Qt Advanced UI)");
+        setWindowTitle("IGI Game Convertor");
         resize(1200, 800);
 
         fileModel = new QFileSystemModel(this);
@@ -588,6 +589,9 @@ public:
             if (!dir.isEmpty()) {
                 fileModel->setRootPath(dir);
                 treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
+                QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
+                if (tempDir.exists()) tempDir.removeRecursively();
+                if (consoleEdit) consoleEdit->append("[INFO] Workspace changed. Smart cache cleared.");
             }
         }, QKeySequence::Open);
         
@@ -702,16 +706,6 @@ public:
             QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.2.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
-        QToolBar* toolbar = addToolBar("Main Toolbar");
-        QAction* openAction = toolbar->addAction("Open Folder");
-        connect(openAction, &QAction::triggered, this, [this]() {
-            QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
-            if (!dir.isEmpty()) {
-                fileModel->setRootPath(dir);
-                treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
-            }
-        });
-
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
         setCentralWidget(splitter);
 
@@ -815,6 +809,12 @@ public:
         });
         
         hideAllViewers();
+    }
+
+    void closeEvent(QCloseEvent *event) override {
+        QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
+        if (tempDir.exists()) tempDir.removeRecursively();
+        QMainWindow::closeEvent(event);
     }
 
 private:
@@ -1032,15 +1032,20 @@ private:
         } else if (mode == 4) { // 3D
             QString modelPath = path;
             if (currentExt == "mef" && !globalLevelDatPath.isEmpty() && !globalTextureDir.isEmpty()) {
-                consoleEdit->append("[INFO] Level settings detected! Automatically converting MEF to OBJ and applying textures...");
                 QString tempDir = QDir::tempPath() + "/igi_temp_mef";
                 QDir().mkpath(tempDir);
                 QString baseName = QFileInfo(path).completeBaseName();
                 QString outDir = tempDir + "/bundle";
-                QString cmd = qApp->applicationFilePath();
-                QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << outDir << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
                 modelPath = outDir + "/" + baseName + "/" + baseName + ".obj";
-                consoleEdit->append("[DEBUG] Temp bundled OBJ created at: " + modelPath);
+                
+                if (QFile::exists(modelPath) && QFileInfo(modelPath).lastModified() > QFileInfo(path).lastModified()) {
+                    consoleEdit->append("[INFO] Smart Cache: Loading pre-bundled MEF from temp folder...");
+                } else {
+                    consoleEdit->append("[INFO] Level settings detected! Automatically converting MEF to OBJ and applying textures...");
+                    QString cmd = qApp->applicationFilePath();
+                    QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << outDir << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
+                    consoleEdit->append("[DEBUG] Temp bundled OBJ created at: " + modelPath);
+                }
             } else {
                 consoleEdit->append("[DEBUG] Level settings not fully configured, loading raw MEF: " + modelPath);
             }
