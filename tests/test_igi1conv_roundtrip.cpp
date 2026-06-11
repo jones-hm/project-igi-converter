@@ -8,7 +8,7 @@ using namespace igi1conv_test;
 
 // QVM -> QSC -> QVM: decompiled source must recompile cleanly.
 TEST_F(IGI1ConvTest, RoundtripQvmQscQvm) {
-    IGI1CONV_NEED(qvm, "AMMO.QVM");
+    IGI1CONV_NEED(qvm, "\\.qvm$");
     TempDir tmp;
     std::string qsc  = tmp / "ammo.qsc";
     std::string qvm2 = tmp / "ammo_recompiled.qvm";
@@ -21,9 +21,9 @@ TEST_F(IGI1ConvTest, RoundtripQvmQscQvm) {
 
 // DAT -> MTP -> DAT: model/texture mappings survive both conversions.
 TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
-    IGI1CONV_NEED(dat, "common.dat");
+    IGI1CONV_NEED(dat, "^(?!.*graph).*\\.dat$");
     TempDir tmp;
-    std::string mtp  = tmp / "common.mtp";
+    std::string mtp  = tmp / "\\.mtp$";
     std::string dat2 = tmp / "common_back.dat";
 
     ASSERT_EQ(RunIGI1Conv("dat to-mtp " + Q(dat) + " -o " + Q(mtp)), 0);
@@ -34,9 +34,9 @@ TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
 
 // MTP -> DAT -> MTP: the inverse direction.
 TEST_F(IGI1ConvTest, RoundtripMtpDatMtp) {
-    IGI1CONV_NEED(mtp, "common.mtp");
+    IGI1CONV_NEED(mtp, "\\.mtp$");
     TempDir tmp;
-    std::string dat  = tmp / "common.dat";
+    std::string dat  = tmp / "^(?!.*graph).*\\.dat$";
     std::string mtp2 = tmp / "common_back.mtp";
 
     ASSERT_EQ(RunIGI1Conv("mtp to-dat " + Q(mtp) + " -o " + Q(dat)), 0);
@@ -47,7 +47,7 @@ TEST_F(IGI1ConvTest, RoundtripMtpDatMtp) {
 
 // TEX -> TGA -> PNG: decode native texture, then re-encode via stb input path.
 TEST_F(IGI1ConvTest, RoundtripTexTgaPng) {
-    IGI1CONV_NEED(tex, "FLARE00.TEX");
+    IGI1CONV_NEED(tex, "\\.tex$");
     TempDir tmp;
     std::string tga = tmp / "flare.tga";
     std::string png = tmp / "flare.png";

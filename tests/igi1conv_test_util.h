@@ -14,6 +14,7 @@
 #include <fstream>
 
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 
 namespace igi1conv_test {
@@ -141,6 +142,26 @@ inline bool NonEmptyFile(const std::string& p) {
     return std::filesystem::exists(p) && std::filesystem::file_size(p, ec) > 0;
 }
 
+#include <regex>
+
+// Find a file in the corpus matching the given regex pattern (case-insensitive).
+inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
+    std::string dir = CorpusDir();
+    if (!std::filesystem::exists(dir)) return "";
+    
+    std::regex pattern(pattern_str, std::regex_constants::icase);
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        
+        std::string filename = entry.path().filename().string();
+        if (std::regex_search(filename, pattern)) {
+            return entry.path().string();
+        }
+    }
+    return "";
+}
+
 // Base fixture: ensures igi1conv.exe exists.
 class IGI1ConvTest : public ::testing::Test {
 protected:
@@ -152,10 +173,11 @@ protected:
 
 } // namespace igi1conv_test
 
-// Declare a corpus path and SKIP the current test if the file is absent.
+// Declare a corpus path and SKIP the current test if no matching file is found.
 // Used in a (void) test body so GTEST_SKIP returns from the test correctly.
-#define IGI1CONV_NEED(var, rel)                                            \
-    std::string var = ::igi1conv_test::Corpus(rel);                        \
-    if (!std::filesystem::exists(var))                                  \
-        GTEST_SKIP() << "corpus file missing: " << var                 \
+#define IGI1CONV_NEED(var, pattern)                                        \
+    std::string var = ::igi1conv_test::FindCorpusFileByRegex(pattern);     \
+    if (var.empty())                                                    \
+        GTEST_SKIP() << "corpus file missing for regex: " << pattern    \
                      << " (set IGI1CONV_TEST_CORPUS)"
+
