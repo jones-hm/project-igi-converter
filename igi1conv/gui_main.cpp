@@ -69,6 +69,7 @@ static QString formatJson(const QJsonObject& obj, int indent = 0) {
     QString result;
     QString ind(indent, ' ');
     for (auto it = obj.begin(); it != obj.end(); ++it) {
+        if (it.key().toLower() == "graph") continue;
         if (it.value().isObject()) {
             result += ind + it.key() + ":\n" + formatJson(it.value().toObject(), indent + 2);
         } else if (it.value().isArray()) {
@@ -82,10 +83,20 @@ static QString formatJson(const QJsonObject& obj, int indent = 0) {
 
 class ModelViewer : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
+    struct SubMesh {
+        int startIndex = 0;
+        int count = 0;
+        QString materialName;
+        std::shared_ptr<QOpenGLTexture> texture;
+    };
+
     QTextEdit* infoOverlay;
+    QLabel* coordsOverlay;
     QString currentModelName;
     QString currentModelId;
     QString currentJsonInfo;
+    std::vector<SubMesh> submeshes;
+    std::map<QString, std::shared_ptr<QOpenGLTexture>> textureCache;
 
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
@@ -93,19 +104,63 @@ public:
         infoOverlay->setReadOnly(true);
         infoOverlay->setStyleSheet("background-color: rgba(0, 20, 0, 200); color: #00FF66; border: 1px solid #00FF66; padding: 5px; font-family: monospace;");
         infoOverlay->hide();
+
+        coordsOverlay = new QLabel(this);
+        coordsOverlay->setStyleSheet("background-color: rgba(0, 0, 0, 150); color: white; padding: 4px; font-family: monospace;");
+        coordsOverlay->hide();
     }
     
     ~ModelViewer() {
         makeCurrent();
-        if (texture) { texture->destroy(); texture.reset(); }
+        textureCache.clear();
+        submeshes.clear();
         vbo.destroy();
         doneCurrent();
+    }
+
+    std::shared_ptr<QOpenGLTexture> loadCachedTexture(const QString& texStr, const QFileInfo& info) {
+        if (texStr.isEmpty()) return nullptr;
+        QString key = texStr;
+        key.replace("\\", "/");
+        if (textureCache.find(key) != textureCache.end()) return textureCache[key];
+
+        QString texPath = info.absolutePath() + "/" + key;
+        QImage img = loadImageSafe(texPath);
+        if (img.isNull()) {
+            texPath = info.absolutePath() + "/" + QFileInfo(key).fileName();
+            img = loadImageSafe(texPath);
+        }
+        if (img.isNull()) {
+            texPath = info.absolutePath() + "/" + QFileInfo(key).completeBaseName() + ".png";
+            img = loadImageSafe(texPath);
+        }
+        if (img.isNull()) {
+            texPath = info.absolutePath() + "/" + QFileInfo(key).completeBaseName() + ".tga";
+            img = loadImageSafe(texPath);
+        }
+        if (!img.isNull()) {
+            auto tex = std::make_shared<QOpenGLTexture>(img);
+            tex->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+            tex->setMagnificationFilter(QOpenGLTexture::Linear);
+            textureCache[key] = tex;
+            return tex;
+        }
+        return nullptr;
+    }
+
+    void updateCoordsOverlay() {
+        if (!coordsOverlay->isVisible()) coordsOverlay->show();
+        coordsOverlay->setText(QString("%1. ID: %2\nPos: %3, %4, %5\nRot: %6, %7, %8")
+            .arg(currentModelName).arg(currentModelId)
+            .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
+            .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1));
     }
 
     void loadModel(const QString& path) {
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
-        if (texture) { texture->destroy(); texture.reset(); }
+        submeshes.clear();
+        textureCache.clear();
         
         QFileInfo info(path);
         QString ext = info.suffix().toLower();
@@ -115,45 +170,40 @@ public:
         if (ext == "mef") {
             try {
                 ParsedGeometry geo = ParseMefFile(path.toStdString());
-                for (const auto& tri : geo.triangles) {
-                    auto addVert = [&](uint32_t idx) {
-                        if (idx < geo.vertices.size()) {
-                            const auto& v = geo.vertices[idx];
-                            vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
-                            normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
-                            uvs.push_back(v.uv.x); uvs.push_back(1.0f - v.uv.y); // Flip V for OpenGL
-                        } else {
-                            vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
-                            normals.push_back(0); normals.push_back(1); normals.push_back(0);
-                            uvs.push_back(0); uvs.push_back(0);
-                        }
-                    };
-                    addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
+                std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
+                for (const auto& tex : geo.pmtlTextures) {
+                    loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
                 }
-                
-                // Try to load the first texture for MEF
-                if (!geo.pmtlTextures.empty()) {
-                    QString texStr = QString::fromStdString(geo.pmtlTextures[0]);
-                    texStr.replace("\\", "/");
-                    QString texPath = info.absolutePath() + "/" + texStr;
-                    QImage img = loadImageSafe(texPath);
-                    if (img.isNull()) {
-                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).fileName();
-                        img = loadImageSafe(texPath);
+
+                for (const auto& block : geo.renderBlocks) {
+                    SubMesh sm;
+                    sm.startIndex = vertices.size() / 3;
+                    int triCount = 0;
+                    for (size_t i = 0; i < block.triangleCount; ++i) {
+                        size_t tIdx = block.triangleStart + i;
+                        if (tIdx < geo.triangles.size()) {
+                            const auto& tri = geo.triangles[tIdx];
+                            auto addVert = [&](uint32_t idx) {
+                                if (idx < geo.vertices.size()) {
+                                    const auto& v = geo.vertices[idx];
+                                    vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
+                                    normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
+                                    uvs.push_back(v.uv.x); uvs.push_back(1.0f - v.uv.y);
+                                } else {
+                                    vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
+                                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                                    uvs.push_back(0); uvs.push_back(0);
+                                }
+                            };
+                            addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
+                            triCount += 3;
+                        }
                     }
-                    if (img.isNull()) {
-                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".png";
-                        img = loadImageSafe(texPath);
+                    sm.count = triCount;
+                    if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
+                        sm.texture = loadedMaterials[block.materialSlot];
                     }
-                    if (img.isNull()) {
-                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".tga";
-                        img = loadImageSafe(texPath);
-                    }
-                    if (!img.isNull()) {
-                        texture.reset(new QOpenGLTexture(img));
-                        texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
-                        texture->setMagnificationFilter(QOpenGLTexture::Linear);
-                    }
+                    if (sm.count > 0) submeshes.push_back(sm);
                 }
             } catch (...) {}
         } else if (ext == "obj") {
@@ -176,45 +226,52 @@ public:
                         temp_vt.push_back(QVector2D(parts[1].toFloat(), parts[2].toFloat()));
                     } else if (parts[0] == "vn" && parts.size() >= 4) {
                         temp_vn.push_back(QVector3D(parts[1].toFloat(), parts[2].toFloat(), parts[3].toFloat()));
+                    } else if (parts[0] == "usemtl" && parts.size() >= 2) {
+                        if (!submeshes.empty() && submeshes.back().count == 0) {
+                            submeshes.back().materialName = parts[1];
+                        } else {
+                            SubMesh sm;
+                            sm.startIndex = vertices.size() / 3;
+                            sm.count = 0;
+                            sm.materialName = parts[1];
+                            submeshes.push_back(sm);
+                        }
                     } else if (parts[0] == "f" && parts.size() >= 4) {
+                        if (submeshes.empty()) {
+                            SubMesh sm;
+                            sm.startIndex = vertices.size() / 3;
+                            sm.count = 0;
+                            submeshes.push_back(sm);
+                        }
+                        int startSize = vertices.size() / 3;
                         for (int i = 2; i < parts.size() - 1; ++i) {
                             parseFaceVertex(parts[1], temp_v, temp_vt, temp_vn);
                             parseFaceVertex(parts[i], temp_v, temp_vt, temp_vn);
                             parseFaceVertex(parts[i+1], temp_v, temp_vt, temp_vn);
                         }
+                        submeshes.back().count += (vertices.size() / 3) - startSize;
                     } else if (parts[0] == "mtllib" && parts.size() >= 2) {
                         mtlLib = parts[1];
                     }
                 }
+                
                 if (!mtlLib.isEmpty()) {
                     QString mtlPath = info.absolutePath() + "/" + mtlLib;
                     QFile mfile(mtlPath);
                     if (mfile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                        QString currentMaterial = "";
                         while (!mfile.atEnd()) {
                             QString mline = mfile.readLine().trimmed();
-                            if (mline.startsWith("map_Kd ")) {
+                            if (mline.startsWith("newmtl ")) {
+                                currentMaterial = mline.mid(7).trimmed();
+                            } else if (mline.startsWith("map_Kd ") && !currentMaterial.isEmpty()) {
                                 QString texStr = mline.mid(7).trimmed();
-                                texStr.replace("\\", "/");
-                                QString texPath = info.absolutePath() + "/" + texStr;
-                                QImage img = loadImageSafe(texPath);
-                                if (img.isNull()) {
-                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).fileName();
-                                    img = loadImageSafe(texPath);
+                                auto tex = loadCachedTexture(texStr, info);
+                                for (auto& sm : submeshes) {
+                                    if (sm.materialName == currentMaterial) {
+                                        sm.texture = tex;
+                                    }
                                 }
-                                if (img.isNull()) {
-                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".png";
-                                    img = loadImageSafe(texPath);
-                                }
-                                if (img.isNull()) {
-                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".tga";
-                                    img = loadImageSafe(texPath);
-                                }
-                                if (!img.isNull()) {
-                                    texture.reset(new QOpenGLTexture(img));
-                                    texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
-                                    texture->setMagnificationFilter(QOpenGLTexture::Linear);
-                                }
-                                break;
                             }
                         }
                     }
@@ -432,15 +489,22 @@ protected:
         program.setUniformValue("view", view);
         program.setUniformValue("model", model);
 
-        if (texture && texture->isCreated()) {
-            texture->bind();
-            program.setUniformValue("hasTexture", true);
-            program.setUniformValue("texture1", 0);
-        } else {
+        if (submeshes.empty()) {
             program.setUniformValue("hasTexture", false);
+            glDrawArrays(GL_TRIANGLES, 0, vertices.size() / 3);
+        } else {
+            for (const auto& sm : submeshes) {
+                if (sm.count == 0) continue;
+                if (sm.texture && sm.texture->isCreated()) {
+                    sm.texture->bind();
+                    program.setUniformValue("hasTexture", true);
+                    program.setUniformValue("texture1", 0);
+                } else {
+                    program.setUniformValue("hasTexture", false);
+                }
+                glDrawArrays(GL_TRIANGLES, sm.startIndex, sm.count);
+            }
         }
-
-        glDrawArrays(GL_TRIANGLES, 0, vertices.size() / 3);
 
         program.disableAttributeArray(0);
         program.disableAttributeArray(1);
@@ -452,6 +516,7 @@ protected:
     void resizeEvent(QResizeEvent *event) override {
         QOpenGLWidget::resizeEvent(event);
         infoOverlay->setGeometry(10, 10, 320, height() - 20);
+        coordsOverlay->setGeometry(10, height() - 70, 400, 60);
     }
 
     float wrapAngle(float angle) {
@@ -475,19 +540,13 @@ protected:
         }
         update();
         lastPos = event->pos();
-        QToolTip::showText(event->globalPos(), QString("%1. ID: %2\nPosition XYZ: %3, %4, %5\nOrientation ABG: %6, %7, %8")
-                           .arg(currentModelName).arg(currentModelId)
-                           .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
-                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1), this);
+        updateCoordsOverlay();
     }
     void wheelEvent(QWheelEvent *event) override {
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
         if (zoom < 0.1f) zoom = 0.1f;
         update();
-        QToolTip::showText(event->globalPosition().toPoint(), QString("%1. ID: %2\nPosition XYZ: %3, %4, %5\nOrientation ABG: %6, %7, %8")
-                           .arg(currentModelName).arg(currentModelId)
-                           .arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(-zoom, 0, 'f', 2)
-                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1), this);
+        updateCoordsOverlay();
     }
 
 private:
