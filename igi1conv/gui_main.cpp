@@ -629,39 +629,47 @@ public:
     }
     
     bool saveAsTex(const QImage& img, const QString& outPath) {
+        // Write a valid LOOP v11 TEX file: 32-byte header + ARGB8888 pixels
+        // Header layout: sig(4s) version(I) mode(I) multi(I) _0(I) _1(H) _2(H) _3(H) width(H) height(H) depth(H)
         QFile f(outPath);
         if (!f.open(QIODevice::WriteOnly)) return false;
         
         QImage texImg = img.convertToFormat(QImage::Format_ARGB32);
-        uint8_t hdr[32] = {0};
-        std::memcpy(hdr, "Lp11", 4);
-        uint32_t version = 11, mode = 3, multi = 1, _0 = 0;
-        std::memcpy(hdr + 4, &version, 4);
-        std::memcpy(hdr + 8, &mode, 4);
-        std::memcpy(hdr + 12, &multi, 4);
-        std::memcpy(hdr + 16, &_0, 4);
+        uint16_t w = (uint16_t)texImg.width();
+        uint16_t h = (uint16_t)texImg.height();
         
-        uint16_t _1 = 0, _2 = 0, _3 = 0;
-        uint16_t w = texImg.width(), h = texImg.height(), depth = 0;
-        std::memcpy(hdr + 20, &_1, 2);
-        std::memcpy(hdr + 22, &_2, 2);
-        std::memcpy(hdr + 24, &_3, 2);
+        uint8_t hdr[32] = {0};
+        // sig = "LOOP" (4 bytes)
+        hdr[0] = 'L'; hdr[1] = 'O'; hdr[2] = 'O'; hdr[3] = 'P';
+        // version = 11 (uint32 LE)
+        uint32_t version = 11;
+        std::memcpy(hdr + 4, &version, 4);
+        // mode = 3 (ARGB8888, uint32 LE)
+        uint32_t mode = 3;
+        std::memcpy(hdr + 8, &mode, 4);
+        // multi = 1 (uint32 LE)
+        uint32_t multi = 1;
+        std::memcpy(hdr + 12, &multi, 4);
+        // _0=0 (uint32 LE), _1=0 _2=0 _3=0 (uint16 LE each)
+        // [16-19]=0, [20-21]=0, [22-23]=0, [24-25]=0
+        // width at [26-27], height at [28-29], depth=0 at [30-31]
         std::memcpy(hdr + 26, &w, 2);
         std::memcpy(hdr + 28, &h, 2);
-        std::memcpy(hdr + 30, &depth, 2);
         
         f.write((const char*)hdr, 32);
         
+        // Pixels: ARGB8888 stored as BGRA in memory (Qt's Format_ARGB32 is actually BGRA on LE)
+        // TEX mode 3 expects: B G R A per pixel
         QByteArray pixels;
         pixels.resize(w * h * 4);
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 QRgb color = texImg.pixel(x, y);
                 int i = (y * w + x) * 4;
-                pixels[i]   = qBlue(color);
-                pixels[i+1] = qGreen(color);
-                pixels[i+2] = qRed(color);
-                pixels[i+3] = qAlpha(color);
+                pixels[i]   = (char)qBlue(color);
+                pixels[i+1] = (char)qGreen(color);
+                pixels[i+2] = (char)qRed(color);
+                pixels[i+3] = (char)qAlpha(color);
             }
         }
         f.write(pixels);
@@ -1139,31 +1147,67 @@ public:
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
         
         QMenu* levelMenu = settingsMenu->addMenu("&Level");
-        levelMenu->addAction("Select Level MTP...", this, [this, iniPath]() {
-            globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
-            QSettings(iniPath, QSettings::IniFormat).setValue("LevelMTP", globalLevelMtpPath);
-            logMessage("[INFO] Level MTP set to: " + globalLevelMtpPath);
-        });
-        levelMenu->addAction("Select Level DAT...", this, [this, iniPath]() {
-            globalLevelDatPath = QFileDialog::getOpenFileName(this, "Select DAT", "", "DAT Files (*.dat)");
-            QSettings(iniPath, QSettings::IniFormat).setValue("LevelDAT", globalLevelDatPath);
-            logMessage("[INFO] Level DAT set to: " + globalLevelDatPath);
-        });
-        levelMenu->addAction("Select Texture Directory...", this, [this, iniPath]() {
-            QString dir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
-            if (!dir.isEmpty()) {
-                globalTextureDir = dir;
-                QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
-                logMessage("[INFO] Texture Directory set to: " + globalTextureDir);
-                
-                QDir texDir(globalTextureDir);
-                QStringList resFiles = texDir.entryList(QStringList() << "*.res", QDir::Files);
-                for (const QString& res : resFiles) {
-                    QString resPath = texDir.absoluteFilePath(res);
-                    logMessage("[INFO] Extracting " + res + " to " + globalTextureDir + "...");
-                    QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "extract" << resPath << "-o" << globalTextureDir);
+        levelMenu->addAction("Select Game Level Path...", this, [this, iniPath]() {
+            QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? "D:/Software/IGI-Game" : QFileInfo(globalLevelDatPath).absolutePath());
+            if (levelDir.isEmpty()) return;
+            
+            // Auto-resolve DAT, MTP, Textures from the level folder
+            QDir dir(levelDir);
+            QString levelName = dir.dirName(); // e.g. "LEVEL8"
+            
+            // Find .DAT
+            QStringList dats = dir.entryList(QStringList() << "*.dat" << "*.DAT", QDir::Files);
+            if (!dats.isEmpty()) {
+                globalLevelDatPath = levelDir + "/" + dats.first();
+                QSettings(iniPath, QSettings::IniFormat).setValue("LevelDAT", globalLevelDatPath);
+                logMessage("[INFO] Level DAT auto-set: " + globalLevelDatPath);
+            }
+            
+            // Find .MTP
+            QStringList mtps = dir.entryList(QStringList() << "*.mtp" << "*.MTP", QDir::Files);
+            if (!mtps.isEmpty()) {
+                globalLevelMtpPath = levelDir + "/" + mtps.first();
+                QSettings(iniPath, QSettings::IniFormat).setValue("LevelMTP", globalLevelMtpPath);
+                logMessage("[INFO] Level MTP auto-set: " + globalLevelMtpPath);
+            }
+            
+            // Find TEXTURES subfolder
+            QStringList textureDirs = {"TEXTURES", "textures", "Textures"};
+            for (const QString& td : textureDirs) {
+                if (QDir(levelDir + "/" + td).exists()) {
+                    globalTextureDir = levelDir + "/" + td;
+                    break;
                 }
             }
+            // If not found, check for .RES file and auto-extract
+            if (globalTextureDir.isEmpty()) {
+                QStringList resList = dir.entryList(QStringList() << "*.res" << "*.RES", QDir::Files);
+                for (const QString& resName : resList) {
+                    if (resName.contains(levelName, Qt::CaseInsensitive) || resName.contains("TEXTURES", Qt::CaseInsensitive)) {
+                        globalTextureDir = levelDir + "/TEXTURES";
+                        QDir().mkpath(globalTextureDir);
+                        QString resPath = levelDir + "/" + resName;
+                        logMessage("[INFO] Extracting " + resName + " -> " + globalTextureDir);
+                        QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "extract" << resPath << "-o" << globalTextureDir);
+                        break;
+                    }
+                }
+            }
+            if (!globalTextureDir.isEmpty()) {
+                QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
+                logMessage("[INFO] Texture Dir auto-set: " + globalTextureDir);
+                
+                // Extract any .res files inside texture dir
+                QDir texDir(globalTextureDir);
+                for (const QString& res : texDir.entryList(QStringList() << "*.res" << "*.RES", QDir::Files)) {
+                    logMessage("[INFO] Extracting " + res + " from textures dir...");
+                    QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "extract" << texDir.absoluteFilePath(res) << "-o" << globalTextureDir);
+                }
+            }
+            QSettings(iniPath, QSettings::IniFormat).setValue("LevelPath", levelDir);
+            QMessageBox::information(this, "Level Set",
+                QString("Level: %1\nDAT: %2\nMTP: %3\nTextures: %4")
+                .arg(levelDir, globalLevelDatPath, globalLevelMtpPath, globalTextureDir));
         });
 
         QMenu* logsMenu = settingsMenu->addMenu("&Logs");
@@ -1593,6 +1637,54 @@ private:
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
             menu.addAction("Export",         [this, path]() { loadFile(path); executeCommand("mef export"); });
+            menu.addAction("Info",             [this, path]() {
+                // Run mef info and display in console
+                loadFile(path);
+                executeCommand("mef info");
+            });
+            menu.addAction("Texture Map", [this, path]() {
+                // Show texture mapping from DAT for this MEF
+                QString baseName = QFileInfo(path).completeBaseName();
+                if (globalLevelDatPath.isEmpty()) {
+                    QMessageBox::warning(this, "No Level Set", "Please set a Level path in Settings > Level first.");
+                    return;
+                }
+                QProcess proc;
+                proc.setProgram(qApp->applicationFilePath());
+                proc.setArguments(QStringList() << "dat" << "info" << globalLevelDatPath);
+                proc.start();
+                proc.waitForFinished(10000);
+                QString datOut = proc.readAllStandardOutput();
+                
+                // Parse the DAT output for this model's textures
+                QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
+                bool inModel = false;
+                int texCount = 0;
+                for (const QString& line : datOut.split('\n')) {
+                    if (line.contains(baseName, Qt::CaseInsensitive)) {
+                        inModel = true;
+                        report += line.trimmed() + "\n";
+                    } else if (inModel && (line.startsWith("  tex[") || line.contains("texture"))) {
+                        report += line.trimmed() + "\n";
+                        texCount++;
+                    } else if (inModel && !line.trimmed().isEmpty() && !line.startsWith(" ")) {
+                        inModel = false;
+                    }
+                }
+                if (texCount == 0) report += "(No texture mapping found in DAT for this model)\n";
+                
+                // Also show MEF's own material count
+                QProcess mefProc;
+                mefProc.setProgram(qApp->applicationFilePath());
+                mefProc.setArguments(QStringList() << "mef" << "info" << path);
+                mefProc.start();
+                mefProc.waitForFinished(5000);
+                QString mefOut = mefProc.readAllStandardOutput();
+                report += "\n=== MEF Native Info ===\n" + mefOut;
+                
+                logMessage(report);
+                QMessageBox::information(this, "Texture Map: " + baseName, report);
+            });
             menu.addAction("Apply Textures (This MEF)", [this, path]() {
                 currentFile = path;
                 executeCommand("mef bundle");
@@ -1611,20 +1703,8 @@ private:
             menu.addAction("Apply Textures (All in Folder)", [this, path]() {
                 currentFile = QFileInfo(path).absolutePath();
                 executeCommand("mef bundle-all");
-                QString baseName = QFileInfo(path).completeBaseName();
-                QString modelPath = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
-                if (QFile::exists(modelPath)) {
-                    modelViewer->loadModel(modelPath);
-                    viewModeCombo->blockSignals(true);
-                    viewModeCombo->setCurrentIndex(4); // 3D view
-                    viewModeCombo->blockSignals(false);
-                    hideAllViewers();
-                    modelViewer->show();
-                    logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
-                }
             });
-            menu.addAction("Dump to TXT",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
-            menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("mef info"); });
+            menu.addAction("Dump",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
         } else if (ext == "res") {
             menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
             menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
@@ -1665,6 +1745,18 @@ private:
             viewModeCombo->blockSignals(true);
             viewModeCombo->setCurrentIndex(mode);
             viewModeCombo->blockSignals(false);
+        }
+
+        if (mode == 4 && currentExt == "mef") {
+            // Check if a bundled (textured) OBJ already exists in temp
+            QString baseName = info.completeBaseName();
+            QString bundledObj = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
+            if (!globalLevelDatPath.isEmpty() && QFile::exists(bundledObj)) {
+                logMessage("[INFO] Loading cached textured MEF bundle: " + bundledObj);
+                modelViewer->loadModel(bundledObj);
+                modelViewer->show();
+                return;
+            }
         }
 
         if (mode == 1) { // Text
