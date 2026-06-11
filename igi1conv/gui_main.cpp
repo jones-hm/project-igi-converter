@@ -324,9 +324,9 @@ protected:
                     QJsonObject item = itemVal.toObject();
                     
                     bool match = false;
-                    if (item.contains("Model ID") && item["Model ID"].toString() == baseName) {
+                    if (item.contains("Model ID") && item["Model ID"].toString().toLower() == baseName.toLower()) {
                         match = true;
-                    } else if (item.contains("Model") && item["Model"].toObject()["ID"].toString() == baseName) {
+                    } else if (item.contains("Model") && item["Model"].toObject()["ID"].toString().toLower() == baseName.toLower()) {
                         match = true;
                     }
 
