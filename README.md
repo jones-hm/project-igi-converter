@@ -25,7 +25,7 @@ igi1conv tex info textures/FLARE00.TEX
 igi1conv tex to-png textures/FLARE00.TEX -o my_edits/FLARE00.png
 
 # Resize and export simultaneously
-igi1conv tex to-png textures/crosshair.spr -o out/crosshair.png --resize 32 32
+igi1conv tex to-png textures/arrow1_1.spr -o out/arrow1_1.png --resize 32 32
 
 # Convert your edited PNG back to the game's TEX format
 igi1conv tex to-tga my_edits/FLARE00.png -o textures/FLARE00.TEX
@@ -35,16 +35,16 @@ igi1conv tex to-tga my_edits/FLARE00.png -o textures/FLARE00.TEX
 Extract weapons, characters, or level geometry into `.obj` format.
 ```bash
 # Dump the structural data of a mesh to a text file for inspection
-igi1conv mef dump models/ak47.mef -o ak47_struct.txt
+igi1conv mef dump models/model1.mef -o model1_struct.txt
 
 # Export a single model to OBJ
-igi1conv mef export models/ak47.mef -o ak47.obj
+igi1conv mef export models/model1.mef -o model1.obj
 
 # Export all models in a folder iteratively (Batch Mode)
 igi1conv mef export models/weapons/ -o output_objs/ --batch
 
 # Bundle a MEF with its actual textures (requires the map's .dat file)
-igi1conv mef bundle models/level1/house.mef -o out_house --dat common.dat --texdir textures/
+igi1conv mef bundle models/level1/model2.mef -o out_model2 --dat common.dat --texdir textures/
 ```
 
 ### 3. Modifying Game Logic (`.qvm` & `.qsc`)
