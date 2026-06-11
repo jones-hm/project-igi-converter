@@ -635,7 +635,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Asset Converter (Qt)\nVersion 1.1\nAdvanced Edition\nWith MEF Native Viewer and full CLI action integration.");
+            QMessageBox::about(this, "About", "IGI Game Asset Converter (Qt)\nVersion 1.2.0\nAdvanced Edition\nWith MEF Native Viewer and full CLI action integration.");
         });
 
         QToolBar* toolbar = addToolBar("Main Toolbar");

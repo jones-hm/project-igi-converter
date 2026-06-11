@@ -5,8 +5,10 @@
 It's the ultimate tool for modders and researchers looking to extract game assets, modify them using modern tools, and inject them back into the game.
 
 ## Core Features
+*   **Integrated Modern GUI**: Includes a Qt6-powered graphical interface supporting File Explorer navigation, multi-theme aesthetics (Light/Dark mode), live recursive file searches, and in-file text finders.
 *   **Asset Extraction**: Unpack `.res` archives into loose files.
-*   **Mesh Conversion**: Export proprietary `.mef` meshes to standard `.obj` files for editing in Blender/Maya.
+*   **Mesh Conversion**: Export proprietary `.mef` meshes to standard `.obj` files for editing in Blender/Maya. 
+*   **3D Native Rendering**: Includes a built-in interactive 3D viewer that renders native `.mef` files and `.obj` files directly, supporting multiple material submeshes with live coordinate tracking.
 *   **Texture Conversion**: Convert `.tex`, `.spr`, and `.pic` images into editable formats like `.png` or `.tga`, and even convert standard images back into the game's formats.
 *   **Script Decompilation**: Decompile `.qvm` binary bytecode into readable `.qsc` source files, edit the logic, and recompile back into bytecode.
 *   **Metadata Editing**: Manipulate `.dat` and `.mtp` mapping packages natively to assign textures or models dynamically.
