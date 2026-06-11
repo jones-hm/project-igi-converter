@@ -605,19 +605,68 @@ public:
         connect(btnSave, &QPushButton::clicked, this, [this]() {
             if (!currentPath.isEmpty() && !currentImage.isNull()) {
                 QString savePath = currentPath;
-                if (savePath.endsWith(".tex", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
-                else if (savePath.endsWith(".spr", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
-                else if (savePath.endsWith(".pic", Qt::CaseInsensitive)) savePath.replace(savePath.length() - 4, 4, ".png");
+                bool isGameFormat = savePath.endsWith(".tex", Qt::CaseInsensitive) || 
+                                    savePath.endsWith(".spr", Qt::CaseInsensitive) || 
+                                    savePath.endsWith(".pic", Qt::CaseInsensitive);
                 
-                if (currentImage.save(savePath)) {
-                    QMessageBox::information(this, "Saved", "Image saved to " + savePath);
+                if (isGameFormat) {
+                    if (saveAsTex(currentImage, savePath)) {
+                        QMessageBox::information(this, "Saved", "Texture saved back to game format: " + savePath);
+                    } else {
+                        QMessageBox::critical(this, "Error", "Failed to save texture to " + savePath);
+                    }
                 } else {
-                    QMessageBox::critical(this, "Error", "Failed to save image to " + savePath);
+                    if (currentImage.save(savePath)) {
+                        QMessageBox::information(this, "Saved", "Image saved to " + savePath);
+                    } else {
+                        QMessageBox::critical(this, "Error", "Failed to save image to " + savePath);
+                    }
                 }
             }
         });
         
         imageLabel->installEventFilter(this);
+    }
+    
+    bool saveAsTex(const QImage& img, const QString& outPath) {
+        QFile f(outPath);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        
+        QImage texImg = img.convertToFormat(QImage::Format_ARGB32);
+        uint8_t hdr[32] = {0};
+        std::memcpy(hdr, "Lp11", 4);
+        uint32_t version = 11, mode = 3, multi = 1, _0 = 0;
+        std::memcpy(hdr + 4, &version, 4);
+        std::memcpy(hdr + 8, &mode, 4);
+        std::memcpy(hdr + 12, &multi, 4);
+        std::memcpy(hdr + 16, &_0, 4);
+        
+        uint16_t _1 = 0, _2 = 0, _3 = 0;
+        uint16_t w = texImg.width(), h = texImg.height(), depth = 0;
+        std::memcpy(hdr + 20, &_1, 2);
+        std::memcpy(hdr + 22, &_2, 2);
+        std::memcpy(hdr + 24, &_3, 2);
+        std::memcpy(hdr + 26, &w, 2);
+        std::memcpy(hdr + 28, &h, 2);
+        std::memcpy(hdr + 30, &depth, 2);
+        
+        f.write((const char*)hdr, 32);
+        
+        QByteArray pixels;
+        pixels.resize(w * h * 4);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                QRgb color = texImg.pixel(x, y);
+                int i = (y * w + x) * 4;
+                pixels[i]   = qBlue(color);
+                pixels[i+1] = qGreen(color);
+                pixels[i+2] = qRed(color);
+                pixels[i+3] = qAlpha(color);
+            }
+        }
+        f.write(pixels);
+        f.close();
+        return true;
     }
     
     void loadImage(const QString& path, const QImage& img) {
@@ -1434,12 +1483,23 @@ private:
             menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
             menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
-        } else if (ext == "qsc") {
+        } else if (ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
+            menu.addAction("Convert to TEX", [this, path]() {
+                QString newPath = path.left(path.lastIndexOf('.')) + ".tex";
+                QImage img(path);
+                if (!img.isNull() && imageEditor->saveAsTex(img, newPath)) {
+                    logMessage("[INFO] Converted image to TEX: " + newPath);
+                    QMessageBox::information(this, "Success", "Converted to " + newPath);
+                } else {
+                    logMessage("[ERROR] Failed to convert image to TEX: " + path);
+                }
+            });
+        } else if (ext == "qsc" || ext == "qas") {
             menu.addAction("Compile",        [this, path]() { loadFile(path); executeCommand("qsc compile"); });
             menu.addAction("Validate",       [this, path]() { loadFile(path); executeCommand("qsc validate"); });
         } else if (ext == "qvm") {
             menu.addAction("Decompile",      [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
-            menu.addAction("Disasm",         [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
+            menu.addAction("Disassemble",    [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
             menu.addAction("Export",         [this, path]() { loadFile(path); executeCommand("mef export"); });
@@ -1450,6 +1510,10 @@ private:
                 QString modelPath = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
                 if (QFile::exists(modelPath)) {
                     modelViewer->loadModel(modelPath);
+                    viewModeCombo->blockSignals(true);
+                    viewModeCombo->setCurrentIndex(4); // 3D view
+                    viewModeCombo->blockSignals(false);
+                    hideAllViewers();
                     modelViewer->show();
                     logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
                 }
@@ -1457,6 +1521,17 @@ private:
             menu.addAction("Apply Textures (All in Folder)", [this, path]() {
                 currentFile = QFileInfo(path).absolutePath();
                 executeCommand("mef bundle-all");
+                QString baseName = QFileInfo(path).completeBaseName();
+                QString modelPath = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
+                if (QFile::exists(modelPath)) {
+                    modelViewer->loadModel(modelPath);
+                    viewModeCombo->blockSignals(true);
+                    viewModeCombo->setCurrentIndex(4); // 3D view
+                    viewModeCombo->blockSignals(false);
+                    hideAllViewers();
+                    modelViewer->show();
+                    logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
+                }
             });
             menu.addAction("Dump to TXT",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("mef info"); });
@@ -1635,7 +1710,7 @@ private:
             else if (cmd == "mef dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
             else if (cmd == "res extract") args << "-o" << outDir;
             else if (cmd == "fnt export") args << "-o" << (outDir + "/" + baseName + ".png");
-            else if (cmd == "qvm disasm") args << "-o" << (outDir + "/" + baseName + "_disasm.txt");
+            else if (cmd == "qvm disasm") args << "-o" << (outDir + "/" + baseName + ".qas");
         }
 
         if (args.isEmpty()) return;
