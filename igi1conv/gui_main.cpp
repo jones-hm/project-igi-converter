@@ -90,7 +90,7 @@ public:
                             const auto& v = geo.vertices[idx];
                             vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
                             normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
-                            uvs.push_back(v.uv.x); uvs.push_back(v.uv.y);
+                            uvs.push_back(v.uv.x); uvs.push_back(1.0f - v.uv.y); // Flip V for OpenGL
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
                             normals.push_back(0); normals.push_back(1); normals.push_back(0);
@@ -98,6 +98,31 @@ public:
                         }
                     };
                     addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
+                }
+                
+                // Try to load the first texture for MEF
+                if (!geo.pmtlTextures.empty()) {
+                    QString texStr = QString::fromStdString(geo.pmtlTextures[0]);
+                    texStr.replace("\\", "/");
+                    QString texPath = info.absolutePath() + "/" + texStr;
+                    QImage img = loadImageSafe(texPath);
+                    if (img.isNull()) {
+                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).fileName();
+                        img = loadImageSafe(texPath);
+                    }
+                    if (img.isNull()) {
+                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".png";
+                        img = loadImageSafe(texPath);
+                    }
+                    if (img.isNull()) {
+                        texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".tga";
+                        img = loadImageSafe(texPath);
+                    }
+                    if (!img.isNull()) {
+                        texture.reset(new QOpenGLTexture(img));
+                        texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+                        texture->setMagnificationFilter(QOpenGLTexture::Linear);
+                    }
                 }
             } catch (...) {}
         } else if (ext == "obj") {
@@ -154,7 +179,7 @@ public:
                                     img = loadImageSafe(texPath);
                                 }
                                 if (!img.isNull()) {
-                                    texture.reset(new QOpenGLTexture(img.mirrored()));
+                                    texture.reset(new QOpenGLTexture(img));
                                     texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
                                     texture->setMagnificationFilter(QOpenGLTexture::Linear);
                                 }
@@ -247,10 +272,10 @@ protected:
             "uniform mat4 view;\n"
             "uniform mat4 projection;\n"
             "void main() {\n"
-            "    FragPos = vec3(model * vec4(aPos, 1.0));\n"
-            "    Normal = mat3(transpose(inverse(model))) * aNorm;\n"
+            "    FragPos = vec3(view * model * vec4(aPos, 1.0));\n"
+            "    Normal = mat3(transpose(inverse(view * model))) * aNorm;\n"
             "    TexCoord = aTex;\n"
-            "    gl_Position = projection * view * model * vec4(aPos, 1.0);\n"
+            "    gl_Position = projection * vec4(FragPos, 1.0);\n"
             "}\n";
             
         const char* fsrc =
@@ -263,10 +288,12 @@ protected:
             "uniform bool hasTexture;\n"
             "void main() {\n"
             "    vec3 norm = normalize(Normal);\n"
-            "    vec3 lightDir = normalize(vec3(0.5, 1.0, 1.0));\n"
-            "    float diff = max(dot(norm, lightDir), 0.1);\n"
+            "    vec3 viewDir = normalize(-FragPos);\n" // Headlight from camera
+            "    float diff = max(dot(norm, viewDir), 0.1);\n"
+            "    float ambient = 0.3;\n"
+            "    float lighting = min(diff + ambient, 1.0);\n"
             "    vec4 baseColor = hasTexture ? texture(texture1, TexCoord) : vec4(0.8, 0.8, 0.8, 1.0);\n"
-            "    FragColor = vec4(diff * baseColor.rgb, baseColor.a);\n"
+            "    FragColor = vec4(lighting * baseColor.rgb, baseColor.a);\n"
             "}\n";
 
         program.addShaderFromSourceCode(QOpenGLShader::Vertex, vsrc);
@@ -320,23 +347,29 @@ protected:
         program.release();
     }
 
+    float wrapAngle(float angle) {
+        angle = fmod(angle, 360.0f);
+        if (angle < 0) angle += 360.0f;
+        return angle;
+    }
+
     void mousePressEvent(QMouseEvent *event) override { lastPos = event->pos(); }
     void mouseMoveEvent(QMouseEvent *event) override {
         int dx = event->pos().x() - lastPos.x();
         int dy = event->pos().y() - lastPos.y();
         if (event->buttons() & Qt::LeftButton) {
-            rotY += dx;
-            rotX += dy;
+            rotY = wrapAngle(rotY + dx);
+            rotX = wrapAngle(rotX + dy);
         } else if (event->buttons() & Qt::RightButton) {
             transX += dx * 0.01f;
             transY -= dy * 0.01f;
         } else if (event->buttons() & Qt::MiddleButton) {
-            rotZ += dx;
+            rotZ = wrapAngle(rotZ + dx);
         }
         update();
         lastPos = event->pos();
         QToolTip::showText(event->globalPos(), QString("Rot X/Alpha: %1\nRot Y/Beta: %2\nRot Z/Gamma: %3\nPan: %4, %5\nZoom: %6")
-                           .arg(rotX).arg(rotY).arg(rotZ).arg(transX).arg(transY).arg(zoom), this);
+                           .arg(rotX, 0, 'f', 1).arg(rotY, 0, 'f', 1).arg(rotZ, 0, 'f', 1).arg(transX, 0, 'f', 2).arg(transY, 0, 'f', 2).arg(zoom, 0, 'f', 1), this);
     }
     void wheelEvent(QWheelEvent *event) override {
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
