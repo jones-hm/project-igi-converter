@@ -81,16 +81,11 @@ DATFile DAT_Parse(const std::string& filepath) {
     if (cursor < tokens.size()) {
         try {
             result.declaredTextureCount = std::stoi(tokens[cursor++]);
-            // The original compiler ignored declaredTextureCount and read all remaining tokens as textures!
-            // level1.dat actually has 427 tokens but declares 426.
-            while (cursor < tokens.size()) {
-                std::string t = tokens[cursor];
-                // Check if we hit the next section (VNAM/BANM count), which is numeric.
-                // However, textures can be purely numeric (like "0").
-                // In vanilla DAT, texture manifest is the last section before optional sections.
-                // Since this format is completely flat, we just consume everything until we hit
-                // something that looks like an optional section count if needed, but in level1.dat
-                // textures are exactly the rest of the file.
+            
+            // Read exactly the declared number of textures.
+            // If the original compiler ignored this and read to EOF, it incorrectly
+            // absorbed the optional section counts (like "0" for VNAM) as texture names!
+            for (int t = 0; t < result.declaredTextureCount && cursor < tokens.size(); ++t) {
                 result.allTextures.push_back(tokens[cursor++]);
             }
         } catch (...) {
@@ -180,6 +175,29 @@ bool DAT_WriteNative(const DATFile& dat, const std::string& outPath, std::string
     emit(std::to_string(dat.allTextures.size()));
     for (const auto& t : dat.allTextures)
         emit(t);
+
+    // --- 2. VNAM section ---
+    if (!dat.vnam_models.empty() || !dat.animations.empty() || !dat.shadows.empty()) {
+        emit(std::to_string(dat.vnam_models.size()));
+        for (const auto& ve : dat.vnam_models) {
+            emit(ve.mainModelName);
+            emit(ve.virModelName);
+            emit(std::to_string(ve.textures.size()));
+            for (const auto& t : ve.textures) emit(t);
+        }
+    }
+
+    // --- 3. Bone Animations section ---
+    if (!dat.animations.empty() || !dat.shadows.empty()) {
+        emit(std::to_string(dat.animations.size()));
+        for (const auto& a : dat.animations) emit(a);
+    }
+
+    // --- 4. Shadow Models section ---
+    if (!dat.shadows.empty()) {
+        emit(std::to_string(dat.shadows.size()));
+        for (const auto& s : dat.shadows) emit(s);
+    }
 
     if (!f.good()) {
         err = "Write error to: " + outPath;
