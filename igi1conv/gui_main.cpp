@@ -39,6 +39,11 @@
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QCoreApplication>
+#include <QSortFilterProxyModel>
+#include <QInputDialog>
+#include <QClipboard>
+#include <QStyleFactory>
+#include <QTextDocument>
 
 #include <vector>
 #include <fstream>
@@ -606,6 +611,27 @@ public:
         viewMenu->addAction("Hex View", [this]() { viewModeCombo->setCurrentIndex(2); });
         viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
         viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addSeparator();
+        viewMenu->addAction("Light Theme", [this]() {
+            qApp->setPalette(qApp->style()->standardPalette());
+        });
+        viewMenu->addAction("Dark Theme", [this]() {
+            QPalette darkPalette;
+            darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
+            darkPalette.setColor(QPalette::WindowText, Qt::white);
+            darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
+            darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
+            darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
+            darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+            darkPalette.setColor(QPalette::Text, Qt::white);
+            darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
+            darkPalette.setColor(QPalette::ButtonText, Qt::white);
+            darkPalette.setColor(QPalette::BrightText, Qt::red);
+            darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
+            darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+            darkPalette.setColor(QPalette::HighlightedText, Qt::black);
+            qApp->setPalette(darkPalette);
+        });
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
@@ -626,19 +652,49 @@ public:
         setCentralWidget(splitter);
 
         // Left side: File browser
+        QWidget* leftWidget = new QWidget(splitter);
+        QVBoxLayout* leftLayout = new QVBoxLayout(leftWidget);
+        fileSearchBox = new QLineEdit();
+        fileSearchBox->setPlaceholderText("Search file by name...");
+        leftLayout->addWidget(fileSearchBox);
+
         fileModel = new QFileSystemModel(this);
         fileModel->setRootPath("");
-        treeView = new QTreeView(splitter);
-        treeView->setModel(fileModel);
-        treeView->setRootIndex(fileModel->index(QDir::currentPath()));
+        proxyModel = new QSortFilterProxyModel(this);
+        proxyModel->setSourceModel(fileModel);
+        proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+        connect(fileSearchBox, &QLineEdit::textChanged, proxyModel, &QSortFilterProxyModel::setFilterWildcard);
+
+        treeView = new QTreeView(leftWidget);
+        treeView->setModel(proxyModel);
+        treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(QDir::currentPath())));
         treeView->setColumnWidth(0, 250);
         treeView->setContextMenuPolicy(Qt::CustomContextMenu);
+        leftLayout->addWidget(treeView);
 
         connect(treeView, &QTreeView::customContextMenuRequested, this, &MainWindow::showContextMenu);
 
         // Right side: Viewer and Controls
         QWidget* rightWidget = new QWidget(splitter);
         QVBoxLayout* rightLayout = new QVBoxLayout(rightWidget);
+
+        QHBoxLayout* textSearchLayout = new QHBoxLayout();
+        textSearchBox = new QLineEdit();
+        textSearchBox->setPlaceholderText("Search text inside file...");
+        QPushButton* findNextBtn = new QPushButton("Find Next");
+        textSearchLayout->addWidget(textSearchBox);
+        textSearchLayout->addWidget(findNextBtn);
+        connect(findNextBtn, &QPushButton::clicked, this, [this]() {
+            QString query = textSearchBox->text();
+            if (!query.isEmpty() && viewerEdit->isVisible()) {
+                if (!viewerEdit->find(query)) {
+                    viewerEdit->moveCursor(QTextCursor::Start);
+                    viewerEdit->find(query);
+                }
+            }
+        });
+        rightLayout->addLayout(textSearchLayout);
 
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("View Mode:"));
@@ -672,13 +728,14 @@ public:
 
         rightLayout->addWidget(debugGroup, 1);
 
-        splitter->addWidget(treeView);
+        splitter->addWidget(leftWidget);
         splitter->addWidget(rightWidget);
         splitter->setSizes({300, 900});
 
         connect(treeView->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& current) {
-            if (!fileModel->isDir(current)) {
-                loadFile(fileModel->filePath(current));
+            QModelIndex srcIndex = proxyModel->mapToSource(current);
+            if (!fileModel->isDir(srcIndex)) {
+                loadFile(fileModel->filePath(srcIndex));
             }
         });
 
@@ -693,7 +750,10 @@ public:
 
 private:
     QFileSystemModel* fileModel;
+    QSortFilterProxyModel* proxyModel;
     QTreeView* treeView;
+    QLineEdit* fileSearchBox;
+    QLineEdit* textSearchBox;
     QComboBox* viewModeCombo;
     QTextEdit* viewerEdit;
     QLabel* imageLabel;
@@ -701,6 +761,8 @@ private:
     QTextEdit* consoleEdit;
     QString currentFile;
     QString currentExt;
+    QString clipboardFilePath;
+    bool clipboardIsCut = false;
 
     void hideAllViewers() {
         viewerEdit->hide();
@@ -710,9 +772,10 @@ private:
 
     void showContextMenu(const QPoint& pos) {
         QModelIndex index = treeView->indexAt(pos);
-        if (!index.isValid() || fileModel->isDir(index)) return;
+        QModelIndex srcIndex = proxyModel->mapToSource(index);
+        if (!srcIndex.isValid() || fileModel->isDir(srcIndex)) return;
 
-        QString path = fileModel->filePath(index);
+        QString path = fileModel->filePath(srcIndex);
         QString ext = QFileInfo(path).suffix().toLower();
 
         QMenu menu;
@@ -723,6 +786,33 @@ private:
         viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
         viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
         viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
+        menu.addSeparator();
+
+        QMenu* editFileMenu = menu.addMenu("File Operations");
+        editFileMenu->addAction("Rename...", [this, path]() {
+            bool ok;
+            QString newName = QInputDialog::getText(this, "Rename File", "New name:", QLineEdit::Normal, QFileInfo(path).fileName(), &ok);
+            if (ok && !newName.isEmpty()) {
+                QFile::rename(path, QFileInfo(path).absolutePath() + "/" + newName);
+            }
+        });
+        editFileMenu->addAction("Delete", [this, path]() {
+            if (QMessageBox::question(this, "Delete", "Are you sure you want to delete " + QFileInfo(path).fileName() + "?") == QMessageBox::Yes) {
+                QFile(path).remove();
+            }
+        });
+        editFileMenu->addAction("Cut", [this, path]() { clipboardFilePath = path; clipboardIsCut = true; });
+        editFileMenu->addAction("Copy", [this, path]() { clipboardFilePath = path; clipboardIsCut = false; });
+        if (!clipboardFilePath.isEmpty()) {
+            editFileMenu->addAction("Paste Here", [this, path]() {
+                QString dest = QFileInfo(path).absolutePath() + "/" + QFileInfo(clipboardFilePath).fileName();
+                QFile::copy(clipboardFilePath, dest);
+                if (clipboardIsCut) {
+                    QFile(clipboardFilePath).remove();
+                    clipboardFilePath = "";
+                }
+            });
+        }
         menu.addSeparator();
 
         if (ext == "tex" || ext == "spr" || ext == "pic") {
