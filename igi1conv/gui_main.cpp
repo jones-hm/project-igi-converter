@@ -34,6 +34,11 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QToolTip>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QCoreApplication>
 
 #include <vector>
 #include <fstream>
@@ -62,8 +67,14 @@ static QImage loadImageSafe(const QString& path) {
 
 class ModelViewer : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
+    QTextEdit* infoOverlay;
+
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
+        infoOverlay = new QTextEdit(this);
+        infoOverlay->setReadOnly(true);
+        infoOverlay->setStyleSheet("background-color: rgba(0, 20, 0, 200); color: #00FF66; border: 1px solid #00FF66; padding: 5px; font-family: monospace;");
+        infoOverlay->hide();
     }
     
     ~ModelViewer() {
@@ -80,6 +91,8 @@ public:
         
         QFileInfo info(path);
         QString ext = info.suffix().toLower();
+        
+        updateModelInfo(info.completeBaseName());
         
         if (ext == "mef") {
             try {
@@ -253,6 +266,98 @@ protected:
         if (!vbo.isCreated()) vbo.create();
         vbo.bind();
         vbo.allocate(bufferData.data(), bufferData.size() * sizeof(float));
+        vbo.release();
+    }
+
+    void updateModelInfo(const QString& baseName) {
+        if (baseName.isEmpty()) {
+            infoOverlay->hide();
+            return;
+        }
+
+        static QJsonArray modelsArray;
+        static QJsonObject allLevelsObj;
+        static bool loaded = false;
+
+        if (!loaded) {
+            loaded = true;
+            QString appDir = QCoreApplication::applicationDirPath();
+            QFile f1(appDir + "/IGIModels.json");
+            if (f1.open(QIODevice::ReadOnly)) {
+                modelsArray = QJsonDocument::fromJson(f1.readAll()).array();
+            }
+            QFile f2(appDir + "/IGIModelsAllLevel.json");
+            if (f2.open(QIODevice::ReadOnly)) {
+                allLevelsObj = QJsonDocument::fromJson(f2.readAll()).object();
+            }
+        }
+
+        QString info = "Model ID: " + baseName + "\n\n";
+
+        // Find Model Name from IGIModels.json
+        QString modelName = "Unknown";
+        for (const QJsonValue& val : modelsArray) {
+            QJsonObject obj = val.toObject();
+            if (obj["ModelId"].toString() == baseName || obj["ModelId"].toString().toLower() == baseName.toLower()) {
+                modelName = obj["ModelName"].toString();
+                break;
+            }
+        }
+        info += "Model Name: " + modelName + "\n\n";
+
+        // Find instances in IGIModelsAllLevel.json
+        info += "--- Level Instances ---\n";
+        int totalInstances = 0;
+        
+        for (auto it = allLevelsObj.begin(); it != allLevelsObj.end(); ++it) {
+            QString levelName = it.key();
+            QJsonObject levelObj = it.value().toObject();
+            
+            int levelInstances = 0;
+            QString levelDetails = "";
+
+            for (auto catIt = levelObj.begin(); catIt != levelObj.end(); ++catIt) {
+                QString catName = catIt.key();
+                QJsonArray items = catIt.value().toArray();
+                
+                for (const QJsonValue& itemVal : items) {
+                    QJsonObject item = itemVal.toObject();
+                    
+                    bool match = false;
+                    if (item.contains("Model ID") && item["Model ID"].toString() == baseName) {
+                        match = true;
+                    } else if (item.contains("Model") && item["Model"].toObject()["ID"].toString() == baseName) {
+                        match = true;
+                    }
+
+                    if (match) {
+                        levelInstances++;
+                        totalInstances++;
+                        if (levelInstances <= 5) {
+                            QString name = item["Name"].toString();
+                            if (name.isEmpty() && item.contains("Type")) name = item["Type"].toString();
+                            double px = item.contains("Pos X") ? item["Pos X"].toDouble() : item["Position"].toObject()["X"].toDouble();
+                            double py = item.contains("Pos Y") ? item["Pos Y"].toDouble() : item["Position"].toObject()["Y"].toDouble();
+                            double pz = item.contains("Pos Z") ? item["Pos Z"].toDouble() : item["Position"].toObject()["Z"].toDouble();
+                            levelDetails += QString("- %1 (%2)\n  Pos: %3, %4, %5\n")
+                                .arg(name).arg(catName).arg(px, 0, 'f', 1).arg(py, 0, 'f', 1).arg(pz, 0, 'f', 1);
+                        }
+                    }
+                }
+            }
+            if (levelInstances > 0) {
+                info += levelName + " (" + QString::number(levelInstances) + " instances):\n" + levelDetails;
+                if (levelInstances > 5) {
+                    info += QString("  ... and %1 more in this level\n").arg(levelInstances - 5);
+                }
+                info += "\n";
+            }
+        }
+
+        info += "Total Instances in Game: " + QString::number(totalInstances) + "\n";
+
+        infoOverlay->setPlainText(info);
+        infoOverlay->show();
     }
 
     void initializeGL() override {
@@ -345,6 +450,11 @@ protected:
         program.disableAttributeArray(2);
         vbo.release();
         program.release();
+    }
+
+    void resizeEvent(QResizeEvent *event) override {
+        QOpenGLWidget::resizeEvent(event);
+        infoOverlay->setGeometry(10, 10, 320, height() - 20);
     }
 
     float wrapAngle(float angle) {
