@@ -44,44 +44,15 @@ set_target_properties(igi1conv PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
 )
 
-# --- GUI Dependencies (GLFW + ImGui) ---
-include(FetchContent)
-FetchContent_Declare(
-    glfw
-    URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(glfw)
+# --- GUI Dependencies (Qt6) ---
+set(CMAKE_PREFIX_PATH "D:/Qt/6.5.3/msvc2019_64")
+find_package(Qt6 COMPONENTS Core Gui Widgets REQUIRED)
 
-FetchContent_Declare(
-    imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG docking
-)
-FetchContent_GetProperties(imgui)
-if(NOT imgui_POPULATED)
-    FetchContent_Populate(imgui)
-    add_library(imgui STATIC
-        ${imgui_SOURCE_DIR}/imgui.cpp
-        ${imgui_SOURCE_DIR}/imgui_demo.cpp
-        ${imgui_SOURCE_DIR}/imgui_draw.cpp
-        ${imgui_SOURCE_DIR}/imgui_tables.cpp
-        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
-    )
-    target_include_directories(imgui PUBLIC 
-        ${imgui_SOURCE_DIR} 
-        ${imgui_SOURCE_DIR}/backends
-    )
-    target_link_libraries(imgui PUBLIC glfw)
-endif()
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
 
-find_package(OpenGL REQUIRED)
-target_link_libraries(igi1conv PRIVATE imgui glfw OpenGL::GL)
+target_link_libraries(igi1conv PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
 # ---------------------------------------
 
 # Single source of truth for the version string (also stamped in assets/igi1conv.rc).

@@ -1,600 +1,310 @@
 #include "gui_main.h"
-#include <iostream>
-#include <filesystem>
+
+#include <QApplication>
+#include <QMainWindow>
+#include <QSplitter>
+#include <QFileSystemModel>
+#include <QTreeView>
+#include <QTextEdit>
+#include <QLabel>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QProcess>
+#include <QFileInfo>
+#include <QPixmap>
+#include <QMessageBox>
+#include <QLineEdit>
+#include <QGroupBox>
+#include <QFontDatabase>
+
+#include <vector>
 #include <fstream>
 #include <sstream>
-#include <memory>
-#include <array>
-#include <vector>
 
-#include "imgui.h"
-#include "imgui_internal.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
-
-#include <GLFW/glfw3.h>
-
-#include "qvm_parser.h"
-#include "qvm_decompiler.h"
 #include "tex_parser.h"
-#include "mef_native.h"
 
-#define GLM_FORCE_SWIZZLE
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
+// Define a simple main window without Q_OBJECT to avoid MOC issues in a single file
+class MainWindow : public QMainWindow {
+public:
+    MainWindow() {
+        setWindowTitle("IGI Game Asset Converter (Qt Advanced UI)");
+        resize(1200, 800);
 
-#include "tinygltf/stb_image.h"
+        QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
+        setCentralWidget(splitter);
 
-namespace fs = std::filesystem;
+        // Left side: File browser
+        QFileSystemModel* model = new QFileSystemModel(this);
+        model->setRootPath("");
+        QTreeView* treeView = new QTreeView(splitter);
+        treeView->setModel(model);
+        treeView->setRootIndex(model->index(QDir::currentPath()));
+        treeView->setColumnWidth(0, 250);
 
-static fs::path current_dir = fs::current_path();
-static fs::path selected_file;
-static GLuint current_texture = 0;
-static int current_tex_w = 0, current_tex_h = 0;
-static bool show_image = false;
+        // Right side: Viewer and Controls
+        QWidget* rightWidget = new QWidget(splitter);
+        QVBoxLayout* rightLayout = new QVBoxLayout(rightWidget);
 
-static ParsedGeometry current_mef;
-static bool show_mef = false;
-static float mef_rot_x = 0.0f;
-static float mef_rot_y = 0.0f;
-static float mef_zoom = 1.0f;
+        viewerEdit = new QTextEdit();
+        viewerEdit->setReadOnly(true);
+        const QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        viewerEdit->setFont(fixedFont);
 
-static std::vector<uint8_t> current_binary;
-static bool show_hex = false;
+        imageLabel = new QLabel();
+        imageLabel->setAlignment(Qt::AlignCenter);
+        imageLabel->hide();
 
-static std::vector<char> text_buffer(10 * 1024 * 1024, 0); // 10MB text buffer
-static std::string console_output;
-static char output_dir_buf[512] = "";
+        rightLayout->addWidget(viewerEdit, 3);
+        rightLayout->addWidget(imageLabel, 3);
 
-static std::string exec(const char* cmd) {
-#ifdef _WIN32
-    std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd, "r"), _pclose);
-#else
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-#endif
-    if (!pipe) return "Error: Failed to run command!";
-    std::array<char, 128> buffer;
-    std::string result;
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
-}
+        // Controls
+        QGroupBox* controlsGroup = new QGroupBox("Conversion Options");
+        QVBoxLayout* controlsLayout = new QVBoxLayout(controlsGroup);
 
-static void LoadTexture(const uint8_t* rgba, int w, int h) {
-    if (current_texture != 0) {
-        glDeleteTextures(1, &current_texture);
-        current_texture = 0;
-    }
-    if (!rgba) return;
-    
-    glGenTextures(1, &current_texture);
-    glBindTexture(GL_TEXTURE_2D, current_texture);
-    
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    
-    current_tex_w = w;
-    current_tex_h = h;
-}
+        QHBoxLayout* outDirLayout = new QHBoxLayout();
+        outDirLayout->addWidget(new QLabel("Output Path (Optional):"));
+        outDirEdit = new QLineEdit();
+        outDirLayout->addWidget(outDirEdit);
+        controlsLayout->addLayout(outDirLayout);
 
-static void LoadSelectedFile() {
-    text_buffer[0] = '\0';
-    show_image = false;
-    show_mef = false;
-    show_hex = false;
-    current_binary.clear();
-    
-    if (current_texture != 0) {
-        glDeleteTextures(1, &current_texture);
-        current_texture = 0;
-    }
+        QHBoxLayout* buttonsLayout = new QHBoxLayout();
+        btnAction1 = new QPushButton("Action 1");
+        btnAction2 = new QPushButton("Action 2");
+        btnAction1->hide();
+        btnAction2->hide();
+        buttonsLayout->addWidget(btnAction1);
+        buttonsLayout->addWidget(btnAction2);
+        buttonsLayout->addStretch();
+        controlsLayout->addLayout(buttonsLayout);
 
-    if (!fs::exists(selected_file)) return;
-    if (fs::is_directory(selected_file)) return;
-    
-    std::string ext = selected_file.extension().string();
-    for (auto& c : ext) c = tolower(c);
-    
-    if (ext == ".qvm") {
-        QVMFile qvm = QVM_Parse(selected_file.string());
-        std::string dec;
-        if (qvm.valid) {
-            dec = QVM_DecompileToString(qvm);
-            if (dec.empty()) dec = "// Decompilation failed";
-        } else {
-            dec = "Failed to parse QVM:\n" + qvm.error;
-        }
-        strncpy(text_buffer.data(), dec.c_str(), text_buffer.size() - 1);
-    } else if (ext == ".qsc" || ext == ".txt" || ext == ".json" || ext == ".md" || ext == ".h" || ext == ".cpp" || ext == ".dat") {
-        std::ifstream ifs(selected_file, std::ios::binary);
-        if (ifs) {
-            std::ostringstream ss;
-            ss << ifs.rdbuf();
-            std::string content = ss.str();
-            strncpy(text_buffer.data(), content.c_str(), text_buffer.size() - 1);
-        }
-    } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") {
-        int w, h, channels;
-        uint8_t* data = stbi_load(selected_file.string().c_str(), &w, &h, &channels, 4);
-        if (data) {
-            LoadTexture(data, w, h);
-            show_image = true;
-            stbi_image_free(data);
-        } else {
-            std::string err = "Failed to load image:\n" + std::string(stbi_failure_reason());
-            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
-        }
-    } else if (ext == ".tex" || ext == ".spr" || ext == ".pic") {
-        TEXFile tex = TEX_Parse(selected_file.string());
-        if (tex.valid && !tex.images.empty()) {
-            std::vector<uint8_t> rgba(tex.images[0].width * tex.images[0].height * 4, 255);
-            const auto& img = tex.images[0];
-            if (img.mode == 3) {
-                for (size_t i = 0; i < img.pixels.size() / 4; ++i) {
-                    rgba[i*4 + 0] = img.pixels[i*4 + 1];
-                    rgba[i*4 + 1] = img.pixels[i*4 + 2];
-                    rgba[i*4 + 2] = img.pixels[i*4 + 3];
-                    rgba[i*4 + 3] = img.pixels[i*4 + 0];
-                }
-            } else if (img.mode == 2) {
-                for (size_t i = 0; i < img.pixels.size() / 2; ++i) {
-                    uint16_t p = (img.pixels[i*2+1] << 8) | img.pixels[i*2];
-                    rgba[i*4 + 0] = ((p >> 11) & 0x1F) * 255 / 31;
-                    rgba[i*4 + 1] = ((p >> 5) & 0x3F) * 255 / 63;
-                    rgba[i*4 + 2] = (p & 0x1F) * 255 / 31;
-                    rgba[i*4 + 3] = 255;
-                }
+        controlsLayout->addWidget(new QLabel("Console Output:"));
+        consoleEdit = new QTextEdit();
+        consoleEdit->setReadOnly(true);
+        consoleEdit->setFont(fixedFont);
+        controlsLayout->addWidget(consoleEdit, 1);
+
+        rightLayout->addWidget(controlsGroup, 2);
+
+        splitter->addWidget(treeView);
+        splitter->addWidget(rightWidget);
+        splitter->setSizes({300, 900});
+
+        connect(treeView->selectionModel(), &QItemSelectionModel::currentChanged, this, [this, model](const QModelIndex& current) {
+            if (!model->isDir(current)) {
+                loadFile(model->filePath(current));
             }
-            LoadTexture(rgba.data(), img.width, img.height);
-            show_image = true;
-        } else {
-            std::string err = "Failed to parse image:\n" + tex.error;
-            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
-        }
-    } else if (ext == ".mef") {
-        try {
-            current_mef = ParseMefFile(selected_file.string());
-            show_mef = true;
-            mef_rot_x = 0.0f;
-            mef_rot_y = 0.0f;
-            mef_zoom = 1.0f;
-        } catch (std::exception& e) {
-            std::string err = std::string("Failed to parse MEF:\n") + e.what();
-            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
-        }
-    } else {
-        std::ifstream ifs(selected_file, std::ios::binary);
-        if (ifs) {
-            current_binary = std::vector<uint8_t>(std::istreambuf_iterator<char>(ifs), {});
-            show_hex = true;
-        } else {
-            std::string err = "Preview not supported for " + ext + "\n(Binary or unknown format)";
-            strncpy(text_buffer.data(), err.c_str(), text_buffer.size() - 1);
-        }
+        });
+
+        connect(btnAction1, &QPushButton::clicked, this, [this]() { executeAction(1); });
+        connect(btnAction2, &QPushButton::clicked, this, [this]() { executeAction(2); });
     }
-}
 
-static void DrawHexViewer(const char* label, const std::vector<uint8_t>& data) {
-    ImGui::BeginChild(label, ImVec2(0, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    if (data.empty()) { ImGui::Text("File is empty."); ImGui::EndChild(); return; }
+private:
+    QTextEdit* viewerEdit;
+    QLabel* imageLabel;
+    QLineEdit* outDirEdit;
+    QPushButton* btnAction1;
+    QPushButton* btnAction2;
+    QTextEdit* consoleEdit;
+    QString currentFile;
+    QString currentExt;
 
-    ImGuiListClipper clipper;
-    clipper.Begin((int)((data.size() + 15) / 16));
-    while (clipper.Step()) {
-        for (int line_i = clipper.DisplayStart; line_i < clipper.DisplayEnd; line_i++) {
-            size_t offset = (size_t)line_i * 16;
-            ImGui::Text("%08zX: ", offset);
-            ImGui::SameLine();
+    void loadFile(const QString& path) {
+        currentFile = path;
+        QFileInfo info(path);
+        currentExt = info.suffix().toLower();
 
-            for (int n = 0; n < 16; n++) {
-                if (n > 0 && n % 4 == 0) ImGui::SameLine();
-                else if (n > 0) ImGui::SameLine(0, 4);
+        viewerEdit->clear();
+        imageLabel->clear();
+        btnAction1->hide();
+        btnAction2->hide();
 
-                if (offset + n < data.size()) {
-                    ImGui::Text("%02X", data[offset + n]);
-                } else {
-                    ImGui::Text("  ");
-                }
+        if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp") {
+            QPixmap pix(path);
+            if (!pix.isNull()) {
+                imageLabel->setPixmap(pix.scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                viewerEdit->hide();
+                imageLabel->show();
+            } else {
+                viewerEdit->setText("Failed to load image.");
+                imageLabel->hide();
+                viewerEdit->show();
             }
-
-            ImGui::SameLine(0, 10);
-            ImGui::Text("| ");
-            ImGui::SameLine(0, 0);
-
-            char ascii[17];
-            for (int n = 0; n < 16; n++) {
-                if (offset + n < data.size()) {
-                    uint8_t c = data[offset + n];
-                    ascii[n] = (c >= 32 && c < 127) ? c : '.';
-                } else {
-                    ascii[n] = ' ';
-                }
-            }
-            ascii[16] = '\0';
-            ImGui::Text("%s", ascii);
-        }
-    }
-    ImGui::EndChild();
-}
-
-static void glfw_error_callback(int error, const char* description)
-{
-    std::cerr << "GLFW Error " << error << ": " << description << std::endl;
-}
-
-static void ApplyModernTheme() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 5.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 9.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_Text]                   = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_WindowBg]               = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-    colors[ImGuiCol_PopupBg]                = ImVec4(0.11f, 0.11f, 0.14f, 0.92f);
-    colors[ImGuiCol_Border]                 = ImVec4(0.25f, 0.25f, 0.27f, 0.50f);
-    colors[ImGuiCol_FrameBg]                = ImVec4(0.20f, 0.20f, 0.22f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.27f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.33f, 1.00f);
-    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
-    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.05f, 0.05f, 0.05f, 0.54f);
-    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.34f, 0.34f, 0.34f, 0.54f);
-    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.40f, 0.40f, 0.40f, 0.54f);
-    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.56f, 0.56f, 0.56f, 0.54f);
-    colors[ImGuiCol_CheckMark]              = ImVec4(0.33f, 0.67f, 0.86f, 1.00f);
-    colors[ImGuiCol_SliderGrab]             = ImVec4(0.34f, 0.34f, 0.34f, 0.54f);
-    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.56f, 0.56f, 0.56f, 0.54f);
-    colors[ImGuiCol_Button]                 = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
-    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
-    colors[ImGuiCol_ButtonActive]           = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
-    colors[ImGuiCol_Header]                 = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
-    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
-    colors[ImGuiCol_HeaderActive]           = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
-    colors[ImGuiCol_Separator]              = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
-    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
-    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
-    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
-    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
-    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
-    colors[ImGuiCol_Tab]                    = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
-    colors[ImGuiCol_TabHovered]             = ImVec4(0.28f, 0.28f, 0.32f, 1.00f);
-    colors[ImGuiCol_TabActive]              = ImVec4(0.22f, 0.22f, 0.25f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
-    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
-    colors[ImGuiCol_DockingPreview]         = ImVec4(0.33f, 0.67f, 0.86f, 0.70f);
-    colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-}
-
-int run_gui()
-{
-    glfwSetErrorCallback(glfw_error_callback);
-    if (!glfwInit())
-        return 1;
-
-    const char* glsl_version = "#version 130";
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "IGI Game Asset Viewer & Converter", nullptr, nullptr);
-    if (window == nullptr)
-        return 1;
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // Enable vsync
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-
-    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
-    if (!font) {
-        font = io.Fonts->AddFontDefault();
-    }
-    // Fixed width font for hex viewer
-    ImFont* hex_font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 16.0f);
-    if (!hex_font) hex_font = font;
-
-    ApplyModernTheme();
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init(glsl_version);
-
-    while (!glfwWindowShouldClose(window))
-    {
-        glfwPollEvents();
-
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-
-        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
-        ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(viewport->WorkSize);
-        ImGui::SetNextWindowViewport(viewport->ID);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-        window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground;
-        
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-        ImGui::Begin("MainDockSpace", nullptr, window_flags);
-        ImGui::PopStyleVar();
-        ImGui::PopStyleVar(2);
-
-        ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-        
-        static bool first_time = true;
-        if (first_time) {
-            first_time = false;
-            ImGui::DockBuilderRemoveNode(dockspace_id); 
-            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
-
-            ImGuiID dock_main_id = dockspace_id;
-            ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
-            ImGuiID dock_id_bottom_left = ImGui::DockBuilderSplitNode(dock_id_left, ImGuiDir_Down, 0.30f, nullptr, &dock_id_left);
-
-            ImGui::DockBuilderDockWindow("Asset Browser", dock_id_left);
-            ImGui::DockBuilderDockWindow("Convert", dock_id_bottom_left);
-            ImGui::DockBuilderDockWindow("Viewer", dock_main_id);
-            ImGui::DockBuilderFinish(dockspace_id);
-        }
-        ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
-        ImGui::End();
-
-        ImGui::Begin("Asset Browser");
-        ImGui::Text("Current Dir: %s", current_dir.string().c_str());
-        if (ImGui::Button("..", ImVec2(50, 0))) {
-            current_dir = current_dir.parent_path();
-        }
-        ImGui::Separator();
-        
-        ImGui::BeginChild("Files");
-        try {
-            for (const auto& entry : fs::directory_iterator(current_dir)) {
-                bool is_dir = entry.is_directory();
-                std::string name = entry.path().filename().string();
-                if (is_dir) name = "[DIR] " + name;
-                
-                if (ImGui::Selectable(name.c_str(), selected_file == entry.path())) {
-                    if (is_dir) {
-                        current_dir = entry.path();
-                    } else {
-                        selected_file = entry.path();
-                        LoadSelectedFile();
+        } else if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
+            // Use native game format parser
+            TEXFile tex = TEX_Parse(path.toStdString());
+            if (tex.valid && !tex.images.empty()) {
+                const auto& img = tex.images[0];
+                QImage qimg(img.width, img.height, QImage::Format_ARGB32);
+                if (img.mode == 3) {
+                    for (size_t i = 0; i < img.pixels.size() / 4; ++i) {
+                        qimg.setPixelColor(i % img.width, i / img.width, 
+                            QColor(img.pixels[i*4], img.pixels[i*4+1], img.pixels[i*4+2], img.pixels[i*4+3]));
+                    }
+                } else if (img.mode == 2) {
+                    for (size_t i = 0; i < img.pixels.size() / 2; ++i) {
+                        uint16_t pix = (img.pixels[i*2+1] << 8) | img.pixels[i*2];
+                        qimg.setPixelColor(i % img.width, i / img.width, 
+                            QColor(((pix >> 11) & 0x1F) * 255 / 31, ((pix >> 5) & 0x3F) * 255 / 63, (pix & 0x1F) * 255 / 31, 255));
                     }
                 }
-                
-                if (ImGui::BeginPopupContextItem(name.c_str())) {
-                    if (ImGui::MenuItem("View / Load")) {
-                        if (is_dir) {
-                            current_dir = entry.path();
+                imageLabel->setPixmap(QPixmap::fromImage(qimg).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                viewerEdit->hide();
+                imageLabel->show();
+            } else {
+                viewerEdit->setText("Failed to load game texture.");
+                imageLabel->hide();
+                viewerEdit->show();
+            }
+            btnAction1->setText("Convert to PNG");
+            btnAction2->setText("Convert to TGA");
+            btnAction1->show();
+            btnAction2->show();
+        } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat") {
+            QFile file(path);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                viewerEdit->setPlainText(QString::fromUtf8(file.readAll()));
+            }
+            imageLabel->hide();
+            viewerEdit->show();
+
+            if (currentExt == "qsc") {
+                btnAction1->setText("Compile to QVM");
+                btnAction1->show();
+            } else if (currentExt == "dat") {
+                btnAction1->setText("Dump DAT Info");
+                btnAction1->show();
+            }
+        } else {
+            // Hex view fallback
+            QFile file(path);
+            if (file.open(QIODevice::ReadOnly)) {
+                QByteArray data = file.readAll();
+                QString hexView;
+                int lines = qMin(data.size() / 16 + 1, 4000);
+                for (int i = 0; i < lines; ++i) {
+                    int offset = i * 16;
+                    hexView += QString("%1: ").arg(offset, 8, 16, QChar('0')).toUpper();
+                    
+                    for (int n = 0; n < 16; n++) {
+                        if (offset + n < data.size()) {
+                            hexView += QString("%1 ").arg((quint8)data[offset + n], 2, 16, QChar('0')).toUpper();
                         } else {
-                            selected_file = entry.path();
-                            LoadSelectedFile();
+                            hexView += "   ";
                         }
                     }
-                    if (!is_dir) {
-                        if (ImGui::MenuItem("Open Convert Options")) {
-                            selected_file = entry.path();
-                            LoadSelectedFile();
-                            ImGui::SetWindowFocus("Convert");
+                    hexView += "| ";
+                    for (int n = 0; n < 16; n++) {
+                        if (offset + n < data.size()) {
+                            char c = data[offset + n];
+                            hexView += (c >= 32 && c < 127) ? QChar(c) : QChar('.');
+                        } else {
+                            hexView += " ";
                         }
                     }
-                    ImGui::EndPopup();
+                    hexView += "\n";
                 }
+                if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
+                viewerEdit->setPlainText(hexView);
             }
-        } catch (...) {}
-        ImGui::EndChild();
-        ImGui::End();
+            imageLabel->hide();
+            viewerEdit->show();
 
-        ImGui::Begin("Viewer");
-        if (!selected_file.empty()) {
-            ImGui::Text("File: %s", selected_file.string().c_str());
-            ImGui::Separator();
-            
-            if (show_mef) {
-                ImVec2 avail = ImGui::GetContentRegionAvail();
-                if (avail.x > 0 && avail.y > 0) {
-                    ImVec2 pos = ImGui::GetCursorScreenPos();
-                    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-                    
-                    ImGui::InvisibleButton("##mef_view", avail);
-                    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                        ImVec2 delta = ImGui::GetIO().MouseDelta;
-                        mef_rot_y += delta.x * 0.01f;
-                        mef_rot_x += delta.y * 0.01f;
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        mef_zoom += ImGui::GetIO().MouseWheel * 0.1f;
-                        if (mef_zoom < 0.1f) mef_zoom = 0.1f;
-                    }
-
-                    glm::vec3 min_pt(1e9f), max_pt(-1e9f);
-                    for (auto& v : current_mef.vertices) {
-                        min_pt = glm::min(min_pt, v.pos);
-                        max_pt = glm::max(max_pt, v.pos);
-                    }
-                    if (min_pt.x > max_pt.x) { min_pt = glm::vec3(-1); max_pt = glm::vec3(1); }
-                    
-                    glm::vec3 center = (min_pt + max_pt) * 0.5f;
-                    float size = glm::length(max_pt - min_pt);
-                    if (size < 0.001f) size = 1.0f;
-
-                    glm::mat4 proj = glm::perspective(glm::radians(45.0f), avail.x / avail.y, 0.1f, 10000.0f);
-                    glm::mat4 view = glm::lookAt(glm::vec3(0, 0, size * 1.5f / mef_zoom), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
-                    
-                    glm::mat4 model = glm::mat4(1.0f);
-                    model = glm::rotate(model, mef_rot_x, glm::vec3(1, 0, 0));
-                    model = glm::rotate(model, mef_rot_y, glm::vec3(0, 1, 0));
-                    model = glm::translate(model, -center);
-
-                    glm::mat4 mvp = proj * view * model;
-
-                    draw_list->AddRectFilled(pos, ImVec2(pos.x + avail.x, pos.y + avail.y), IM_COL32(30, 30, 30, 255));
-
-                    int drawn_tris = 0;
-                    for (auto& tri : current_mef.triangles) {
-                        glm::vec4 p1 = mvp * glm::vec4(current_mef.vertices[tri[0]].pos, 1.0f);
-                        glm::vec4 p2 = mvp * glm::vec4(current_mef.vertices[tri[1]].pos, 1.0f);
-                        glm::vec4 p3 = mvp * glm::vec4(current_mef.vertices[tri[2]].pos, 1.0f);
-
-                        if (p1.w <= 0 || p2.w <= 0 || p3.w <= 0) continue; 
-
-                        p1 /= p1.w; p2 /= p2.w; p3 /= p3.w;
-
-                        ImVec2 sp1 = ImVec2(pos.x + (p1.x + 1.0f) * 0.5f * avail.x, pos.y + (1.0f - p1.y) * 0.5f * avail.y);
-                        ImVec2 sp2 = ImVec2(pos.x + (p2.x + 1.0f) * 0.5f * avail.x, pos.y + (1.0f - p2.y) * 0.5f * avail.y);
-                        ImVec2 sp3 = ImVec2(pos.x + (p3.x + 1.0f) * 0.5f * avail.x, pos.y + (1.0f - p3.y) * 0.5f * avail.y);
-
-                        float area = (sp2.x - sp1.x) * (sp3.y - sp1.y) - (sp3.x - sp1.x) * (sp2.y - sp1.y);
-                        if (area > 0) {
-                            draw_list->AddTriangle(sp1, sp2, sp3, IM_COL32(0, 255, 0, 128));
-                            drawn_tris++;
-                        }
-                    }
-                    ImGui::SetCursorScreenPos(pos);
-                    ImGui::Text("Rendered %d / %d triangles", drawn_tris, (int)current_mef.triangles.size());
-                }
-            } else if (show_image && current_texture != 0) {
-                ImGui::Image((void*)(intptr_t)current_texture, ImVec2(current_tex_w, current_tex_h));
-            } else if (show_hex) {
-                ImGui::PushFont(hex_font);
-                DrawHexViewer("HexView", current_binary);
-                ImGui::PopFont();
-            } else {
-                ImGui::InputTextMultiline("##source", text_buffer.data(), text_buffer.size(), ImVec2(-1.0f, -1.0f));
+            if (currentExt == "qvm") {
+                btnAction1->setText("Decompile to QSC");
+                btnAction1->show();
+            } else if (currentExt == "mef") {
+                btnAction1->setText("Export to OBJ");
+                btnAction1->show();
+            } else if (currentExt == "res") {
+                btnAction1->setText("Extract RES");
+                btnAction1->show();
+            } else if (currentExt == "fnt") {
+                btnAction1->setText("Export PNG");
+                btnAction2->setText("FNT Info");
+                btnAction1->show();
+                btnAction2->show();
             }
-        } else {
-            ImGui::Text("No file selected.");
         }
-        ImGui::End();
+    }
+
+    void executeAction(int actionIndex) {
+        if (currentFile.isEmpty()) return;
+
+        QString outArg = outDirEdit->text().trimmed();
+        QStringList args;
+
+        if (currentExt == "qsc" && actionIndex == 1) {
+            args << "qsc" << "compile" << currentFile;
+        } else if (currentExt == "qvm" && actionIndex == 1) {
+            args << "qvm" << "decompile" << currentFile;
+        } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 1) {
+            args << "tex" << "to-png" << currentFile;
+        } else if ((currentExt == "tex" || currentExt == "spr" || currentExt == "pic") && actionIndex == 2) {
+            args << "tex" << "to-tga" << currentFile;
+        } else if (currentExt == "mef" && actionIndex == 1) {
+            args << "mef" << "export" << currentFile;
+        } else if (currentExt == "res" && actionIndex == 1) {
+            args << "res" << "extract" << currentFile;
+        } else if (currentExt == "dat" && actionIndex == 1) {
+            args << "dat" << "info" << currentFile;
+        } else if (currentExt == "fnt" && actionIndex == 1) {
+            args << "fnt" << "export" << currentFile;
+        } else if (currentExt == "fnt" && actionIndex == 2) {
+            args << "fnt" << "info" << currentFile;
+        }
+
+        if (args.isEmpty()) return;
+
+        if (!outArg.isEmpty() && currentExt != "dat" && !(currentExt == "fnt" && actionIndex == 2)) {
+            args << "-o" << outArg;
+        }
+
+        QProcess process;
+        process.setProgram("igi1conv"); // Call itself
+        process.setArguments(args);
         
-        ImGui::Begin("Convert");
-        if (!selected_file.empty()) {
-            std::string ext = selected_file.extension().string();
-            for (auto& c : ext) c = tolower(c);
-            
-            ImGui::Text("File:");
-            ImGui::TextWrapped("%s", selected_file.string().c_str());
-            ImGui::Separator();
-            
-            ImGui::Text("Output Directory / File (Optional):");
-            ImGui::InputText("##outdir", output_dir_buf, sizeof(output_dir_buf));
-            std::string out_arg = std::string(output_dir_buf);
-            
-            ImGui::Spacing();
-            
-            if (ext == ".tex" || ext == ".spr" || ext == ".pic") {
-                if (ImGui::Button("Convert to PNG", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv tex to-png \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-                if (ImGui::Button("Convert to TGA", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv tex to-tga \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".qvm") {
-                if (ImGui::Button("Decompile to QSC", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv qvm decompile \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".qsc") {
-                if (ImGui::Button("Compile to QVM", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv qsc compile \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".mef") {
-                if (ImGui::Button("Export to OBJ", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv mef export \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".res") {
-                if (ImGui::Button("Extract RES", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv res extract \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".dat") {
-                if (ImGui::Button("Dump DAT Info", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv dat info \"" + selected_file.string() + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else if (ext == ".fnt") {
-                if (ImGui::Button("Export PNG", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv fnt export \"" + selected_file.string() + "\"";
-                    if (!out_arg.empty()) cmd += " -o \"" + out_arg + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-                if (ImGui::Button("FNT Info", ImVec2(-1, 0))) {
-                    std::string cmd = "igi1conv fnt info \"" + selected_file.string() + "\"";
-                    console_output = exec(cmd.c_str());
-                }
-            } else {
-                ImGui::Text("No specific conversions for this format.");
-            }
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Text("Console Output:");
-            ImGui::PushFont(hex_font);
-            ImGui::BeginChild("Console", ImVec2(-1, -1), true);
-            ImGui::TextUnformatted(console_output.c_str());
-            ImGui::EndChild();
-            ImGui::PopFont();
-        } else {
-            ImGui::TextWrapped("Select an asset to view conversion and extraction options.");
-        }
-        ImGui::End();
+        consoleEdit->append(QString("> igi1conv %1").arg(args.join(" ")));
+        process.start();
+        process.waitForFinished();
 
-        ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            GLFWwindow* backup_current_context = glfwGetCurrentContext();
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-            glfwMakeContextCurrent(backup_current_context);
-        }
-
-        glfwSwapBuffers(window);
+        QString output = process.readAllStandardOutput();
+        QString err = process.readAllStandardError();
+        
+        consoleEdit->append(output);
+        if (!err.isEmpty()) consoleEdit->append("ERROR: " + err);
+        consoleEdit->append("--------------------------------------------------");
     }
+};
 
-    if (current_texture != 0) {
-        glDeleteTextures(1, &current_texture);
-    }
+int run_gui() {
+    int argc = 1;
+    char arg0[] = "igi1conv.exe";
+    char* argv[] = { arg0, nullptr };
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    QApplication app(argc, argv);
 
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    // Apply a professional dark style
+    app.setStyle("Fusion");
+    QPalette darkPalette;
+    darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
+    darkPalette.setColor(QPalette::WindowText, Qt::white);
+    darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
+    darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
+    darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
+    darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+    darkPalette.setColor(QPalette::Text, Qt::white);
+    darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
+    darkPalette.setColor(QPalette::ButtonText, Qt::white);
+    darkPalette.setColor(QPalette::BrightText, Qt::red);
+    darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
+    darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+    darkPalette.setColor(QPalette::HighlightedText, Qt::black);
+    app.setPalette(darkPalette);
 
-    return 0;
+    MainWindow window;
+    window.show();
+
+    return app.exec();
 }
