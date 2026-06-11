@@ -71,3 +71,5 @@ Testing/
 # gtest discovery artifacts
 cmake_test_discovery_*.json
 bin/
+
+scratch/
