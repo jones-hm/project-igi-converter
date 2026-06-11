@@ -14,6 +14,8 @@
 #include <QFileInfo>
 #include <QPixmap>
 #include <QMessageBox>
+#include <QSyntaxHighlighter>
+#include <QRegularExpression>
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QFontDatabase>
@@ -570,10 +572,169 @@ private:
     float zoom = 3.0f;
 };
 
+class QscSyntaxHighlighter : public QSyntaxHighlighter {
+public:
+    QscSyntaxHighlighter(QTextDocument *parent = nullptr) : QSyntaxHighlighter(parent) {
+        HighlightingRule rule;
+        keywordFormat.setForeground(Qt::darkBlue);
+        keywordFormat.setFontWeight(QFont::Bold);
+        QStringList keywordPatterns = {
+            "\\bint\\b", "\\bfloat\\b", "\\bvoid\\b", "\\bif\\b", "\\belse\\b",
+            "\\bwhile\\b", "\\bfor\\b", "\\breturn\\b", "\\bTRUE\\b", "\\bFALSE\\b",
+            "\\bstring\\b"
+        };
+        for (const QString &pattern : keywordPatterns) {
+            rule.pattern = QRegularExpression(pattern);
+            rule.format = keywordFormat;
+            highlightingRules.append(rule);
+        }
+
+        classFormat.setForeground(Qt::darkMagenta);
+        classFormat.setFontWeight(QFont::Bold);
+        rule.pattern = QRegularExpression("\\bQ[A-Za-z]+\\b");
+        rule.format = classFormat;
+        highlightingRules.append(rule);
+
+        singleLineCommentFormat.setForeground(Qt::darkGreen);
+        rule.pattern = QRegularExpression("//[^\n]*");
+        rule.format = singleLineCommentFormat;
+        highlightingRules.append(rule);
+
+        multiLineCommentFormat.setForeground(Qt::darkGreen);
+        commentStartExpression = QRegularExpression("/\\*");
+        commentEndExpression = QRegularExpression("\\*/");
+        
+        quotationFormat.setForeground(Qt::darkRed);
+        rule.pattern = QRegularExpression("\".*\"");
+        rule.format = quotationFormat;
+        highlightingRules.append(rule);
+        
+        functionFormat.setFontItalic(true);
+        functionFormat.setForeground(Qt::blue);
+        rule.pattern = QRegularExpression("\\b[A-Za-z0-9_]+(?=\\()");
+        rule.format = functionFormat;
+        highlightingRules.append(rule);
+    }
+
+protected:
+    void highlightBlock(const QString &text) override {
+        for (const HighlightingRule &rule : highlightingRules) {
+            QRegularExpressionMatchIterator matchIterator = rule.pattern.globalMatch(text);
+            while (matchIterator.hasNext()) {
+                QRegularExpressionMatch match = matchIterator.next();
+                setFormat(match.capturedStart(), match.capturedLength(), rule.format);
+            }
+        }
+        setCurrentBlockState(0);
+        int startIndex = 0;
+        if (previousBlockState() != 1) startIndex = text.indexOf(commentStartExpression);
+        while (startIndex >= 0) {
+            QRegularExpressionMatch match = commentEndExpression.match(text, startIndex);
+            int endIndex = match.capturedStart();
+            int commentLength = 0;
+            if (endIndex == -1) {
+                setCurrentBlockState(1);
+                commentLength = text.length() - startIndex;
+            } else {
+                commentLength = endIndex - startIndex + match.capturedLength();
+            }
+            setFormat(startIndex, commentLength, multiLineCommentFormat);
+            startIndex = text.indexOf(commentStartExpression, startIndex + commentLength);
+        }
+    }
+
+private:
+    struct HighlightingRule {
+        QRegularExpression pattern;
+        QTextCharFormat format;
+    };
+    QVector<HighlightingRule> highlightingRules;
+    QRegularExpression commentStartExpression;
+    QRegularExpression commentEndExpression;
+    QTextCharFormat keywordFormat;
+    QTextCharFormat classFormat;
+    QTextCharFormat singleLineCommentFormat;
+    QTextCharFormat multiLineCommentFormat;
+    QTextCharFormat quotationFormat;
+    QTextCharFormat functionFormat;
+};
+
+class CodeEditor : public QTextEdit {
+public:
+    CodeEditor(QWidget *parent = nullptr) : QTextEdit(parent) {
+        highlighter = new QscSyntaxHighlighter(this->document());
+        QFile file(QCoreApplication::applicationDirPath() + "/IGIAutoComplete.txt");
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            while (!in.atEnd()) {
+                QString line = in.readLine().trimmed();
+                if (!line.isEmpty()) autocompleteList.append(line);
+            }
+        }
+        QFile modelFile(QCoreApplication::applicationDirPath() + "/IGIModels.json");
+        if (modelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QJsonDocument doc = QJsonDocument::fromJson(modelFile.readAll());
+            modelInfoObj = doc.object();
+        }
+        setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(this, &QWidget::customContextMenuRequested, this, &CodeEditor::showCustomContextMenu);
+    }
+
+protected:
+    void keyPressEvent(QKeyEvent *e) override {
+        if (e->key() == Qt::Key_Tab) {
+            QTextCursor cursor = textCursor();
+            cursor.select(QTextCursor::WordUnderCursor);
+            QString prefix = cursor.selectedText();
+            if (!prefix.isEmpty()) {
+                for (const QString &word : autocompleteList) {
+                    if (word.startsWith(prefix, Qt::CaseInsensitive) && word != prefix) {
+                        cursor.insertText(word);
+                        return;
+                    }
+                }
+            }
+        }
+        QTextEdit::keyPressEvent(e);
+    }
+    
+private:
+    void showCustomContextMenu(const QPoint &pt) {
+        QMenu *menu = createStandardContextMenu();
+        QTextCursor cursor = cursorForPosition(pt);
+        cursor.select(QTextCursor::WordUnderCursor);
+        QString word = cursor.selectedText();
+        
+        QRegularExpression re("\\d{3}_\\d{2}_\\d");
+        if (re.match(word).hasMatch()) {
+            menu->addSeparator();
+            QAction *infoAction = menu->addAction("Model Information: " + word);
+            connect(infoAction, &QAction::triggered, [this, word]() {
+                QString info = "No information found for this model in IGIModels.json.";
+                if (modelInfoObj.contains(word)) {
+                    QJsonDocument doc(modelInfoObj[word].toObject());
+                    info = doc.toJson(QJsonDocument::Indented);
+                }
+                QMessageBox::information(this, "Model Info", info);
+            });
+        }
+        menu->exec(mapToGlobal(pt));
+        delete menu;
+    }
+
+    QscSyntaxHighlighter* highlighter;
+    QStringList autocompleteList;
+    QJsonObject modelInfoObj;
+};
+
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle("IGI Game Convertor");
+        setWindowIcon(QIcon(QCoreApplication::applicationDirPath() + "/assets/igi1conv.ico"));
+        if (windowIcon().isNull()) {
+            setWindowIcon(QIcon(QCoreApplication::applicationDirPath() + "/../../assets/igi1conv.ico"));
+        }
         resize(1200, 800);
 
         fileModel = new QFileSystemModel(this);
@@ -597,10 +758,24 @@ public:
         
         fileMenu->addAction(QIcon::fromTheme("document-save"), "&Save", this, [this]() {
             if (viewerEdit->isVisible() && !currentFile.isEmpty() && !viewerEdit->isReadOnly()) {
-                QFile f(currentFile);
-                if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                    f.write(viewerEdit->toPlainText().toUtf8());
-                    QMessageBox::information(this, "Saved", "File saved successfully!");
+                if (currentExt == "qvm") {
+                    QString tempQscPath = QDir::tempPath() + "/igi_temp.qsc";
+                    QFile f(tempQscPath);
+                    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        f.write(viewerEdit->toPlainText().toUtf8());
+                        f.close();
+                        QString cmd = qApp->applicationFilePath();
+                        QProcess::execute(cmd, QStringList() << "qsc" << "compile" << tempQscPath << "-o" << currentFile);
+                        logMessage("[INFO] Compiled QSC to QVM and saved successfully!");
+                        QMessageBox::information(this, "Saved", "Compiled and saved QVM successfully!");
+                    }
+                } else {
+                    QFile f(currentFile);
+                    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        f.write(viewerEdit->toPlainText().toUtf8());
+                        logMessage("[INFO] File saved successfully!");
+                        QMessageBox::information(this, "Saved", "File saved successfully!");
+                    }
                 }
             }
         }, QKeySequence::Save);
@@ -799,11 +974,10 @@ public:
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
 
-        viewerEdit = new QTextEdit();
-        viewerEdit->setReadOnly(true);
-        const QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        viewerEdit->setFont(fixedFont);
-
+        viewerEdit = new CodeEditor(this);
+        viewerEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        viewerEdit->hide();
+        
         imageLabel = new QLabel();
         imageLabel->setAlignment(Qt::AlignCenter);
 
@@ -818,7 +992,7 @@ public:
         QVBoxLayout* debugLayout = new QVBoxLayout(debugGroup);
         consoleEdit = new QTextEdit();
         consoleEdit->setReadOnly(true);
-        consoleEdit->setFont(fixedFont);
+        consoleEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         debugLayout->addWidget(consoleEdit);
 
         rightLayout->addWidget(debugGroup, 1);
@@ -855,7 +1029,7 @@ public:
         }
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
         if (QSettings(iniPath, QSettings::IniFormat).value("LOGS_ENABLED", true).toBool()) {
-            QFile logFile(QCoreApplication::applicationDirPath() + "/igi1conv.logs");
+            QFile logFile(QCoreApplication::applicationDirPath() + "/igi1conv.log");
             if (logFile.open(QIODevice::Append | QIODevice::Text)) {
                 QTextStream out(&logFile);
                 out << msg << "\n";
@@ -871,7 +1045,7 @@ private:
     QWidget* textSearchWidget;
     QLineEdit* textSearchBox;
     QComboBox* viewModeCombo;
-    QTextEdit* viewerEdit;
+    CodeEditor* viewerEdit;
     QLabel* imageLabel;
     ModelViewer* modelViewer;
     QTextEdit* consoleEdit;
