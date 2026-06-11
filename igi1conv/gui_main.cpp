@@ -376,31 +376,15 @@ public:
         rightLayout->addWidget(imageLabel, 3);
         rightLayout->addWidget(modelViewer, 3);
 
-        // Controls
-        QGroupBox* controlsGroup = new QGroupBox("Conversion Options");
-        QVBoxLayout* controlsLayout = new QVBoxLayout(controlsGroup);
-
-        QHBoxLayout* outDirLayout = new QHBoxLayout();
-        outDirLayout->addWidget(new QLabel("Output Path (Optional):"));
-        outDirEdit = new QLineEdit();
-        outDirLayout->addWidget(outDirEdit);
-        controlsLayout->addLayout(outDirLayout);
-
-        QHBoxLayout* buttonsLayout = new QHBoxLayout();
-        btnAction1 = new QPushButton("Action 1");
-        btnAction2 = new QPushButton("Action 2");
-        buttonsLayout->addWidget(btnAction1);
-        buttonsLayout->addWidget(btnAction2);
-        buttonsLayout->addStretch();
-        controlsLayout->addLayout(buttonsLayout);
-
-        controlsLayout->addWidget(new QLabel("Console Output:"));
+        // Debug Output
+        QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
+        QVBoxLayout* debugLayout = new QVBoxLayout(debugGroup);
         consoleEdit = new QTextEdit();
         consoleEdit->setReadOnly(true);
         consoleEdit->setFont(fixedFont);
-        controlsLayout->addWidget(consoleEdit, 1);
+        debugLayout->addWidget(consoleEdit);
 
-        rightLayout->addWidget(controlsGroup, 2);
+        rightLayout->addWidget(debugGroup, 1);
 
         splitter->addWidget(treeView);
         splitter->addWidget(rightWidget);
@@ -417,9 +401,6 @@ public:
                 loadFile(currentFile, index);
             }
         });
-
-        connect(btnAction1, &QPushButton::clicked, this, [this]() { executeAction(1); });
-        connect(btnAction2, &QPushButton::clicked, this, [this]() { executeAction(2); });
         
         hideAllViewers();
     }
@@ -431,9 +412,6 @@ private:
     QTextEdit* viewerEdit;
     QLabel* imageLabel;
     ModelViewer* modelViewer;
-    QLineEdit* outDirEdit;
-    QPushButton* btnAction1;
-    QPushButton* btnAction2;
     QTextEdit* consoleEdit;
     QString currentFile;
     QString currentExt;
@@ -453,6 +431,13 @@ private:
 
         QMenu menu;
         menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
+
+        QMenu* viewMenu = menu.addMenu("View As");
+        viewMenu->addAction("Text View", [this, path]() { loadFile(path, 1); });
+        viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
+        viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
+        viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
+        menu.addSeparator();
 
         if (ext == "tex" || ext == "spr" || ext == "pic") {
             menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeAction(1); });
@@ -479,8 +464,6 @@ private:
         QFileInfo info(path);
         currentExt = info.suffix().toLower();
 
-        btnAction1->hide();
-        btnAction2->hide();
         hideAllViewers();
 
         int mode = overrideViewMode;
@@ -572,34 +555,12 @@ private:
             modelViewer->loadModel(path);
             modelViewer->show();
         }
-
-        if (currentExt == "qsc") {
-            btnAction1->setText("Compile to QVM"); btnAction1->show();
-        } else if (currentExt == "qvm") {
-            btnAction1->setText("Decompile to QSC"); btnAction1->show();
-        } else if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
-            btnAction1->setText("Convert to PNG"); btnAction2->setText("Convert to TGA");
-            btnAction1->show(); btnAction2->show();
-        } else if (currentExt == "mef") {
-            btnAction1->setText("Export to OBJ"); btnAction1->show();
-        } else if (currentExt == "res") {
-            btnAction1->setText("Extract RES"); btnAction1->show();
-        } else if (currentExt == "dat") {
-            btnAction1->setText("Dump DAT Info"); btnAction1->show();
-        } else if (currentExt == "fnt") {
-            btnAction1->setText("Export PNG"); btnAction2->setText("FNT Info");
-            btnAction1->show(); btnAction2->show();
-        }
     }
 
     void executeAction(int actionIndex) {
         if (currentFile.isEmpty()) return;
 
-        QString outArg = outDirEdit->text().trimmed();
-        if (outArg.isEmpty()) {
-            outArg = QFileInfo(currentFile).absolutePath();
-            outDirEdit->setText(outArg);
-        }
+        QString outArg = QFileInfo(currentFile).absolutePath();
 
         QStringList args;
 
