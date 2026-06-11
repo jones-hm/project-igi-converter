@@ -33,6 +33,7 @@
 #include <QOpenGLTexture>
 #include <QMouseEvent>
 #include <QWheelEvent>
+#include <QToolTip>
 
 #include <vector>
 #include <fstream>
@@ -42,6 +43,22 @@
 #include "tex_parser.h"
 #include "mef_parser.h"
 #include "mef_native.h"
+
+#include "../../third_party/tinygltf/stb_image.h"
+
+static QImage loadImageSafe(const QString& path) {
+    QImage img(path);
+    if (img.isNull()) {
+        int w, h, channels;
+        unsigned char* data = stbi_load(path.toLocal8Bit().constData(), &w, &h, &channels, 4);
+        if (data) {
+            // Must copy because stbi_image_free will deallocate the memory
+            img = QImage(data, w, h, w * 4, QImage::Format_RGBA8888).copy();
+            stbi_image_free(data);
+        }
+    }
+    return img;
+}
 
 class ModelViewer : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
@@ -123,14 +140,18 @@ public:
                                 QString texStr = mline.mid(7).trimmed();
                                 texStr.replace("\\", "/");
                                 QString texPath = info.absolutePath() + "/" + texStr;
-                                QImage img(texPath);
+                                QImage img = loadImageSafe(texPath);
                                 if (img.isNull()) {
                                     texPath = info.absolutePath() + "/" + QFileInfo(texStr).fileName();
-                                    img.load(texPath);
+                                    img = loadImageSafe(texPath);
                                 }
                                 if (img.isNull()) {
                                     texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".png";
-                                    img.load(texPath);
+                                    img = loadImageSafe(texPath);
+                                }
+                                if (img.isNull()) {
+                                    texPath = info.absolutePath() + "/" + QFileInfo(texStr).completeBaseName() + ".tga";
+                                    img = loadImageSafe(texPath);
                                 }
                                 if (!img.isNull()) {
                                     texture.reset(new QOpenGLTexture(img.mirrored()));
@@ -273,9 +294,10 @@ protected:
 
         QMatrix4x4 projection, view, model;
         projection.perspective(45.0f, float(width()) / float(height() ? height() : 1), 0.1f, 100.0f);
-        view.translate(0.0f, 0.0f, -zoom);
+        view.translate(transX, transY, -zoom);
         model.rotate(rotX, 1.0f, 0.0f, 0.0f);
         model.rotate(rotY, 0.0f, 1.0f, 0.0f);
+        model.rotate(rotZ, 0.0f, 0.0f, 1.0f);
 
         program.setUniformValue("projection", projection);
         program.setUniformValue("view", view);
@@ -305,9 +327,16 @@ protected:
         if (event->buttons() & Qt::LeftButton) {
             rotY += dx;
             rotX += dy;
-            update();
+        } else if (event->buttons() & Qt::RightButton) {
+            transX += dx * 0.01f;
+            transY -= dy * 0.01f;
+        } else if (event->buttons() & Qt::MiddleButton) {
+            rotZ += dx;
         }
+        update();
         lastPos = event->pos();
+        QToolTip::showText(event->globalPos(), QString("Rot X/Alpha: %1\nRot Y/Beta: %2\nRot Z/Gamma: %3\nPan: %4, %5\nZoom: %6")
+                           .arg(rotX).arg(rotY).arg(rotZ).arg(transX).arg(transY).arg(zoom), this);
     }
     void wheelEvent(QWheelEvent *event) override {
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
@@ -324,7 +353,8 @@ private:
     std::unique_ptr<QOpenGLTexture> texture;
 
     QPoint lastPos;
-    float rotX = 0, rotY = 0;
+    float rotX = 0, rotY = 0, rotZ = 0;
+    float transX = 0, transY = 0;
     float zoom = 3.0f;
 };
 
@@ -529,7 +559,7 @@ private:
 
         int mode = overrideViewMode;
         if (mode == 0) {
-            if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
+            if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic" || currentExt == "tga") {
                 mode = 3; // Image
             } else if (currentExt == "mef" || currentExt == "obj") {
                 mode = 4; // 3D
@@ -610,8 +640,12 @@ private:
                     imageLabel->setPixmap(QPixmap::fromImage(qimg).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
                 }
             } else {
-                QPixmap pix(path);
-                imageLabel->setPixmap(pix.scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                QImage img = loadImageSafe(path);
+                if (!img.isNull()) {
+                    imageLabel->setPixmap(QPixmap::fromImage(img).scaled(imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                } else {
+                    imageLabel->setText("Failed to load image");
+                }
             }
             imageLabel->show();
         } else if (mode == 4) { // 3D
