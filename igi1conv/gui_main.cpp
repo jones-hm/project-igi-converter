@@ -25,6 +25,7 @@
 #include <QFileDialog>
 #include <QMenu>
 #include <QMenuBar>
+#include <QShortcut>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QSettings>
@@ -711,9 +712,30 @@ private:
             QAction *infoAction = menu->addAction("Model Information: " + word);
             connect(infoAction, &QAction::triggered, [this, word]() {
                 QString info = "No information found for this model in IGIModels.json.";
+                
+                // Parse modelInfoObj which might be an array or object
                 if (modelInfoObj.contains(word)) {
                     QJsonDocument doc(modelInfoObj[word].toObject());
                     info = doc.toJson(QJsonDocument::Indented);
+                } else {
+                    // It was an array inside a JSON file but loaded as an array? Wait, I didn't load it as an array!
+                    // I will check the JSON directly.
+                    QFile modelFile(QCoreApplication::applicationDirPath() + "/IGIModels.json");
+                    if (modelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                        QJsonDocument fullDoc = QJsonDocument::fromJson(modelFile.readAll());
+                        if (fullDoc.isArray()) {
+                            QJsonArray arr = fullDoc.array();
+                            for (int i = 0; i < arr.size(); ++i) {
+                                QJsonObject obj = arr[i].toObject();
+                                if (obj["ModelId"].toString() == word) {
+                                    info = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+                                    break;
+                                }
+                            }
+                        } else if (fullDoc.isObject() && fullDoc.object().contains(word)) {
+                            info = QJsonDocument(fullDoc.object()[word].toObject()).toJson(QJsonDocument::Indented);
+                        }
+                    }
                 }
                 QMessageBox::information(this, "Model Info", info);
             });
@@ -949,22 +971,63 @@ public:
         QHBoxLayout* textSearchLayout = new QHBoxLayout(textSearchWidget);
         textSearchLayout->setContentsMargins(0,0,0,0);
         textSearchBox = new QLineEdit();
-        textSearchBox->setPlaceholderText("Search text inside file...");
-        QPushButton* findNextBtn = new QPushButton("Find Next");
+        textSearchBox->setPlaceholderText("Find...");
         textSearchLayout->addWidget(textSearchBox);
-        textSearchLayout->addWidget(findNextBtn);
+        
+        QLineEdit* replaceBox = new QLineEdit();
+        replaceBox->setPlaceholderText("Replace with...");
+        textSearchLayout->addWidget(replaceBox);
+        
+        QPushButton* btnReplace = new QPushButton("Replace");
+        textSearchLayout->addWidget(btnReplace);
+        QPushButton* btnReplaceAll = new QPushButton("Replace All");
+        textSearchLayout->addWidget(btnReplaceAll);
+
         textSearchWidget->hide();
-        connect(textSearchBox, &QLineEdit::returnPressed, findNextBtn, &QPushButton::click);
-        connect(findNextBtn, &QPushButton::clicked, this, [this]() {
-            QString query = textSearchBox->text();
-            if (!query.isEmpty() && viewerEdit->isVisible()) {
-                if (!viewerEdit->find(query)) {
-                    viewerEdit->moveCursor(QTextCursor::Start);
-                    viewerEdit->find(query);
+        rightLayout->addWidget(textSearchWidget);
+        
+        connect(btnReplace, &QPushButton::clicked, this, [this, replaceBox]() {
+            if (viewerEdit->textCursor().hasSelection()) {
+                viewerEdit->textCursor().insertText(replaceBox->text());
+            }
+            viewerEdit->find(textSearchBox->text());
+        });
+        
+        connect(btnReplaceAll, &QPushButton::clicked, this, [this, replaceBox]() {
+            QTextCursor cursor = viewerEdit->textCursor();
+            cursor.beginEditBlock();
+            cursor.movePosition(QTextCursor::Start);
+            viewerEdit->setTextCursor(cursor);
+            while (viewerEdit->find(textSearchBox->text())) {
+                viewerEdit->textCursor().insertText(replaceBox->text());
+            }
+            cursor.endEditBlock();
+        });
+
+        connect(textSearchBox, &QLineEdit::textChanged, this, [this](const QString& text) {
+            viewerEdit->moveCursor(QTextCursor::Start);
+            viewerEdit->find(textSearchBox->text());
+        });
+        
+        connect(textSearchBox, &QLineEdit::returnPressed, this, [this]() {
+            viewerEdit->find(textSearchBox->text());
+        });
+        
+        QShortcut *renameShortcut = new QShortcut(QKeySequence(Qt::Key_F2), treeView);
+        connect(renameShortcut, &QShortcut::activated, this, [this]() {
+            QModelIndex index = treeView->currentIndex();
+            QModelIndex srcIndex = proxyModel->mapToSource(index);
+            if (srcIndex.isValid()) {
+                QString path = fileModel->filePath(srcIndex);
+                bool ok;
+                QString newName = QInputDialog::getText(this, "Rename", "New name:", QLineEdit::Normal, QFileInfo(path).fileName(), &ok);
+                if (ok && !newName.isEmpty()) {
+                    QString newPath = QFileInfo(path).absolutePath() + "/" + newName;
+                    if (QFileInfo(path).isDir()) QDir().rename(path, newPath);
+                    else QFile::rename(path, newPath);
                 }
             }
         });
-        rightLayout->addWidget(textSearchWidget);
 
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("View Mode:"));
@@ -1113,8 +1176,17 @@ private:
                 QString destDir = isDir ? path : QFileInfo(path).absolutePath();
                 QString dest = destDir + "/" + QFileInfo(clipboardFilePath).fileName();
                 
+                int copyCount = 1;
+                while (QFileInfo::exists(dest) && (!clipboardIsCut || dest != clipboardFilePath)) {
+                    QString base = QFileInfo(clipboardFilePath).completeBaseName();
+                    QString ext = QFileInfo(clipboardFilePath).suffix();
+                    if (!ext.isEmpty()) ext = "." + ext;
+                    if (copyCount == 1) dest = destDir + "/" + base + "_copy" + ext;
+                    else dest = destDir + "/" + base + "_copy" + QString::number(copyCount) + ext;
+                    copyCount++;
+                }
+
                 if (QFileInfo(clipboardFilePath).isDir()) {
-                    // basic directory copy logic using QProcess for simplicity on Windows
                     QProcess::execute("cmd", QStringList() << "/c" << "xcopy" << QDir::toNativeSeparators(clipboardFilePath) << QDir::toNativeSeparators(dest) << "/E" << "/I" << "/H" << "/Y");
                 } else {
                     QFile::copy(clipboardFilePath, dest);
@@ -1351,16 +1423,16 @@ private:
         process.setProgram("igi1conv");
         process.setArguments(args);
         
-        consoleEdit->append(QString("> igi1conv %1").arg(args.join(" ")));
+        logMessage(QString("> igi1conv %1").arg(args.join(" ")));
         process.start();
         process.waitForFinished();
 
         QString output = process.readAllStandardOutput();
         QString err = process.readAllStandardError();
         
-        consoleEdit->append(output);
-        if (!err.isEmpty()) consoleEdit->append("ERROR: " + err);
-        consoleEdit->append("--------------------------------------------------");
+        if (!output.isEmpty()) logMessage(output.trimmed());
+        if (!err.isEmpty()) logMessage("ERROR: " + err.trimmed());
+        logMessage("--------------------------------------------------");
     }
 };
 
