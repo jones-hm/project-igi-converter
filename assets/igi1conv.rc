@@ -1,6 +1,6 @@
 #include <windows.h>
 
-101 ICON "gconv.ico"
+101 ICON "igi1conv.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
@@ -22,10 +22,10 @@ BEGIN
             VALUE "CompanyName",      "HeavenHM"
             VALUE "FileDescription",  "IGI Game Asset Converter"
             VALUE "FileVersion",      "1.0.0.0"
-            VALUE "InternalName",     "gconv"
+            VALUE "InternalName",     "igi1conv"
             VALUE "LegalCopyright",   "Copyright (C) HeavenHM"
-            VALUE "OriginalFilename", "gconv.exe"
-            VALUE "ProductName",      "gconv"
+            VALUE "OriginalFilename", "igi1conv.exe"
+            VALUE "ProductName",      "igi1conv"
             VALUE "ProductVersion",   "1.0.0.0"
         END
     END

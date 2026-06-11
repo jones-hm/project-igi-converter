@@ -1,12 +1,12 @@
-# gconv — Command Reference
+# igi1conv — Command Reference
 
-`gconv` is a standalone CLI for reading, converting, and inspecting *Project IGI
+`igi1conv` is a standalone CLI for reading, converting, and inspecting *Project IGI
 1* game assets. It has no OpenGL or editor dependency.
 
 ```powershell
-gconv --help
-gconv --version
-gconv <command> --help
+igi1conv --help
+igi1conv --version
+igi1conv <command> --help
 ```
 
 **Exit codes:** `0` success · `1` bad args · `2` file not found · `3` parse error · `4` write error
@@ -16,11 +16,11 @@ gconv <command> --help
 ## `tex` — Textures (TEX / SPR / PIC)
 
 ```powershell
-gconv tex info   <input.tex|.spr|.pic>
-gconv tex decode <input.tex|.spr|.pic> -o <output_dir>
-gconv tex decode <folder/> -o <output_dir> --batch
-gconv tex to-png <input> [-o <out.png>] [--resize <W> <H>]
-gconv tex to-tga <input> [-o <out.tga>] [--resize <W> <H>]
+igi1conv tex info   <input.tex|.spr|.pic>
+igi1conv tex decode <input.tex|.spr|.pic> -o <output_dir>
+igi1conv tex decode <folder/> -o <output_dir> --batch
+igi1conv tex to-png <input> [-o <out.png>] [--resize <W> <H>]
+igi1conv tex to-tga <input> [-o <out.tga>] [--resize <W> <H>]
 ```
 
 `to-png` / `to-tga` accept `.tex .spr .pic .tga .png .bmp .jpg .jpeg` as input.
@@ -29,55 +29,55 @@ gconv tex to-tga <input> [-o <out.tga>] [--resize <W> <H>]
 ## `mef` — 3D Meshes
 
 ```powershell
-gconv mef info   <input.mef>
-gconv mef dump   <input.mef> [-o <output.txt>]
-gconv mef export <input.mef> -o <output.obj>
-gconv mef export <folder/> -o <output_dir> --batch
-gconv mef bundle <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>
+igi1conv mef info   <input.mef>
+igi1conv mef dump   <input.mef> [-o <output.txt>]
+igi1conv mef export <input.mef> -o <output.obj>
+igi1conv mef export <folder/> -o <output_dir> --batch
+igi1conv mef bundle <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>
 ```
 
-## `qsc` — Quest Script (source)
+## `qsc` — Q Script (source)
 
 ```powershell
-gconv qsc validate <file.qsc>
-gconv qsc compile  <file.qsc> -o <out.qvm>
+igi1conv qsc validate <file.qsc>
+igi1conv qsc compile  <file.qsc> -o <out.qvm>
 ```
 
-## `qvm` — Quest VM (bytecode)
+## `qvm` — Q VM (bytecode)
 
 ```powershell
-gconv qvm info      <file.qvm>
-gconv qvm disasm    <file.qvm> [-o <output.txt>]
-gconv qvm decompile <file.qvm> -o <out.qsc>
+igi1conv qvm info      <file.qvm>
+igi1conv qvm disasm    <file.qvm> [-o <output.txt>]
+igi1conv qvm decompile <file.qvm> -o <out.qsc>
 ```
 
 ## `res` — RES Archives
 
 ```powershell
-gconv res list    <input.res>
-gconv res extract <input.res> -o <output_dir> [--file <name>]
-gconv res compile <file.qsc>
-gconv res pack    <dir> <out.res>
-gconv res unpack  <file.res> <dir>
-gconv res append  <input.res> <file1> [file2 ...] -o <out.res> [--prefix LOCAL:textures/]
+igi1conv res list    <input.res>
+igi1conv res extract <input.res> -o <output_dir> [--file <name>]
+igi1conv res compile <file.qsc>
+igi1conv res pack    <dir> <out.res>
+igi1conv res unpack  <file.res> <dir>
+igi1conv res append  <input.res> <file1> [file2 ...] -o <out.res> [--prefix LOCAL:textures/]
 ```
 
 ## `mtp` — Model-Texture Package (binary FORM/IFF)
 
 ```powershell
-gconv mtp info   <input.mtp>
-gconv mtp dump   <input.mtp> [-o <output.json>]
-gconv mtp to-dat <input.mtp> [-o <out.dat>]
-gconv mtp repair <input.mtp>                 # sync VNAM/GTT counts
-gconv mtp sync   <input.mtp> <input.dat>     # add DAT models missing from MTP
+igi1conv mtp info   <input.mtp>
+igi1conv mtp dump   <input.mtp> [-o <output.json>]
+igi1conv mtp to-dat <input.mtp> [-o <out.dat>]
+igi1conv mtp repair <input.mtp>                 # sync VNAM/GTT counts
+igi1conv mtp sync   <input.mtp> <input.dat>     # add DAT models missing from MTP
 ```
 
 ## `dat` — Model-Texture Data (text)
 
 ```powershell
-gconv dat info   <file.dat>
-gconv dat export <file.dat> [-o <out.json>] [--filter <model>] [--text]
-gconv dat to-mtp <file.dat> [-o <out.mtp>]
+igi1conv dat info   <file.dat>
+igi1conv dat export <file.dat> [-o <out.json>] [--filter <model>] [--text]
+igi1conv dat to-mtp <file.dat> [-o <out.mtp>]
 ```
 
 `mtp` and `dat` describe the same model→texture mapping in two formats; `mtp to-dat`
@@ -86,23 +86,23 @@ and `dat to-mtp` convert between them.
 ## `fnt` — Bitmap Fonts
 
 ```powershell
-gconv fnt info   <file.fnt>
-gconv fnt export <file.fnt> -o <out.png>
+igi1conv fnt info   <file.fnt>
+igi1conv fnt export <file.fnt> -o <out.png>
 ```
 
 ## `terrain` — Lightmaps & Quad-Tree
 
 ```powershell
-gconv terrain info       <file.lmp|.ctr>
-gconv terrain export-lmp <file.lmp> -o <output.pgm>   # 16-bit PGM(s)
-gconv terrain export-ctr <file.ctr> -o <output.json>
+igi1conv terrain info       <file.lmp|.ctr>
+igi1conv terrain export-lmp <file.lmp> -o <output.pgm>   # 16-bit PGM(s)
+igi1conv terrain export-ctr <file.ctr> -o <output.json>
 ```
 
 ## `graph` — AI Navigation Graph
 
 ```powershell
-gconv graph info   <file.dat>
-gconv graph export <file.dat> -o <out.json>
+igi1conv graph info   <file.dat>
+igi1conv graph export <file.dat> -o <out.json>
 ```
 
 ---

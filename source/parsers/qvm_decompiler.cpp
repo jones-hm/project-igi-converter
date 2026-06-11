@@ -11,7 +11,7 @@
 #include <memory>
 
 // Float formatting helper — reproduces the full-precision decimal output of the
-// original GConv tool (e.g. 0.30000001192092896, not truncated 0.3000000119).
+// original IGI1Conv tool (e.g. 0.30000001192092896, not truncated 0.3000000119).
 // %.17g gives the shortest 17-significant-digit representation, which is the
 // exact double value of the 32-bit float and round-trips through strtof/strtod.
 static std::string FloatStr(float v) {

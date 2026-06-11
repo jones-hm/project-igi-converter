@@ -9,7 +9,7 @@ namespace fs = std::filesystem;
 static void print_mef_help()
 {
     std::cout <<
-        "Usage: gconv mef <subcommand> [options]\n"
+        "Usage: igi1conv mef <subcommand> [options]\n"
         "\n"
         "Subcommands:\n"
         "  export <input.mef> -o <output.obj>\n"
@@ -331,6 +331,6 @@ int cmd_mef(int argc, char** argv)
     }
 
     std::cerr << "mef: unknown subcommand '" << subcmd << "'\n";
-    std::cerr << "Run 'gconv mef --help' for usage.\n";
+    std::cerr << "Run 'igi1conv mef --help' for usage.\n";
     return 1;
 }

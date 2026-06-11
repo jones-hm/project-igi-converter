@@ -9,10 +9,10 @@ static void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  gconv dat info <file.dat>\n"
-        "  gconv dat export <file.dat> [-o <out.json>] [--filter <model>] [--text]\n"
-        "  gconv dat to-mtp <file.dat> [-o <out.mtp>]    (native, no external tool)\n"
-        "  gconv mtp to-dat <file.mtp> [-o <out.dat>]\n";
+        "  igi1conv dat info <file.dat>\n"
+        "  igi1conv dat export <file.dat> [-o <out.json>] [--filter <model>] [--text]\n"
+        "  igi1conv dat to-mtp <file.dat> [-o <out.mtp>]    (native, no external tool)\n"
+        "  igi1conv mtp to-dat <file.mtp> [-o <out.dat>]\n";
 }
 
 static const char* opt_val(int argc, char** argv, const char* name)

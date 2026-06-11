@@ -1,4 +1,4 @@
-// gconv/support.cpp — minimal standalone implementations of symbols used by
+// igi1conv/support.cpp — minimal standalone implementations of symbols used by
 // the parsers (Logger::Log, Utils::Trim, Log, Mem_Alloc, File_LoadBinary,
 // File_FreeBuf, and helpers they depend on). No GL/app dependencies.
 
@@ -116,11 +116,11 @@ void Log(log_type_t tp, const char* file, int line, const char* fmt, ...) {
 // Memory allocator
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-# define GCONV_ALIGNED_ALLOC(sz, align)  _aligned_malloc(sz, align)
-# define GCONV_ALIGNED_FREE(ptr)         _aligned_free(ptr)
+# define IGI1CONV_ALIGNED_ALLOC(sz, align)  _aligned_malloc(sz, align)
+# define IGI1CONV_ALIGNED_FREE(ptr)         _aligned_free(ptr)
 #else
-# define GCONV_ALIGNED_ALLOC(sz, align)  aligned_alloc(static_cast<std::size_t>(align), sz)
-# define GCONV_ALIGNED_FREE(ptr)         free(ptr)
+# define IGI1CONV_ALIGNED_ALLOC(sz, align)  aligned_alloc(static_cast<std::size_t>(align), sz)
+# define IGI1CONV_ALIGNED_FREE(ptr)         free(ptr)
 #endif
 
 struct alignas(16) mem_alloc_head_s {
@@ -138,7 +138,7 @@ static mem_alloc_head_s* g_mem_alloc_chain = nullptr;
 void* Mem_Alloc(size_t sz, const char* file, int line) {
     std::lock_guard<std::mutex> lock(g_mtx_mem);
     size_t alloc_sz = sizeof(mem_alloc_head_s) + sz;
-    auto* m = (mem_alloc_head_s*)GCONV_ALIGNED_ALLOC(alloc_sz, 16);
+    auto* m = (mem_alloc_head_s*)IGI1CONV_ALIGNED_ALLOC(alloc_sz, 16);
     if (!m) return nullptr;
     m->magic_ = MEM_ALLOC_MAGIC;
     m->line_  = line;
@@ -158,12 +158,12 @@ void Mem_Free(void* ptr, const char* /*file*/, int /*line*/) {
     if (g_mem_alloc_chain == m) g_mem_alloc_chain = m->next_;
     else { m->prior_->next_ = m->next_; if (m->next_) m->next_->prior_ = m->prior_; }
     m->magic_ = 0;
-    GCONV_ALIGNED_FREE(m);
+    IGI1CONV_ALIGNED_FREE(m);
 }
 void Mem_FreeAll() {
     std::lock_guard<std::mutex> lock(g_mtx_mem);
     auto* p = g_mem_alloc_chain;
-    while (p) { auto* n = p->next_; GCONV_ALIGNED_FREE(p); p = n; }
+    while (p) { auto* n = p->next_; IGI1CONV_ALIGNED_FREE(p); p = n; }
     g_mem_alloc_chain = nullptr;
 }
 void Mem_Print() {}
@@ -209,7 +209,7 @@ void File_FreeBuf(void* buf) {
 
 // ---------------------------------------------------------------------------
 // Config::Get() stub (Logger::Log references it in the real logger.cpp;
-// gconv provides its own Logger::Log above so this is only needed if other
+// igi1conv provides its own Logger::Log above so this is only needed if other
 // parsers call Config::Get directly)
 // ---------------------------------------------------------------------------
 static ConfigData g_config_data{};
