@@ -312,22 +312,52 @@ int cmd_mef(int argc, char** argv)
             return 2;
         }
 
-        ParsedGeometry geo;
-        try { geo = ParseMefFile(input); }
-        catch (const std::exception& e)
+        if (fs::is_directory(input))
         {
-            std::cerr << "mef bundle: parse error: " << e.what() << "\n";
-            return 3;
-        }
+            bool any_failed = false;
+            for (const auto& entry : fs::directory_iterator(input))
+            {
+                if (!entry.is_regular_file()) continue;
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext != ".mef") continue;
 
-        std::string model_stem = fs::path(input).stem().string();
-        if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir))
-        {
-            std::cerr << "mef bundle: export failed\n";
-            return 4;
+                ParsedGeometry geo;
+                try { geo = ParseMefFile(entry.path().string()); }
+                catch (const std::exception& e) {
+                    std::cerr << "mef bundle: parse error in " << entry.path().string() << ": " << e.what() << "\n";
+                    any_failed = true;
+                    continue;
+                }
+                std::string model_stem = entry.path().stem().string();
+                if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir)) {
+                    std::cerr << "mef bundle: export failed for " << model_stem << "\n";
+                    any_failed = true;
+                } else {
+                    std::cout << "mef bundle: exported to " << (fs::path(outdir) / model_stem).string() << "\n";
+                }
+            }
+            return any_failed ? 3 : 0;
         }
-        std::cout << "mef bundle: exported to " << (fs::path(outdir) / model_stem).string() << "\n";
-        return 0;
+        else
+        {
+            ParsedGeometry geo;
+            try { geo = ParseMefFile(input); }
+            catch (const std::exception& e)
+            {
+                std::cerr << "mef bundle: parse error: " << e.what() << "\n";
+                return 3;
+            }
+
+            std::string model_stem = fs::path(input).stem().string();
+            if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir))
+            {
+                std::cerr << "mef bundle: export failed\n";
+                return 4;
+            }
+            std::cout << "mef bundle: exported to " << (fs::path(outdir) / model_stem).string() << "\n";
+            return 0;
+        }
     }
 
     std::cerr << "mef: unknown subcommand '" << subcmd << "'\n";

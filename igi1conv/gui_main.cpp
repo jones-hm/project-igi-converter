@@ -676,7 +676,9 @@ public:
         globalTextureDir = settings.value("TextureDir", "").toString();
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
-        QMenu* levelMenu = menuBar()->addMenu("&Level Settings");
+        QMenu* settingsMenu = menuBar()->addMenu("&Settings");
+        
+        QMenu* levelMenu = settingsMenu->addMenu("&Level");
         levelMenu->addAction("Select Level MTP...", this, [this, iniPath]() {
             globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
             QSettings(iniPath, QSettings::IniFormat).setValue("LevelMTP", globalLevelMtpPath);
@@ -688,17 +690,47 @@ public:
             consoleEdit->append("[INFO] Level DAT set to: " + globalLevelDatPath);
         });
         levelMenu->addAction("Select Texture Directory...", this, [this, iniPath]() {
-            globalTextureDir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
-            QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
-            consoleEdit->append("[INFO] Texture Directory set to: " + globalTextureDir);
+            QString dir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
+            if (!dir.isEmpty()) {
+                globalTextureDir = dir;
+                QSettings(iniPath, QSettings::IniFormat).setValue("TextureDir", globalTextureDir);
+                consoleEdit->append("[INFO] Texture Directory set to: " + globalTextureDir);
+                
+                QDir texDir(globalTextureDir);
+                QStringList resFiles = texDir.entryList(QStringList() << "*.res", QDir::Files);
+                for (const QString& res : resFiles) {
+                    QString resPath = texDir.absoluteFilePath(res);
+                    QString outPath = texDir.absoluteFilePath(QFileInfo(res).completeBaseName() + "_unpacked");
+                    if (!QDir(outPath).exists()) {
+                        consoleEdit->append("[INFO] Unpacking " + res + " to " + outPath + "...");
+                        QProcess::execute(qApp->applicationFilePath(), QStringList() << "res" << "unpack" << resPath << outPath);
+                    }
+                }
+            }
         });
-        levelMenu->addAction("Log Level: INFO", this, [this, iniPath]() {
+
+        QMenu* logsMenu = settingsMenu->addMenu("&Logs");
+        logsMenu->addAction("Enable Logs", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_ENABLED", true);
+            consoleEdit->append("[INFO] Logs Enabled");
+        });
+        logsMenu->addAction("Disable Logs", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_ENABLED", false);
+            consoleEdit->append("[INFO] Logs Disabled");
+        });
+
+        QMenu* logsLevelMenu = logsMenu->addMenu("Logs Level");
+        logsLevelMenu->addAction("INFO", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "INFO");
             consoleEdit->append("[INFO] LOGS_LEVEL set to INFO");
         });
-        levelMenu->addAction("Log Level: DEBUG", this, [this, iniPath]() {
+        logsLevelMenu->addAction("DEBUG", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "DEBUG");
             consoleEdit->append("[INFO] LOGS_LEVEL set to DEBUG");
+        });
+        logsLevelMenu->addAction("ERROR", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "ERROR");
+            consoleEdit->append("[INFO] LOGS_LEVEL set to ERROR");
         });
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
@@ -846,49 +878,81 @@ private:
     void showContextMenu(const QPoint& pos) {
         QModelIndex index = treeView->indexAt(pos);
         QModelIndex srcIndex = proxyModel->mapToSource(index);
-        if (!srcIndex.isValid() || fileModel->isDir(srcIndex)) return;
+        if (!srcIndex.isValid()) return;
 
         QString path = fileModel->filePath(srcIndex);
         QString ext = QFileInfo(path).suffix().toLower();
+        bool isDir = fileModel->isDir(srcIndex);
 
         QMenu menu;
-        menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
+        if (!isDir) {
+            menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
-        QMenu* viewMenu = menu.addMenu("View As");
-        viewMenu->addAction("Text View", [this, path]() { loadFile(path, 1); });
-        viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
-        viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
-        viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
-        menu.addSeparator();
+            QMenu* viewMenu = menu.addMenu("View As");
+            viewMenu->addAction("Text View", [this, path]() { loadFile(path, 1); });
+            viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
+            viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
+            viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
+            menu.addSeparator();
+        }
 
         menu.addSeparator();
         menu.addAction("Rename...", [this, path]() {
             bool ok;
             QString newName = QInputDialog::getText(this, "Rename File", "New name:", QLineEdit::Normal, QFileInfo(path).fileName(), &ok);
             if (ok && !newName.isEmpty()) {
-                QFile::rename(path, QFileInfo(path).absolutePath() + "/" + newName);
+                QString newPath = QFileInfo(path).absolutePath() + "/" + newName;
+                if (QFileInfo(path).isDir()) {
+                    QDir().rename(path, newPath);
+                } else {
+                    QFile::rename(path, newPath);
+                }
             }
         });
         menu.addAction("Delete", [this, path]() {
             if (QMessageBox::question(this, "Delete", "Are you sure you want to delete " + QFileInfo(path).fileName() + "?") == QMessageBox::Yes) {
-                QFile(path).remove();
+                if (QFileInfo(path).isDir()) {
+                    QDir(path).removeRecursively();
+                } else {
+                    QFile(path).remove();
+                }
             }
         });
         menu.addAction("Cut", [this, path]() { clipboardFilePath = path; clipboardIsCut = true; });
         menu.addAction("Copy", [this, path]() { clipboardFilePath = path; clipboardIsCut = false; });
         if (!clipboardFilePath.isEmpty()) {
-            menu.addAction("Paste Here", [this, path]() {
-                QString dest = QFileInfo(path).absolutePath() + "/" + QFileInfo(clipboardFilePath).fileName();
-                QFile::copy(clipboardFilePath, dest);
+            menu.addAction("Paste Here", [this, path, isDir]() {
+                QString destDir = isDir ? path : QFileInfo(path).absolutePath();
+                QString dest = destDir + "/" + QFileInfo(clipboardFilePath).fileName();
+                
+                if (QFileInfo(clipboardFilePath).isDir()) {
+                    // basic directory copy logic using QProcess for simplicity on Windows
+                    QProcess::execute("cmd", QStringList() << "/c" << "xcopy" << QDir::toNativeSeparators(clipboardFilePath) << QDir::toNativeSeparators(dest) << "/E" << "/I" << "/H" << "/Y");
+                } else {
+                    QFile::copy(clipboardFilePath, dest);
+                }
+                
                 if (clipboardIsCut) {
-                    QFile(clipboardFilePath).remove();
+                    if (QFileInfo(clipboardFilePath).isDir()) QDir(clipboardFilePath).removeRecursively();
+                    else QFile(clipboardFilePath).remove();
                     clipboardFilePath = "";
                 }
             });
         }
         menu.addSeparator();
 
-        if (ext == "tex" || ext == "spr" || ext == "pic") {
+        if (isDir) {
+            bool hasMefs = false;
+            QDir dir(path);
+            if (!dir.entryList(QStringList() << "*.mef", QDir::Files).isEmpty()) hasMefs = true;
+            if (hasMefs) {
+                menu.addSeparator();
+                menu.addAction("Apply Textures (All MEFs in Folder)", [this, path]() {
+                    currentFile = path;
+                    executeCommand("mef bundle-all");
+                });
+            }
+        } else if (ext == "tex" || ext == "spr" || ext == "pic") {
             menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeCommand("tex to-png"); });
             menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
@@ -902,7 +966,11 @@ private:
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
             menu.addAction("Export to OBJ",    [this, path]() { loadFile(path); executeCommand("mef export"); });
-            menu.addAction("Apply Textures",   [this, path]() { loadFile(path); executeCommand("mef bundle"); });
+            menu.addAction("Apply Textures (This MEF)", [this, path]() { loadFile(path); executeCommand("mef bundle"); });
+            menu.addAction("Apply Textures (All in Folder)", [this, path]() {
+                currentFile = QFileInfo(path).absolutePath();
+                executeCommand("mef bundle-all");
+            });
             menu.addAction("Dump to TXT",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
             menu.addAction("Info",             [this, path]() { loadFile(path); executeCommand("mef info"); });
         } else if (ext == "res") {
@@ -1030,26 +1098,7 @@ private:
             }
             imageLabel->show();
         } else if (mode == 4) { // 3D
-            QString modelPath = path;
-            if (currentExt == "mef" && !globalLevelDatPath.isEmpty() && !globalTextureDir.isEmpty()) {
-                QString tempDir = QDir::tempPath() + "/igi_temp_mef";
-                QDir().mkpath(tempDir);
-                QString baseName = QFileInfo(path).completeBaseName();
-                QString outDir = tempDir + "/bundle";
-                modelPath = outDir + "/" + baseName + "/" + baseName + ".obj";
-                
-                if (QFile::exists(modelPath) && QFileInfo(modelPath).lastModified() > QFileInfo(path).lastModified()) {
-                    consoleEdit->append("[INFO] Smart Cache: Loading pre-bundled MEF from temp folder...");
-                } else {
-                    consoleEdit->append("[INFO] Level settings detected! Automatically converting MEF to OBJ and applying textures...");
-                    QString cmd = qApp->applicationFilePath();
-                    QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << outDir << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
-                    consoleEdit->append("[DEBUG] Temp bundled OBJ created at: " + modelPath);
-                }
-            } else {
-                consoleEdit->append("[DEBUG] Level settings not fully configured, loading raw MEF: " + modelPath);
-            }
-            modelViewer->loadModel(modelPath);
+            modelViewer->loadModel(path);
             modelViewer->show();
         }
     }
@@ -1066,8 +1115,9 @@ private:
         if (cmd == "tex decode-batch") {
             args.clear();
             args << "tex" << "decode" << info.absoluteDir().absolutePath() << "-o" << outDir << "--batch";
-        } else if (cmd == "mef bundle") {
-            QString outBundle = outDir + "/" + baseName + "_bundle";
+        } else if (cmd == "mef bundle" || cmd == "mef bundle-all") {
+            QString target = currentFile;
+            QString outBundle = outDir + "/bundle";
             QString datFile = globalLevelDatPath;
             if (datFile.isEmpty()) {
                 datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
@@ -1081,7 +1131,8 @@ private:
             if (texDir.isEmpty()) return;
             
             consoleEdit->append(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
-            args << currentFile << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
+            args.clear();
+            args << "mef" << "bundle" << target << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
         } else {
