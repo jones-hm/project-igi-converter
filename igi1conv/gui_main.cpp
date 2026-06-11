@@ -25,6 +25,7 @@
 #include <QMenuBar>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QSettings>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
@@ -664,20 +665,40 @@ public:
             qApp->setPalette(darkPalette);
         });
 
-        QMenu* helpMenu = menuBar()->addMenu("&Help");
-        helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.2.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
-        });
+        QSettings settings("IGI1Conv", "GuiSettings");
+        globalLevelMtpPath = settings.value("LevelMTP", "").toString();
+        globalLevelDatPath = settings.value("LevelDAT", "").toString();
+        globalTextureDir = settings.value("TextureDir", "").toString();
+        QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* levelMenu = menuBar()->addMenu("&Level Settings");
         levelMenu->addAction("Select Level MTP...", this, [this]() {
             globalLevelMtpPath = QFileDialog::getOpenFileName(this, "Select MTP", "", "MTP Files (*.mtp)");
+            QSettings().setValue("LevelMTP", globalLevelMtpPath);
+            consoleEdit->append("[INFO] Level MTP set to: " + globalLevelMtpPath);
         });
         levelMenu->addAction("Select Level DAT...", this, [this]() {
             globalLevelDatPath = QFileDialog::getOpenFileName(this, "Select DAT", "", "DAT Files (*.dat)");
+            QSettings().setValue("LevelDAT", globalLevelDatPath);
+            consoleEdit->append("[INFO] Level DAT set to: " + globalLevelDatPath);
         });
         levelMenu->addAction("Select Texture Directory...", this, [this]() {
             globalTextureDir = QFileDialog::getExistingDirectory(this, "Select Textures Folder");
+            QSettings().setValue("TextureDir", globalTextureDir);
+            consoleEdit->append("[INFO] Texture Directory set to: " + globalTextureDir);
+        });
+        levelMenu->addAction("Log Level: INFO", this, [this]() {
+            QSettings().setValue("LOGS_LEVEL", "INFO");
+            consoleEdit->append("[INFO] LOGS_LEVEL set to INFO");
+        });
+        levelMenu->addAction("Log Level: DEBUG", this, [this]() {
+            QSettings().setValue("LOGS_LEVEL", "DEBUG");
+            consoleEdit->append("[INFO] LOGS_LEVEL set to DEBUG");
+        });
+
+        QMenu* helpMenu = menuBar()->addMenu("&Help");
+        helpMenu->addAction("About", this, [this]() {
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.2.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QToolBar* toolbar = addToolBar("Main Toolbar");
@@ -928,9 +949,10 @@ private:
         if (mode == 1) { // Text
             QString loadPath = path;
             if (currentExt == "qvm") {
+                consoleEdit->append("[INFO] Decompiling QVM to QSC automatically for viewing...");
                 loadPath = QDir::tempPath() + "/igi_temp.qsc";
-                QString cmd = "igi1conv qvm decompile \"" + path + "\" -o \"" + loadPath + "\"";
-                system(cmd.toUtf8().constData());
+                QString cmd = qApp->applicationFilePath();
+                QProcess::execute(cmd, QStringList() << "qvm" << "decompile" << path << "-o" << loadPath);
             }
             QFile file(loadPath);
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -1009,11 +1031,15 @@ private:
         } else if (mode == 4) { // 3D
             QString modelPath = path;
             if (currentExt == "mef" && !globalLevelDatPath.isEmpty() && !globalTextureDir.isEmpty()) {
+                consoleEdit->append("[INFO] Level settings detected! Automatically converting MEF to OBJ and applying textures...");
                 QString tempDir = QDir::tempPath() + "/igi_temp_mef";
                 QDir().mkpath(tempDir);
-                QString cmd = "igi1conv mef bundle \"" + path + "\" -o \"" + tempDir + "/model\" --dat \"" + globalLevelDatPath + "\" --texdir \"" + globalTextureDir + "\"";
-                system(cmd.toUtf8().constData());
+                QString cmd = qApp->applicationFilePath();
+                QProcess::execute(cmd, QStringList() << "mef" << "bundle" << path << "-o" << tempDir + "/model" << "--dat" << globalLevelDatPath << "--texdir" << globalTextureDir);
                 modelPath = tempDir + "/model.obj";
+                consoleEdit->append("[DEBUG] Temp bundled OBJ created at: " + modelPath);
+            } else {
+                consoleEdit->append("[DEBUG] Level settings not fully configured, loading raw MEF: " + modelPath);
             }
             modelViewer->loadModel(modelPath);
             modelViewer->show();
@@ -1034,11 +1060,19 @@ private:
             args << "tex" << "decode" << info.absoluteDir().absolutePath() << "-o" << outDir << "--batch";
         } else if (cmd == "mef bundle") {
             QString outBundle = outDir + "/" + baseName + "_bundle";
-            QString datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
+            QString datFile = globalLevelDatPath;
+            if (datFile.isEmpty()) {
+                datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
+            }
             if (datFile.isEmpty()) return;
-            QString texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", outDir);
+            
+            QString texDir = globalTextureDir;
+            if (texDir.isEmpty()) {
+                texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", outDir);
+            }
             if (texDir.isEmpty()) return;
             
+            consoleEdit->append(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
             args << currentFile << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
