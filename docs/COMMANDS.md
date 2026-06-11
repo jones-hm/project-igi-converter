@@ -36,14 +36,14 @@ igi1conv mef export <folder/> -o <output_dir> --batch
 igi1conv mef bundle <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>
 ```
 
-## `qsc` — Quest Script (source)
+## `qsc` — Q Script (source)
 
 ```powershell
 igi1conv qsc validate <file.qsc>
 igi1conv qsc compile  <file.qsc> -o <out.qvm>
 ```
 
-## `qvm` — Quest VM (bytecode)
+## `qvm` — Q VM (bytecode)
 
 ```powershell
 igi1conv qvm info      <file.qvm>

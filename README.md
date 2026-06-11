@@ -48,7 +48,7 @@ igi1conv mef bundle models/level1/model2.mef -o out_model2 --dat common.dat --te
 ```
 
 ### 3. Modifying Game Logic (`.qvm` & `.qsc`)
-The game logic is driven by "Quest" scripts. You can decompile them, edit the logic, and put them back.
+The game logic is driven by "Q" scripts. You can decompile them, edit the logic, and put them back.
 ```bash
 # Decompile the AMMO script binary into human-readable source code
 igi1conv qvm decompile scripts/AMMO.QVM -o scripts_src/AMMO.qsc
@@ -91,8 +91,8 @@ igi1conv dat to-mtp level1_modded.dat -o level1.mtp
 | :------- | :----- | :--------- |
 | **Textures** | `.tex`, `.spr`, `.pic` | info, decode, to-png, to-tga (+resize) |
 | **3D Meshes** | `.mef` | info, dump, export (OBJ), bundle |
-| **Quest Source** | `.qsc` | validate, compile → QVM |
-| **Quest VM** | `.qvm` | info, disasm, decompile → QSC |
+| **Q Source** | `.qsc` | validate, compile → QVM |
+| **Q VM** | `.qvm` | info, disasm, decompile → QSC |
 | **Archives** | `.res` | list, extract, compile, pack, unpack, append |
 | **Model Packages** | `.mtp` | info, dump, to-dat, repair, sync |
 | **Model Mappings** | `.dat` | info, export, to-mtp |
@@ -130,7 +130,7 @@ igi1conv test --game-path "D:/IGI1"
 
 ## Relationship to the IGI Editor
 
-`igi1conv` is fundamentally the engine powering the [project-igi-editor](https://github.com/jones-hm/project-igi-editor). The editor consumes a prebuilt `igi1conv.exe` (committed at `editor/tools/igi1conv.exe`) to execute complex conversion workflows behind a graphical interface. This repository is the standalone source of truth for the tool, parsers, and its releases.
+`igi1conv` was originally built internally specifically to power the [project-igi-editor](https://github.com/jones-hm/project-igi-editor). However, we later decided to make it a standalone command-line tool for the community so anyone can convert and mod game assets directly. The editor still consumes a prebuilt `igi1conv.exe` (committed at `editor/tools/igi1conv.exe`) to execute complex conversion workflows behind a graphical interface, but this repository is the standalone source of truth for the parsers and tool releases.
 
 ## Branches
 
