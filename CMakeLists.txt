@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(igi1conv
-  VERSION 1.2.0
+  VERSION 1.5.0
   DESCRIPTION "Project IGI 1 Game Asset Converter"
   LANGUAGES CXX C)
 
@@ -27,6 +27,10 @@ endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
 
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
 # ─── shared engine subset (parsers + headers reused from the IGI editor) ──────
 file(GLOB SOURCES_PARSERS "source/parsers/*.cpp" "source/parsers/*.h")
 
@@ -34,25 +38,38 @@ file(GLOB SOURCES_PARSERS "source/parsers/*.cpp" "source/parsers/*.h")
 file(GLOB IGI1CONV_SOURCES "igi1conv/*.cpp" "igi1conv/*.h")
 if (WIN32)
     list(APPEND IGI1CONV_SOURCES "assets/igi1conv.rc")
+    list(APPEND IGI1CONV_SOURCES "assets/resources.qrc")
 endif()
 
 add_executable(igi1conv ${IGI1CONV_SOURCES} ${SOURCES_PARSERS})
 
 set_target_properties(igi1conv PROPERTIES
     OUTPUT_NAME "igi1conv"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release"
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
 )
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set_target_properties(igi1conv PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release32"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug32"
+    )
+else()
+    set_target_properties(igi1conv PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
+    )
+endif()
 
-# --- GUI Dependencies (Qt6) ---
-set(CMAKE_PREFIX_PATH "D:/Qt/6.5.3/msvc2019_64")
-find_package(Qt6 COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets REQUIRED)
-
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_AUTOUIC ON)
-
-target_link_libraries(igi1conv PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+# --- GUI Dependencies (Qt5/Qt6) ---
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message("Configuring 32-bit (Win32) build using local Qt 5.15.2")
+    set(CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/5.15.2/msvc2019")
+    find_package(Qt5 COMPONENTS Core Gui Widgets OpenGL REQUIRED)
+    target_link_libraries(igi1conv PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL)
+else()
+    message("Configuring 64-bit (x64) build using system Qt 6.5.3")
+    set(CMAKE_PREFIX_PATH "D:/Qt/6.5.3/msvc2019_64")
+    find_package(Qt6 COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets REQUIRED)
+    target_link_libraries(igi1conv PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+endif()
 # ---------------------------------------
 
 # Single source of truth for the version string (also stamped in assets/igi1conv.rc).
@@ -77,6 +94,15 @@ if (MSVC)
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     )
 endif()
+
+# Copy required runtime assets (JSON databases and autocomplete text) to target directory
+add_custom_command(TARGET igi1conv POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/assets/IGIModels.json"
+        "${PROJECT_SOURCE_DIR}/assets/IGIModelsAllLevel.json"
+        "${PROJECT_SOURCE_DIR}/assets/IGIAutoComplete.txt"
+        $<TARGET_FILE_DIR:igi1conv>
+)
 
 # ─── tests ───────────────────────────────────────────────────────────────────
 option(IGI1CONV_BUILD_TESTS "Build igi1conv test suite" ON)
@@ -103,10 +129,17 @@ if (IGI1CONV_BUILD_TESTS)
         )
     endif()
 
-    set_target_properties(igi1conv_tests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
-    )
+    if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set_target_properties(igi1conv_tests PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release32"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug32"
+        )
+    else()
+        set_target_properties(igi1conv_tests PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin/Release"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${PROJECT_SOURCE_DIR}/bin/Debug"
+        )
+    endif()
 
     target_link_libraries(igi1conv_tests PRIVATE gtest)
 

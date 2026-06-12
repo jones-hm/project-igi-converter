@@ -2,8 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.0] - 2026-06-11
+## [1.5.0] - 2026-06-12
 ### Added
+- **32-Bit (Win32) Architecture Support**: Integrated complete compilation and deployment pipelines for 32-bit Windows targets, enabling compatibility with legacy systems.
+- **Dual Qt5 / Qt6 Compatibility**: Overhauled the OpenGL rendering and widget codebase (in `gui_main.cpp`) to compile seamlessly using either the local Qt5 SDK or system Qt6 SDK.
+- **Automatic Architecture Detection**: Upgraded `CMakeLists.txt` to automatically detect target architecture (pointer size) from the generator options and resolve the corresponding Qt dependencies.
+- **Auto-Deployed Runtime Assets**: Grouped `IGIAutoComplete.txt`, `IGIModels.json`, and `IGIModelsAllLevel.json` under `assets/` and configured a post-build step in CMake to automatically copy them to the compiled binary folder.
+- **Embedded Application Icon Everywhere**: Fixed the resource compilation order in CMake (moving AUTOMOC/AUTORCC/AUTOUIC before target declaration) and changed the resource ID in `igi1conv.rc` to `1` so the app icon displays correctly in both Windows Explorer and the window taskbar at runtime.
+- **Simplified UI Documentation**: Consolidated the three theme screenshots in the README into a single horizontal row with a concise description and reordered the layout to display the GUI version first and CLI commands last.
+- **Release Packaging Script**: Created a script to package compiled builds into separate zip packages (`igi1conv_v1.5.0_x86.zip` and `igi1conv_v1.5.0_x64.zip`) for distribution.
+
+## [1.3.0] - 2026-06-12
+### Added
+- **Comprehensive GUI Documentation**: Added 15+ high-quality markdown screenshot descriptions covering IDE functionality, Hex View, Model Search, and comprehensive GUI Themes (Military, Solarized, Dark).
+- **Automated Screenshot Engineering**: Developed a highly resilient UI automation pipeline script (`take_screenshots.py`) incorporating rigorous self-healing loops to bypass OS foreground restrictions and generate flawless IDE captures.
+- **Enhanced Configurations**: Automatically registers `TextureDir` and `LevelDAT` mappings persistently via `igi1conv.ini`, completely bypassing fatal GUI dialog blockers during automated texture extraction scripts.
+
+## [1.2.0] - 2026-06-11
 - **Integrated IDE Features**: Converted the basic Qt window into a full-fledged IDE/Explorer.
   - Added Dark Theme and Light Theme toggles in the View menu.
   - Added a search bar above the file explorer tree for recursive wild-card file filtering.

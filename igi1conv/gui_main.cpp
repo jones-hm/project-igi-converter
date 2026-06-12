@@ -37,10 +37,14 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLTexture>
 #include <QMouseEvent>
-#include <QWheelEvent>
+#include <QKeyEvent>
 #include <QToolTip>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QOpenGLFunctions_3_2_Core>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QOpenGLVersionFunctionsFactory>
+#endif
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QCoreApplication>
@@ -121,7 +125,8 @@ public:
         
         infoOverlay = new QTextEdit(this);
         infoOverlay->setReadOnly(true);
-        infoOverlay->setStyleSheet("background-color: rgba(0,20,0,210); color: #00FF88; border: 1px solid #00AA44; padding:6px; font-family:'Consolas',monospace; font-size:11px;");
+        infoOverlay->setStyleSheet("background-color: rgba(20, 20, 20, 180); color: #FFF; font-family: Consolas; font-size: 11px; border: none; padding: 5px;");
+        infoOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
         infoOverlay->hide();
 
         coordsOverlay = new QLabel(this);
@@ -466,8 +471,21 @@ protected:
 
     void initializeGL() override {
         initializeOpenGLFunctions();
-        glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
+        // clear color set per-frame in paintGL to match current theme
         glEnable(GL_DEPTH_TEST);
+
+        QVector<float> gridLines;
+        for (int i = -10; i <= 10; ++i) {
+            gridLines << i << 0.0f << -10.0f << 0.0f<<0.0f << 0.0f<<1.0f<<0.0f;
+            gridLines << i << 0.0f << 10.0f  << 0.0f<<0.0f << 0.0f<<1.0f<<0.0f;
+            gridLines << -10.0f << 0.0f << i << 0.0f<<0.0f << 0.0f<<1.0f<<0.0f;
+            gridLines << 10.0f  << 0.0f << i << 0.0f<<0.0f << 0.0f<<1.0f<<0.0f;
+        }
+        gridVertexCount = gridLines.size() / 8;
+        gridVbo.create();
+        gridVbo.bind();
+        gridVbo.allocate(gridLines.data(), gridLines.size() * sizeof(float));
+        gridVbo.release();
 
         const char* vsrc =
             "#version 330 core\n"
@@ -515,12 +533,44 @@ protected:
     }
 
     void paintGL() override {
+        QColor bg = QApplication::palette().color(QPalette::Window);
+        glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (vertices.isEmpty()) return;
+        
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        auto* gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(QOpenGLContext::currentContext());
+#else
+        auto* gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+#endif
+        if (gl) {
+            if (showWireframe) gl->glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            else gl->glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
 
         program.bind();
-        vbo.bind();
+        QMatrix4x4 projection, view, model;
+        projection.perspective(45.0f, float(width()) / float(height() ? height() : 1), 0.1f, 100.0f);
+        view.translate(transX, transY, -zoom);
+        
+        if (showGrid && gridVertexCount > 0) {
+            gridVbo.bind();
+            program.enableAttributeArray(0);
+            program.setAttributeBuffer(0, GL_FLOAT, 0, 3, 8 * sizeof(float));
+            program.enableAttributeArray(1);
+            program.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 2, 8 * sizeof(float));
+            program.enableAttributeArray(2);
+            program.setAttributeBuffer(2, GL_FLOAT, 5 * sizeof(float), 3, 8 * sizeof(float));
+            program.setUniformValue("projection", projection);
+            program.setUniformValue("view", view);
+            QMatrix4x4 gridModel;
+            program.setUniformValue("model", gridModel);
+            program.setUniformValue("hasTexture", false);
+            glDrawArrays(GL_LINES, 0, gridVertexCount);
+            gridVbo.release();
+        }
 
+        vbo.bind();
         program.enableAttributeArray(0);
         program.setAttributeBuffer(0, GL_FLOAT, 0, 3, 8 * sizeof(float));
         program.enableAttributeArray(1);
@@ -528,9 +578,6 @@ protected:
         program.enableAttributeArray(2);
         program.setAttributeBuffer(2, GL_FLOAT, 5 * sizeof(float), 3, 8 * sizeof(float));
 
-        QMatrix4x4 projection, view, model;
-        projection.perspective(45.0f, float(width()) / float(height() ? height() : 1), 0.1f, 100.0f);
-        view.translate(transX, transY, -zoom);
         model.rotate(rotX, 1.0f, 0.0f, 0.0f);
         model.rotate(rotY, 0.0f, 1.0f, 0.0f);
         model.rotate(rotZ, 0.0f, 0.0f, 1.0f);
@@ -561,6 +608,10 @@ protected:
         program.disableAttributeArray(2);
         vbo.release();
         program.release();
+        
+        if (gl && showWireframe) {
+            gl->glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
     }
 
     void resizeEvent(QResizeEvent *event) override {
@@ -606,6 +657,8 @@ private:
     QVector<float> normals;
     QOpenGLShaderProgram program;
     QOpenGLBuffer vbo;
+    QOpenGLBuffer gridVbo;
+    int gridVertexCount = 0;
     std::unique_ptr<QOpenGLTexture> texture;
 
     QPoint lastPos;
@@ -756,38 +809,56 @@ public:
         uint16_t w = (uint16_t)texImg.width();
         uint16_t h = (uint16_t)texImg.height();
         
+        bool isArgb = outPath.toLower().contains("argb8888");
+        uint32_t mode = isArgb ? 3 : 2; // 3=ARGB8888, 2=RGB565
+        
         uint8_t hdr[32] = {0};
-        // sig = "LOOP" (4 bytes)
         hdr[0] = 'L'; hdr[1] = 'O'; hdr[2] = 'O'; hdr[3] = 'P';
-        // version = 11 (uint32 LE)
         uint32_t version = 11;
         std::memcpy(hdr + 4, &version, 4);
-        // mode = 3 (ARGB8888, uint32 LE)
-        uint32_t mode = 3;
         std::memcpy(hdr + 8, &mode, 4);
-        // multi = 1 (uint32 LE)
-        uint32_t multi = 1;
+        uint32_t multi = 0;
         std::memcpy(hdr + 12, &multi, 4);
-        // _0=0 (uint32 LE), _1=0 _2=0 _3=0 (uint16 LE each)
-        // [16-19]=0, [20-21]=0, [22-23]=0, [24-25]=0
-        // width at [26-27], height at [28-29], depth=0 at [30-31]
+        // _0 at [16] = 0 (already zeroed)
+        uint16_t _1 = 5;           // constant in all original game TEX files
+        uint16_t _2 = w;           // redundant width copy
+        uint16_t _3 = h;           // redundant height copy
+        uint16_t depthBytes = (mode == 3) ? 4 : 2; // bytes per pixel: 4=ARGB8888, 2=ARGB1555
+        std::memcpy(hdr + 20, &_1, 2);
+        std::memcpy(hdr + 22, &_2, 2);
+        std::memcpy(hdr + 24, &_3, 2);
         std::memcpy(hdr + 26, &w, 2);
         std::memcpy(hdr + 28, &h, 2);
+        std::memcpy(hdr + 30, &depthBytes, 2);
         
         f.write((const char*)hdr, 32);
         
-        // Pixels: ARGB8888 stored as BGRA in memory (Qt's Format_ARGB32 is actually BGRA on LE)
-        // TEX mode 3 expects: B G R A per pixel
         QByteArray pixels;
-        pixels.resize(w * h * 4);
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                QRgb color = texImg.pixel(x, y);
-                int i = (y * w + x) * 4;
-                pixels[i]   = (char)qBlue(color);
-                pixels[i+1] = (char)qGreen(color);
-                pixels[i+2] = (char)qRed(color);
-                pixels[i+3] = (char)qAlpha(color);
+        if (mode == 3) {
+            pixels.resize(w * h * 4);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    QRgb color = texImg.pixel(x, y);
+                    int i = (y * w + x) * 4;
+                    pixels[i]   = (char)qBlue(color);
+                    pixels[i+1] = (char)qGreen(color);
+                    pixels[i+2] = (char)qRed(color);
+                    pixels[i+3] = (char)qAlpha(color);
+                }
+            }
+        } else {
+            // ARGB1555: bit15=A(opaque=1), bits14-10=R, bits9-5=G, bits4-0=B
+            pixels.resize(w * h * 2);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    QRgb color = texImg.pixel(x, y);
+                    int r = qRed(color)   >> 3; // 5 bits
+                    int g = qGreen(color) >> 3; // 5 bits
+                    int b = qBlue(color)  >> 3; // 5 bits
+                    uint16_t argb1555 = (uint16_t)(0x8000u | (r << 10) | (g << 5) | b);
+                    int i = (y * w + x) * 2;
+                    std::memcpy(pixels.data() + i, &argb1555, 2);
+                }
             }
         }
         f.write(pixels);
@@ -816,10 +887,22 @@ public:
     }
 
     bool eventFilter(QObject* obj, QEvent* event) override {
+        if (event->type() == QEvent::Wheel) {
+            QWheelEvent* we = static_cast<QWheelEvent*>(event);
+            if (we->angleDelta().y() > 0) {
+                zoomFactor = qMin(zoomFactor * 1.25, 8.0);
+            } else {
+                zoomFactor = qMax(zoomFactor / 1.25, 0.1);
+            }
+            updateDisplay();
+            return true;
+        }
+
         // Drawing on the image label
         if (obj == imageLabel && (isDrawing || isErasing) && !currentImage.isNull()) {
             if (event->type() == QEvent::MouseButtonPress) {
                 QMouseEvent* me = static_cast<QMouseEvent*>(event);
+                pushUndo();
                 lastPoint = getMappedPoint(me->pos());
                 drawingNow = true;
                 return true;
@@ -830,8 +913,25 @@ public:
                     QPainter painter(&currentImage);
                     painter.setRenderHint(QPainter::Antialiasing);
                     if (isErasing) {
-                        painter.setCompositionMode(QPainter::CompositionMode_Source);
-                        painter.setPen(QPen(Qt::transparent, penSize * 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                        // Restore original pixels along the erased line
+                        int r = penSize;
+                        for (int dy = -r; dy <= r; dy++) {
+                            for (int dx = -r; dx <= r; dx++) {
+                                if (dx*dx + dy*dy <= r*r) {
+                                    // Sample along the line from lastPoint to pt
+                                    int steps = std::max(std::abs(pt.x()-lastPoint.x()), std::abs(pt.y()-lastPoint.y())) + 1;
+                                    for (int s = 0; s <= steps; s++) {
+                                        int cx = lastPoint.x() + (pt.x()-lastPoint.x())*s/steps + dx;
+                                        int cy = lastPoint.y() + (pt.y()-lastPoint.y())*s/steps + dy;
+                                        if (cx >= 0 && cy >= 0 && cx < currentImage.width() && cy < currentImage.height())
+                                            currentImage.setPixel(cx, cy, originalImage.pixel(cx, cy));
+                                    }
+                                }
+                            }
+                        }
+                        lastPoint = pt;
+                        updateDisplay();
+                        return true;
                     } else {
                         painter.setPen(QPen(penColor, penSize, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
                     }
@@ -863,7 +963,31 @@ protected:
         updateDisplay();
         QWidget::resizeEvent(event);
     }
-    
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->matches(QKeySequence::Undo)) {
+            imgUndo();
+        } else if (event->matches(QKeySequence::Redo)) {
+            imgRedo();
+        } else if (event->key() == Qt::Key_Delete) {
+            pushUndo();
+            currentImage.fill(Qt::transparent);
+            updateDisplay();
+        } else if (event->matches(QKeySequence::Copy)) {
+            if (!currentImage.isNull())
+                QApplication::clipboard()->setImage(currentImage);
+        } else if (event->matches(QKeySequence::Paste)) {
+            QImage img = QApplication::clipboard()->image();
+            if (!img.isNull()) {
+                pushUndo();
+                currentImage = img;
+                updateDisplay();
+            }
+        } else {
+            QWidget::keyPressEvent(event);
+        }
+    }
+
 private:
     void updateDisplay() {
         if (currentImage.isNull()) return;
@@ -872,7 +996,7 @@ private:
         imageLabel->setFixedSize(dw, dh);
         imageLabel->setPixmap(QPixmap::fromImage(currentImage).scaled(dw, dh, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
-    
+
     QPoint getMappedPoint(const QPoint& p) {
         if (currentImage.isNull()) return p;
         int dw = (int)(currentImage.width()  * zoomFactor);
@@ -881,7 +1005,31 @@ private:
         int y = (int)((double)p.y() / dh * currentImage.height());
         return QPoint(qBound(0,x,currentImage.width()-1), qBound(0,y,currentImage.height()-1));
     }
-    
+
+    void pushUndo() {
+        if (!currentImage.isNull()) {
+            undoStack.append(currentImage);
+            if (undoStack.size() > 50) undoStack.removeFirst();
+            redoStack.clear();
+        }
+    }
+
+    void imgUndo() {
+        if (!undoStack.isEmpty()) {
+            redoStack.append(currentImage);
+            currentImage = undoStack.takeLast();
+            updateDisplay();
+        }
+    }
+
+    void imgRedo() {
+        if (!redoStack.isEmpty()) {
+            undoStack.append(currentImage);
+            currentImage = redoStack.takeLast();
+            updateDisplay();
+        }
+    }
+
     QLabel*      imageLabel  = nullptr;
     QLabel*      infoLabel   = nullptr;
     QScrollArea* scrollArea  = nullptr;
@@ -897,6 +1045,8 @@ private:
     QColor penColor = Qt::red;
     int    penSize  = 3;
     double zoomFactor = 1.0;
+    QList<QImage> undoStack;
+    QList<QImage> redoStack;
 };
 
 
@@ -904,7 +1054,7 @@ class QscSyntaxHighlighter : public QSyntaxHighlighter {
 public:
     QscSyntaxHighlighter(QTextDocument *parent = nullptr) : QSyntaxHighlighter(parent) {
         HighlightingRule rule;
-        keywordFormat.setForeground(Qt::darkBlue);
+        keywordFormat.setForeground(QColor("#569CD6"));
         keywordFormat.setFontWeight(QFont::Bold);
         QStringList keywordPatterns = {
             "\\bint\\b", "\\bfloat\\b", "\\bvoid\\b", "\\bif\\b", "\\belse\\b",
@@ -917,28 +1067,28 @@ public:
             highlightingRules.append(rule);
         }
 
-        classFormat.setForeground(Qt::darkMagenta);
+        classFormat.setForeground(QColor("#4EC9B0"));
         classFormat.setFontWeight(QFont::Bold);
         rule.pattern = QRegularExpression("\\bQ[A-Za-z]+\\b");
         rule.format = classFormat;
         highlightingRules.append(rule);
 
-        singleLineCommentFormat.setForeground(Qt::darkGreen);
+        singleLineCommentFormat.setForeground(QColor("#6A9955"));
         rule.pattern = QRegularExpression("//[^\n]*");
         rule.format = singleLineCommentFormat;
         highlightingRules.append(rule);
 
-        multiLineCommentFormat.setForeground(Qt::darkGreen);
+        multiLineCommentFormat.setForeground(QColor("#6A9955"));
         commentStartExpression = QRegularExpression("/\\*");
         commentEndExpression = QRegularExpression("\\*/");
-        
-        quotationFormat.setForeground(Qt::darkRed);
+
+        quotationFormat.setForeground(QColor("#CE9178"));
         rule.pattern = QRegularExpression("\".*\"");
         rule.format = quotationFormat;
         highlightingRules.append(rule);
-        
+
         functionFormat.setFontItalic(true);
-        functionFormat.setForeground(Qt::blue);
+        functionFormat.setForeground(QColor("#DCDCAA"));
         rule.pattern = QRegularExpression("\\b[A-Za-z0-9_]+(?=\\()");
         rule.format = functionFormat;
         highlightingRules.append(rule);
@@ -1143,13 +1293,13 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle("IGI Game Convertor");
-        setWindowIcon(QIcon(QCoreApplication::applicationDirPath() + "/assets/igi1conv.ico"));
-        if (windowIcon().isNull()) {
-            setWindowIcon(QIcon(QCoreApplication::applicationDirPath() + "/../../assets/igi1conv.ico"));
-        }
+        QIcon appIcon(":/igi1conv.ico");
+        setWindowIcon(appIcon);
         resize(1200, 800);
+        treeView = nullptr;
 
         fileModel = new QFileSystemModel(this);
+        fileModel->setReadOnly(false);
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
         QString defaultFolder = "D:/Software/IGI-Game";
         QString lastFolder = QSettings(iniPath, QSettings::IniFormat).value("LastFolder", defaultFolder).toString();
@@ -1158,13 +1308,51 @@ public:
         }
         fileModel->setRootPath(lastFolder);
         
-        proxyModel = new QSortFilterProxyModel(this);
+        // Custom proxy model to handle type names and size formatting
+        class MyProxyModel : public QSortFilterProxyModel {
+        public:
+            MyProxyModel(QObject* parent = nullptr) : QSortFilterProxyModel(parent) {}
+            QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override {
+                if (role == Qt::DisplayRole) {
+                    int col = index.column();
+                    QFileSystemModel* fsm = qobject_cast<QFileSystemModel*>(sourceModel());
+                    if (fsm) {
+                        QFileInfo info = fsm->fileInfo(mapToSource(index));
+                        if (col == 1) { // Size
+                            if (info.isFile()) {
+                                qint64 size = info.size();
+                                if (size < 1024) return QString::number(size) + " B";
+                                if (size < 1024 * 1024) return QString::number(size / 1024.0, 'f', 1) + " KB";
+                                return QString::number(size / (1024.0 * 1024.0), 'f', 1) + " MB";
+                            }
+                            return "";
+                        } else if (col == 2) { // Type
+                            if (info.isDir()) return "File Folder";
+                            QString ext = info.suffix().toLower();
+                            if (ext == "mef") return "Mesh Exported File format";
+                            if (ext == "res") return "resource archive";
+                            if (ext == "spr") return "sprite";
+                            if (ext == "fnt") return "font";
+                            if (ext == "pic") return "picture";
+                            if (ext == "tex") return "texture";
+                            if (ext == "mtp") return "material";
+                            return ext.toUpper() + " File";
+                        }
+                    }
+                }
+                return QSortFilterProxyModel::data(index, role);
+            }
+        };
+
+        proxyModel = new MyProxyModel(this);
         proxyModel->setSourceModel(fileModel);
         proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+        proxyModel->setFilterKeyColumn(0); // Only filter by file name
 
         // ─── Model Search Toolbar ───────────────────────────────────────────
         QToolBar* searchToolBar = addToolBar("Model Search");
         searchToolBar->setMovable(false);
+        searchToolBar->setVisible(false);
         searchToolBar->setStyleSheet("QToolBar{background:#252525;border-bottom:1px solid #444;spacing:4px;padding:2px 6px;}");
         
         QLabel* lblSearch = new QLabel("🔍 Model:");
@@ -1188,6 +1376,12 @@ public:
             if (query.trimmed().isEmpty()) {
                 modelSearchResult->setText("  Type to search...");
                 modelSearchResult->setStyleSheet("color:#888;font-size:11px;font-family:Consolas;min-width:300px;");
+                proxyModel->setFilterWildcard("*");
+                if (this->treeView) {
+                    QString currentRoot = fileModel->rootPath();
+                    if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
+                    this->treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+                }
                 return;
             }
             
@@ -1203,31 +1397,66 @@ public:
             
             QString q = query.trimmed().toLower();
             QStringList results;
+            QString exactMatchId;
+            
             for (const QJsonValue& v : s_modelsArr) {
                 QJsonObject obj = v.toObject();
                 QString id   = obj["ModelId"].toString();
                 QString name = obj["ModelName"].toString();
-                bool idMatch   = id.toLower().contains(q) || id.left(3).toLower() == q.left(3);
-                bool nameMatch = name.toLower().contains(q);
-                if (idMatch || nameMatch) {
+                
+                bool exactMatch = (id.toLower() == q || name.toLower() == q);
+                bool partialMatch = (id.toLower().contains(q) || name.toLower().contains(q));
+                
+                if (exactMatch) {
+                    exactMatchId = id;
+                    results.prepend(QString("%1 → %2").arg(id, name));
+                } else if (partialMatch) {
+                    if (exactMatchId.isEmpty()) exactMatchId = id; // use first match as fallback
                     results << QString("%1 → %2").arg(id, name);
-                    if (results.size() >= 8) break;
                 }
             }
             
             if (results.isEmpty()) {
                 modelSearchResult->setText("  No results for: " + query);
                 modelSearchResult->setStyleSheet("color:#ff6666;font-size:11px;font-family:Consolas;min-width:300px;");
+                proxyModel->setFilterWildcard("*" + query + "*");
             } else {
                 modelSearchResult->setText("  " + results.join("  |  "));
                 modelSearchResult->setStyleSheet("color:#66FFAA;font-size:11px;font-family:Consolas;min-width:300px;");
-                // Also log top matches
-                logMessage("[SEARCH] Query: " + query + "\n  " + results.join("\n  "));
+                // Filter file tree to show all files (models + textures) belonging to the match
+                QString basePrefix = exactMatchId.split('_').first();
+                proxyModel->setFilterWildcard("*" + basePrefix + "*");
+                if (this->treeView) {
+                    QString currentRoot = fileModel->rootPath();
+                    if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
+                    this->treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+                }
+            }
+        });
+        
+        QShortcut *modelSearchToggle = new QShortcut(QKeySequence("Ctrl+Shift+M"), this);
+        connect(modelSearchToggle, &QShortcut::activated, this, [this, searchToolBar, modelSearchBox]() {
+            searchToolBar->setVisible(!searchToolBar->isVisible());
+            if (searchToolBar->isVisible()) {
+                modelSearchBox->setFocus();
+                modelSearchBox->selectAll();
             }
         });
 
         QMenu* fileMenu = menuBar()->addMenu("&File");
-        fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open Folder...", this, [this, iniPath]() {
+        fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open File...", this, [this]() {
+            QString filePath = QFileDialog::getOpenFileName(this, "Select File to Open");
+            if (!filePath.isEmpty()) {
+                QString dir = QFileInfo(filePath).absolutePath();
+                fileModel->setRootPath(dir);
+                if (this->treeView) {
+                    this->treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
+                }
+                loadFile(filePath);
+            }
+        }, QKeySequence("Ctrl+O"));
+
+        fileMenu->addAction(QIcon::fromTheme("folder-open"), "&Open Folder...", this, [this, iniPath]() {
             QString dir = QFileDialog::getExistingDirectory(this, "Select Workspace Folder");
             if (!dir.isEmpty()) {
                 fileModel->setRootPath(dir);
@@ -1237,7 +1466,7 @@ public:
                 if (tempDir.exists()) tempDir.removeRecursively();
                 logMessage("[INFO] Workspace changed. Smart cache cleared.");
             }
-        }, QKeySequence::Open);
+        }, QKeySequence("Ctrl+Shift+O"));
         
         fileMenu->addAction(QIcon::fromTheme("document-save"), "&Save", this, [this]() {
             if (viewerEdit->isVisible() && !currentFile.isEmpty() && !viewerEdit->isReadOnly()) {
@@ -1294,16 +1523,44 @@ public:
         editMenu->addAction("Copy", this, [this](){ viewerEdit->copy(); }, QKeySequence::Copy);
         editMenu->addAction("Paste", this, [this](){ viewerEdit->paste(); }, QKeySequence::Paste);
         editMenu->addSeparator();
-        editMenu->addAction("Find File", this, [this](){
-            fileSearchBox->setVisible(!fileSearchBox->isVisible());
-            if (fileSearchBox->isVisible()) fileSearchBox->setFocus();
-            else { fileSearchBox->clear(); treeView->setFocus(); }
-        }, QKeySequence("Ctrl+F"));
         editMenu->addAction("Find in Text", this, [this](){
             textSearchWidget->setVisible(!textSearchWidget->isVisible());
             if (textSearchWidget->isVisible()) textSearchBox->setFocus();
             else textSearchWidget->hide();
+        }, QKeySequence("Ctrl+F"));
+        editMenu->addAction("Select All",  this, [this](){ viewerEdit->selectAll(); },   QKeySequence::SelectAll);
+        editMenu->addSeparator();
+        editMenu->addAction("Find File", this, [this](){
+            fileSearchBox->setVisible(!fileSearchBox->isVisible());
+            if (fileSearchBox->isVisible()) fileSearchBox->setFocus();
+            else { fileSearchBox->clear(); treeView->setFocus(); }
         }, QKeySequence("Ctrl+Shift+F"));
+        editMenu->addAction("Replace...", this, [this](){
+            // Simple find/replace dialog
+            QDialog dlg(this); dlg.setWindowTitle("Find & Replace");
+            QVBoxLayout* vl = new QVBoxLayout(&dlg);
+            QHBoxLayout* r1 = new QHBoxLayout(); QLineEdit* find = new QLineEdit(); r1->addWidget(new QLabel("Find:")); r1->addWidget(find);
+            QHBoxLayout* r2 = new QHBoxLayout(); QLineEdit* repl = new QLineEdit(); r2->addWidget(new QLabel("Replace:")); r2->addWidget(repl);
+            QHBoxLayout* r3 = new QHBoxLayout();
+            QPushButton* btnReplace = new QPushButton("Replace"); QPushButton* btnAll = new QPushButton("Replace All"); QPushButton* btnClose = new QPushButton("Close");
+            r3->addWidget(btnReplace); r3->addWidget(btnAll); r3->addWidget(btnClose);
+            vl->addLayout(r1); vl->addLayout(r2); vl->addLayout(r3);
+            connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::reject);
+            connect(btnReplace, &QPushButton::clicked, [&](){ viewerEdit->find(find->text()); });
+            connect(btnAll, &QPushButton::clicked, [&](){
+                QString txt = viewerEdit->toPlainText();
+                if (!find->text().isEmpty()) { txt.replace(find->text(), repl->text()); viewerEdit->setPlainText(txt); }
+            });
+            dlg.exec();
+        }, QKeySequence("Ctrl+H"));
+        // F2 = rename selected file in tree
+        QShortcut* f2Rename = new QShortcut(QKeySequence(Qt::Key_F2), this);
+        connect(f2Rename, &QShortcut::activated, this, [this](){
+            if (treeView) {
+                QModelIndex idx = proxyModel->mapToSource(treeView->currentIndex());
+                if (idx.isValid()) treeView->edit(proxyModel->mapFromSource(idx));
+            }
+        });
 
         QMenu* viewMenu = menuBar()->addMenu("&View");
         viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
@@ -1312,42 +1569,86 @@ public:
         viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
         viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
         viewMenu->addSeparator();
-        viewMenu->addAction("Light Theme", [this, iniPath]() {
-            QSettings(iniPath, QSettings::IniFormat).setValue("Theme", "Light");
-            QPalette lightPalette;
-            lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
-            lightPalette.setColor(QPalette::WindowText, Qt::black);
-            lightPalette.setColor(QPalette::Base, Qt::white);
-            lightPalette.setColor(QPalette::AlternateBase, QColor(240, 240, 240));
-            lightPalette.setColor(QPalette::ToolTipBase, Qt::white);
-            lightPalette.setColor(QPalette::ToolTipText, Qt::black);
-            lightPalette.setColor(QPalette::Text, Qt::black);
-            lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
-            lightPalette.setColor(QPalette::ButtonText, Qt::black);
-            lightPalette.setColor(QPalette::BrightText, Qt::red);
-            lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
-            lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
-            lightPalette.setColor(QPalette::HighlightedText, Qt::white);
-            qApp->setPalette(lightPalette);
-        });
-        viewMenu->addAction("Dark Theme", [this, iniPath]() {
-            QSettings(iniPath, QSettings::IniFormat).setValue("Theme", "Dark");
-            QPalette darkPalette;
-            darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
-            darkPalette.setColor(QPalette::WindowText, Qt::white);
-            darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
-            darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
-            darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
-            darkPalette.setColor(QPalette::ToolTipText, Qt::white);
-            darkPalette.setColor(QPalette::Text, Qt::white);
-            darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
-            darkPalette.setColor(QPalette::ButtonText, Qt::white);
-            darkPalette.setColor(QPalette::BrightText, Qt::red);
-            darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
-            darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
-            darkPalette.setColor(QPalette::HighlightedText, Qt::black);
-            qApp->setPalette(darkPalette);
-        });
+        auto applyMenuTheme = [iniPath](const QString& name) {
+            QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
+            if (name == "Light") {
+                QPalette p;
+                p.setColor(QPalette::Window, QColor(240,240,240));
+                p.setColor(QPalette::WindowText, Qt::black);
+                p.setColor(QPalette::Base, Qt::white);
+                p.setColor(QPalette::AlternateBase, QColor(233,233,233));
+                p.setColor(QPalette::ToolTipBase, Qt::white);
+                p.setColor(QPalette::ToolTipText, Qt::black);
+                p.setColor(QPalette::Text, Qt::black);
+                p.setColor(QPalette::Button, QColor(240,240,240));
+                p.setColor(QPalette::ButtonText, Qt::black);
+                p.setColor(QPalette::BrightText, Qt::red);
+                p.setColor(QPalette::Link, QColor(0,0,200));
+                p.setColor(QPalette::Highlight, QColor(0,120,215));
+                p.setColor(QPalette::HighlightedText, Qt::white);
+                qApp->setPalette(p);
+                qApp->setStyleSheet(
+                    "QTextEdit{background:white;color:black;border:1px solid #ccc;}"
+                    "QPlainTextEdit{background:white;color:black;border:1px solid #ccc;}"
+                    "QTreeView{background:white;color:black;alternate-background-color:#f0f0f0;}"
+                    "QLineEdit{background:white;color:black;border:1px solid #aaa;border-radius:3px;}"
+                    "QToolBar{background:#ebebeb;border-bottom:1px solid #ccc;spacing:4px;padding:2px 6px;}"
+                    "QMenuBar{background:#f0f0f0;color:black;}"
+                    "QMenu{background:#f0f0f0;color:black;}"
+                    "QStatusBar{background:#f0f0f0;color:black;}"
+                    "QLabel{color:black;}"
+                    "QSplitter::handle{background:#ccc;}"
+                );
+            } else if (name == "Solarized") {
+                QPalette p;
+                p.setColor(QPalette::Window, QColor(0,43,54));
+                p.setColor(QPalette::WindowText, QColor(131,148,150));
+                p.setColor(QPalette::Base, QColor(7,54,66));
+                p.setColor(QPalette::AlternateBase, QColor(0,43,54));
+                p.setColor(QPalette::Text, QColor(131,148,150));
+                p.setColor(QPalette::Button, QColor(0,43,54));
+                p.setColor(QPalette::ButtonText, QColor(131,148,150));
+                p.setColor(QPalette::Highlight, QColor(38,139,210));
+                p.setColor(QPalette::HighlightedText, Qt::white);
+                qApp->setPalette(p);
+                qApp->setStyleSheet("");
+            } else if (name == "Military") {
+                QPalette p;
+                p.setColor(QPalette::Window, QColor(30,40,20));
+                p.setColor(QPalette::WindowText, QColor(120,200,60));
+                p.setColor(QPalette::Base, QColor(15,25,10));
+                p.setColor(QPalette::AlternateBase, QColor(30,40,20));
+                p.setColor(QPalette::Text, QColor(120,200,60));
+                p.setColor(QPalette::Button, QColor(30,40,20));
+                p.setColor(QPalette::ButtonText, QColor(120,200,60));
+                p.setColor(QPalette::Highlight, QColor(80,140,30));
+                p.setColor(QPalette::HighlightedText, Qt::black);
+                qApp->setPalette(p);
+                qApp->setStyleSheet("");
+            } else {
+                // Dark
+                QPalette p;
+                p.setColor(QPalette::Window, QColor(53,53,53));
+                p.setColor(QPalette::WindowText, Qt::white);
+                p.setColor(QPalette::Base, QColor(25,25,25));
+                p.setColor(QPalette::AlternateBase, QColor(53,53,53));
+                p.setColor(QPalette::ToolTipBase, Qt::white);
+                p.setColor(QPalette::ToolTipText, Qt::white);
+                p.setColor(QPalette::Text, Qt::white);
+                p.setColor(QPalette::Button, QColor(53,53,53));
+                p.setColor(QPalette::ButtonText, Qt::white);
+                p.setColor(QPalette::BrightText, Qt::red);
+                p.setColor(QPalette::Link, QColor(42,130,218));
+                p.setColor(QPalette::Highlight, QColor(42,130,218));
+                p.setColor(QPalette::HighlightedText, Qt::black);
+                qApp->setPalette(p);
+                qApp->setStyleSheet("");
+            }
+        };
+        viewMenu->addAction("Light Theme",    [applyMenuTheme]() { applyMenuTheme("Light"); });
+        viewMenu->addAction("Dark Theme",     [applyMenuTheme]() { applyMenuTheme("Dark"); });
+        viewMenu->addAction("Solarized Theme",[applyMenuTheme]() { applyMenuTheme("Solarized"); });
+        viewMenu->addAction("Military Theme", [applyMenuTheme]() { applyMenuTheme("Military"); });
 
 
         QSettings settings(iniPath, QSettings::IniFormat);
@@ -1359,7 +1660,7 @@ public:
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
         
         QMenu* levelMenu = settingsMenu->addMenu("&Level");
-        levelMenu->addAction("Select Game Level Path...", this, [this, iniPath]() {
+        levelMenu->addAction("Set Level...", this, [this, iniPath]() {
             QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? "D:/Software/IGI-Game" : QFileInfo(globalLevelDatPath).absolutePath());
             if (levelDir.isEmpty()) return;
             
@@ -1448,7 +1749,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.2.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.5.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
@@ -1465,18 +1766,52 @@ public:
         proxyModel->setRecursiveFilteringEnabled(true);
 
         connect(fileSearchBox, &QLineEdit::textChanged, this, [this](const QString& text) {
-            proxyModel->setFilterWildcard(text);
-            QString currentRoot = fileModel->rootPath();
-            if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
-            treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+            // First check if 'text' matches a model name to resolve its ID prefix
+            static QJsonArray s_modelsArr;
+            static bool s_loaded = false;
+            if (!s_loaded) {
+                s_loaded = true;
+                QFile f(QCoreApplication::applicationDirPath() + "/IGIModels.json");
+                if (f.open(QIODevice::ReadOnly)) {
+                    s_modelsArr = QJsonDocument::fromJson(f.readAll()).array();
+                }
+            }
+            QString exactMatchId;
+            QString q = text.trimmed().toLower();
+            for (const QJsonValue& v : s_modelsArr) {
+                QJsonObject obj = v.toObject();
+                QString id   = obj["ModelId"].toString();
+                QString name = obj["ModelName"].toString();
+                if (id.toLower() == q || name.toLower() == q) { exactMatchId = id; break; }
+            }
+            
+            if (!exactMatchId.isEmpty()) {
+                QString basePrefix = exactMatchId.split('_').first();
+                proxyModel->setFilterWildcard("*" + basePrefix + "*");
+            } else {
+                proxyModel->setFilterWildcard("*" + text + "*");
+            }
+            
+            if (this->treeView) {
+                QString currentRoot = fileModel->rootPath();
+                if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
+                this->treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+            }
         });
         treeView = new QTreeView(leftWidget);
         treeView->setModel(proxyModel);
         treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(lastFolder)));
         treeView->setColumnWidth(0, 250);
+        treeView->setSortingEnabled(true);
+        treeView->sortByColumn(0, Qt::AscendingOrder);
         treeView->setContextMenuPolicy(Qt::CustomContextMenu);
         treeView->setSelectionMode(QAbstractItemView::ExtendedSelection); // Multi-selection
         treeView->setSelectionBehavior(QAbstractItemView::SelectRows);
+        treeView->setDragEnabled(true);
+        treeView->setAcceptDrops(true);
+        treeView->setDropIndicatorShown(true);
+        treeView->setDragDropMode(QAbstractItemView::DragDrop);
+        treeView->setDefaultDropAction(Qt::CopyAction);
         leftLayout->addWidget(treeView);
 
         connect(treeView, &QTreeView::customContextMenuRequested, this, &MainWindow::showContextMenu);
@@ -1558,7 +1893,9 @@ public:
         viewerEdit = new CodeEditor(this);
         viewerEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         viewerEdit->hide();
-        
+
+        // ── Text editor toolbar ──────────────────────────────────────────────
+
         imageEditor = new ImageEditor(this);
         imageEditor->hide();
 
@@ -1747,6 +2084,40 @@ private:
 
 
         // Single item context menu
+        if (isDir) {
+            menu.addAction("Pack to .res archive", [this, path]() {
+                QString folderName = QFileInfo(path).fileName();
+                QString defaultOut = path + "/" + folderName + ".res";
+                QString outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
+                    defaultOut, "Resource Archive (*.res)");
+                if (outRes.isEmpty()) return;
+
+                QString prefix = QInputDialog::getText(this, "Archive Prefix",
+                    "Enter the internal folder prefix (e.g. 'textures/').\n"
+                    "The tool will automatically add 'LOCAL:' for the external path.",
+                    QLineEdit::Normal, folderName + "/");
+                
+                QProcess proc;
+                proc.setProgram(qApp->applicationFilePath());
+                QStringList args;
+                args << "res" << "pack" << path << outRes;
+                if (!prefix.isEmpty()) {
+                    args << "--prefix" << prefix;
+                }
+                proc.setArguments(args);
+                proc.start();
+                proc.waitForFinished(-1);
+                if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                    logMessage("[SUCCESS] Packed folder to " + outRes);
+                    QMessageBox::information(this, "Packed", "Successfully packed to:\n" + outRes);
+                } else {
+                    QString err = proc.readAllStandardError();
+                    logMessage("[ERROR] Failed to pack folder to " + outRes + "\n" + err);
+                    QMessageBox::critical(this, "Pack Failed", "Error packing folder:\n" + err);
+                }
+            });
+            menu.addSeparator();
+        }
         if (!isDir) {
             menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
@@ -2044,9 +2415,10 @@ private:
                             for (uint32_t x = 0; x < img.width; ++x) {
                                 size_t i = (y * img.width + x) * 2;
                                 uint16_t c = (img.pixels[i+1] << 8) | img.pixels[i];
+                                // ARGB1555: bit15=A, bits14-10=R, bits9-5=G, bits4-0=B
                                 int r = (c >> 10) & 0x1F; r = (r << 3) | (r >> 2);
-                                int g = (c >> 5) & 0x1F;  g = (g << 3) | (g >> 2);
-                                int b = c & 0x1F;         b = (b << 3) | (b >> 2);
+                                int g = (c >>  5) & 0x1F; g = (g << 3) | (g >> 2);
+                                int b =  c        & 0x1F; b = (b << 3) | (b >> 2);
                                 qimg.setPixelColor(x, y, QColor(r, g, b, 255));
                             }
                         }
@@ -2177,7 +2549,7 @@ private:
         if (args.isEmpty()) return;
 
         QProcess process;
-        process.setProgram("igi1conv");
+        process.setProgram(qApp->applicationFilePath());
         process.setArguments(args);
         
         logMessage(QString("> igi1conv %1").arg(args.join(" ")));
@@ -2200,42 +2572,89 @@ int run_gui() {
 
     QApplication app(argc, argv);
     app.setStyle("Fusion");
+    {
+        QIcon ico(":/igi1conv.ico");
+        if (!ico.isNull()) app.setWindowIcon(ico);
+    }
     QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
     QString theme = QSettings(iniPath, QSettings::IniFormat).value("Theme", "Dark").toString();
     
-    if (theme == "Light") {
-        QPalette lightPalette;
-        lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
-        lightPalette.setColor(QPalette::WindowText, Qt::black);
-        lightPalette.setColor(QPalette::Base, Qt::white);
-        lightPalette.setColor(QPalette::AlternateBase, QColor(240, 240, 240));
-        lightPalette.setColor(QPalette::ToolTipBase, Qt::white);
-        lightPalette.setColor(QPalette::ToolTipText, Qt::black);
-        lightPalette.setColor(QPalette::Text, Qt::black);
-        lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
-        lightPalette.setColor(QPalette::ButtonText, Qt::black);
-        lightPalette.setColor(QPalette::BrightText, Qt::red);
-        lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
-        lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
-        lightPalette.setColor(QPalette::HighlightedText, Qt::white);
-        app.setPalette(lightPalette);
-    } else {
-        QPalette darkPalette;
-        darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
-        darkPalette.setColor(QPalette::WindowText, Qt::white);
-        darkPalette.setColor(QPalette::Base, QColor(25, 25, 25));
-        darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
-        darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
-        darkPalette.setColor(QPalette::ToolTipText, Qt::white);
-        darkPalette.setColor(QPalette::Text, Qt::white);
-        darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
-        darkPalette.setColor(QPalette::ButtonText, Qt::white);
-        darkPalette.setColor(QPalette::BrightText, Qt::red);
-        darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
-        darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
-        darkPalette.setColor(QPalette::HighlightedText, Qt::black);
-        app.setPalette(darkPalette);
-    }
+    auto applyTheme = [&](const QString& t) {
+        if (t == "Light") {
+            QPalette p;
+            p.setColor(QPalette::Window, QColor(240,240,240));
+            p.setColor(QPalette::WindowText, Qt::black);
+            p.setColor(QPalette::Base, Qt::white);
+            p.setColor(QPalette::AlternateBase, QColor(233,233,233));
+            p.setColor(QPalette::ToolTipBase, Qt::white);
+            p.setColor(QPalette::ToolTipText, Qt::black);
+            p.setColor(QPalette::Text, Qt::black);
+            p.setColor(QPalette::Button, QColor(240,240,240));
+            p.setColor(QPalette::ButtonText, Qt::black);
+            p.setColor(QPalette::BrightText, Qt::red);
+            p.setColor(QPalette::Link, QColor(0,0,200));
+            p.setColor(QPalette::Highlight, QColor(0,120,215));
+            p.setColor(QPalette::HighlightedText, Qt::white);
+            app.setPalette(p);
+            app.setStyleSheet(
+                "QTextEdit{background:white;color:black;border:1px solid #ccc;}"
+                "QPlainTextEdit{background:white;color:black;border:1px solid #ccc;}"
+                "QTreeView{background:white;color:black;alternate-background-color:#f0f0f0;}"
+                "QLineEdit{background:white;color:black;border:1px solid #aaa;border-radius:3px;}"
+                "QToolBar{background:#ebebeb;border-bottom:1px solid #ccc;spacing:4px;padding:2px 6px;}"
+                "QMenuBar{background:#f0f0f0;color:black;}"
+                "QMenu{background:#f0f0f0;color:black;}"
+                "QStatusBar{background:#f0f0f0;color:black;}"
+                "QLabel{color:black;}"
+                "QSplitter::handle{background:#ccc;}"
+            );
+        } else if (t == "Solarized") {
+            QPalette p;
+            p.setColor(QPalette::Window, QColor(0,43,54));
+            p.setColor(QPalette::WindowText, QColor(131,148,150));
+            p.setColor(QPalette::Base, QColor(7,54,66));
+            p.setColor(QPalette::AlternateBase, QColor(0,43,54));
+            p.setColor(QPalette::Text, QColor(131,148,150));
+            p.setColor(QPalette::Button, QColor(0,43,54));
+            p.setColor(QPalette::ButtonText, QColor(131,148,150));
+            p.setColor(QPalette::Highlight, QColor(38,139,210));
+            p.setColor(QPalette::HighlightedText, Qt::white);
+            app.setPalette(p);
+            app.setStyleSheet("");
+        } else if (t == "Military") {
+            QPalette p;
+            p.setColor(QPalette::Window, QColor(30,40,20));
+            p.setColor(QPalette::WindowText, QColor(120,200,60));
+            p.setColor(QPalette::Base, QColor(15,25,10));
+            p.setColor(QPalette::AlternateBase, QColor(30,40,20));
+            p.setColor(QPalette::Text, QColor(120,200,60));
+            p.setColor(QPalette::Button, QColor(30,40,20));
+            p.setColor(QPalette::ButtonText, QColor(120,200,60));
+            p.setColor(QPalette::Highlight, QColor(80,140,30));
+            p.setColor(QPalette::HighlightedText, Qt::black);
+            app.setPalette(p);
+            app.setStyleSheet("");
+        } else {
+            // Dark (default)
+            QPalette p;
+            p.setColor(QPalette::Window, QColor(53,53,53));
+            p.setColor(QPalette::WindowText, Qt::white);
+            p.setColor(QPalette::Base, QColor(25,25,25));
+            p.setColor(QPalette::AlternateBase, QColor(53,53,53));
+            p.setColor(QPalette::ToolTipBase, Qt::white);
+            p.setColor(QPalette::ToolTipText, Qt::white);
+            p.setColor(QPalette::Text, Qt::white);
+            p.setColor(QPalette::Button, QColor(53,53,53));
+            p.setColor(QPalette::ButtonText, Qt::white);
+            p.setColor(QPalette::BrightText, Qt::red);
+            p.setColor(QPalette::Link, QColor(42,130,218));
+            p.setColor(QPalette::Highlight, QColor(42,130,218));
+            p.setColor(QPalette::HighlightedText, Qt::black);
+            app.setPalette(p);
+            app.setStyleSheet("");
+        }
+    };
+    applyTheme(theme);
 
     MainWindow window;
     window.show();

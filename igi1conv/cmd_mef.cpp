@@ -58,19 +58,6 @@ static int do_mef_dump(const std::string& input, const std::string& outpath)
         return 2;
     }
 
-    // MEFParser parses the ASCII .mef format
-    MEFParser parser;
-    std::vector<MEFObject> objects;
-    try
-    {
-        objects = parser.parse_file(input);
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "mef: parse error: " << e.what() << "\n";
-        return 3;
-    }
-
     std::ostream* out_ptr = &std::cout;
     std::ofstream fout;
     if (!outpath.empty())
@@ -83,9 +70,50 @@ static int do_mef_dump(const std::string& input, const std::string& outpath)
         }
         out_ptr = &fout;
     }
-
     std::ostream& out = *out_ptr;
-    out << "file: " << input << "\n";
+
+    // Check if it's an ASCII or Binary MEF
+    std::ifstream file(input, std::ios::binary);
+    char magic[4] = {0};
+    file.read(magic, 4);
+    file.close();
+
+    if (std::memcmp(magic, "ILFF", 4) == 0)
+    {
+        // Binary MEF
+        ParsedGeometry geo;
+        try { geo = ParseMefFile(input); }
+        catch (const std::exception& e) {
+            std::cerr << "mef: binary parse error: " << e.what() << "\n";
+            return 3;
+        }
+
+        out << "file: " << input << " (Binary MEF)\n";
+        out << "materials: " << geo.renderBlocks.size() << "\n";
+        for (size_t i = 0; i < geo.renderBlocks.size(); ++i) {
+            out << "  material[" << i << "] mat_slot=" << geo.renderBlocks[i].materialSlot << "\n";
+        }
+
+        out << "attachments: " << geo.attachments.size() << "\n";
+        for (size_t i = 0; i < geo.attachments.size(); ++i) {
+            const auto& atta = geo.attachments[i];
+            out << "  ATTA[" << i << "] bone=" << atta.boneId << " offset=(" 
+                << atta.pos.x << ", " << atta.pos.y << ", " << atta.pos.z << ") "
+                << "name=\"" << atta.name << "\"\n";
+        }
+        return 0;
+    }
+
+    // ASCII MEF fallback
+    MEFParser parser;
+    std::vector<MEFObject> objects;
+    try { objects = parser.parse_file(input); }
+    catch (const std::exception& e) {
+        std::cerr << "mef: parse error: " << e.what() << "\n";
+        return 3;
+    }
+
+    out << "file: " << input << " (ASCII MEF)\n";
     out << "objects: " << objects.size() << "\n\n";
 
     for (size_t oi = 0; oi < objects.size(); ++oi)
@@ -103,8 +131,7 @@ static int do_mef_dump(const std::string& input, const std::string& outpath)
             out << "    mat[" << mi << "] index=" << mat.index
                 << " name=\"" << mat.name << "\""
                 << " shininess=" << mat.shininess
-                << (mat.has_collision ? " [collision]" : "")
-                << "\n";
+                << (mat.has_collision ? " [collision]" : "") << "\n";
         }
         if (!obj.parse_errors.empty())
         {

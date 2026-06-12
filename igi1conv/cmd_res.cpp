@@ -158,11 +158,15 @@ int cmd_res(int argc, char** argv)
     {
         if (argc < 4)
         {
-            std::cerr << "res pack: usage: igi1conv res pack <dir> <out.res>\n";
+            std::cerr << "res pack: usage: igi1conv res pack <dir> <out.res> [--prefix <prefix>]\n";
             return 1;
         }
         std::string dir     = argv[2];
         std::string out_res = argv[3];
+        
+        const char* prefix_c = opt_val(argc, argv, "--prefix");
+        std::string prefix = prefix_c ? prefix_c : "";
+
         // Normalize separators for RES_GenerateQSC
         for (auto& c : out_res) if (c == '\\') c = '/';
 
@@ -172,9 +176,16 @@ int cmd_res(int argc, char** argv)
             return 2;
         }
 
-        std::string qsc_path = (std::filesystem::path(dir) / "resource.qsc").string();
+        // QSC lives at the parent of inputDir so that LOCAL:prefix/file resolves
+        // as parent_dir/prefix/file (e.g. level1/textures/foo.tex), matching the
+        // original game's resource script layout.
+        namespace fs = std::filesystem;
+        std::string qsc_path = (fs::path(dir).parent_path() / "resource.qsc").string();
+        // Pass only the filename so BeginResource stays a relative path the compiler
+        // can resolve from the QSC's parent directory.
+        std::string res_filename = fs::path(out_res).filename().string();
         std::string err;
-        if (!RES_GenerateQSC(dir, qsc_path, out_res, err))
+        if (!RES_GenerateQSC(dir, qsc_path, res_filename, err, prefix))
         {
             std::cerr << "res pack (generate qsc): " << err << "\n";
             return 3;
@@ -183,6 +194,20 @@ int cmd_res(int argc, char** argv)
         {
             std::cerr << "res pack (compile): " << err << "\n";
             return 3;
+        }
+        // RES_Compile writes to parent(qsc)/res_filename; move to user-specified out_res if different.
+        fs::path compiled = fs::path(qsc_path).parent_path() / res_filename;
+        fs::path desired(out_res);
+        std::error_code ec;
+        if (fs::absolute(compiled, ec) != fs::absolute(desired, ec))
+        {
+            fs::create_directories(desired.parent_path(), ec);
+            fs::rename(compiled, desired, ec);
+            if (ec)
+            {
+                std::cerr << "res pack: failed to move archive to " << out_res << ": " << ec.message() << "\n";
+                return 4;
+            }
         }
         std::cout << "res pack: packed to " << out_res << "\n";
         return 0;
