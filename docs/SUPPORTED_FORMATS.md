@@ -27,5 +27,18 @@ This document lists the supported file formats, their conversion targets, and wh
 The following formats from Project I.G.I. 1 are currently missing or planned for future editions:
 
 *   **.wav** (InnerLoop ADPCM Sound files): Decoding and converting proprietary audio files into standard WAV format.
-*   **ILFF** (InnerLoop File Format Container): Direct standalone parsing and inspection of the underlying binary container (currently only processed internally via `.mef` and `.res` formats).
-*   **EAD** (Sound/Event definition or auxiliary formats): Planned for future investigation and conversion support.
+*   **.qas** (AI Pathing / Action Scripts): Parsing, editing, and compiling AI script assets.
+*   **ILFF** (InnerLoop File Format Container): Standalone extraction and packing command line options for the container wrapper.
+
+---
+
+## Missing Conversions (Read-Only Formats)
+
+While several formats are supported for extraction or viewing, the write/compile operations for injecting them back into the game are currently unimplemented (read-only):
+
+1.  **3D Models (OBJ → MEF)**: Currently, we can only export `.mef` to `.obj`. Compiling modified `.obj` files back into the game's native `.mef` mesh format is not yet supported.
+2.  **Audio Encoding (WAV → IGI-ADPCM)**: Converting standard WAV files back into the game's custom compressed ADPCM sound files.
+3.  **Fonts (PNG → FNT)**: Recompiling edited font texture sheets back into the `.fnt` format.
+4.  **Terrain (PGM/JSON → LMP/CTR)**: Rebuilding terrain heightmaps and cube properties from standard formats.
+5.  **AI Navigation (JSON → Graph)**: Recompiling JSON AI node graphs back into binary `graph*.dat` files.
+
