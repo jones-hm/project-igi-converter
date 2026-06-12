@@ -214,8 +214,24 @@ public:
             try {
                 ParsedGeometry geo = ParseMefFile(path.toStdString());
                 std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
-                for (const auto& tex : geo.pmtlTextures) {
-                    loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
+                
+                if (!geo.pmtlTextures.empty()) {
+                    for (const auto& tex : geo.pmtlTextures) {
+                        loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
+                    }
+                } else {
+                    int maxSlot = -1;
+                    for (const auto& b : geo.renderBlocks) if (b.materialSlot > maxSlot) maxSlot = b.materialSlot;
+                    for (int i = 0; i <= maxSlot; ++i) {
+                        QString matName = QString("mat_%1.tga").arg(i);
+                        auto tex = loadCachedTexture(matName, info);
+                        if (!tex) {
+                            QString tempDir = QDir::tempPath() + "/igi_temp_mef/bundle/" + info.completeBaseName() + "/";
+                            QFileInfo tempInfo(tempDir + matName);
+                            tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
+                        }
+                        loadedMaterials.push_back(tex);
+                    }
                 }
 
                 for (const auto& block : geo.renderBlocks) {
@@ -231,7 +247,8 @@ public:
                                     const auto& v = geo.vertices[idx];
                                     vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
                                     normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
-                                    uvs.push_back(v.uv.x); uvs.push_back(1.0f - v.uv.y);
+                                    bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
+                                    uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
                                 } else {
                                     vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
                                     normals.push_back(0); normals.push_back(1); normals.push_back(0);
@@ -2281,11 +2298,9 @@ private:
                 QString baseName = QFileInfo(path).completeBaseName();
                 QString modelPath = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
                 if (QFile::exists(modelPath)) {
-                    modelViewer->loadModel(modelPath);
-                    viewModeCombo->blockSignals(true);
-                    viewModeCombo->setCurrentIndex(4); // 3D view
-                    viewModeCombo->blockSignals(false);
-                    hideAllViewers();
+                    logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
+                    viewModeCombo->setCurrentIndex(4);
+                    modelViewer->loadModel(path);
                     modelViewer->show();
                     logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
                 }
@@ -2338,15 +2353,7 @@ private:
         }
 
         if (mode == 4 && currentExt == "mef") {
-            // Check if a bundled (textured) OBJ already exists in temp
-            QString baseName = info.completeBaseName();
-            QString bundledObj = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/" + baseName + ".obj";
-            if (!globalLevelDatPath.isEmpty() && QFile::exists(bundledObj)) {
-                logMessage("[INFO] Loading cached textured MEF bundle: " + bundledObj);
-                modelViewer->loadModel(bundledObj);
-                modelViewer->show();
-                return;
-            }
+            // We directly use native MEF viewing. The textures will be found in temp folder if bundled.
         }
 
         if (mode == 1) { // Text
