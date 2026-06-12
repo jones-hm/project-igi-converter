@@ -190,7 +190,7 @@ igi1conv dat to-mtp level1_modded.dat -o level1.mtp
 | **Terrain** | `.lmp`, `.ctr` | info, export-lmp (PGM), export-ctr (JSON) |
 | **AI Graph** | `graph*.dat` | info, export (JSON) |
 
-See [`docs/COMMANDS.md`](docs/COMMANDS.md) for the full command tree and [`docs/game_file_formats.md`](docs/game_file_formats.md) for in-depth binary layouts.
+See [`docs/COMMANDS.md`](docs/COMMANDS.md) for the full command tree, [`docs/SUPPORTED_FORMATS.md`](docs/SUPPORTED_FORMATS.md) for a summary of supported and planned formats, and [`docs/game_file_formats.md`](docs/game_file_formats.md) for in-depth binary layouts.
 
 ## Building & Deployment
 
