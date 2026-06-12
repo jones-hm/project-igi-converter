@@ -361,6 +361,7 @@ std::vector<std::array<uint32_t, 3>> ParseSplitBoneTriangles(
     size_t& outBlockCount)
 {
     // Bone DNER records in IGI 1 are consistently 32 bytes for models using ECAF.
+    // Wait, DNER_0 is 28 bytes! But chunk.size might be aligned or 32 bytes.
     const size_t kBoneRecordSize = 32;
     const size_t blockCount      = d3drInfo.numMeshes;
 
@@ -370,35 +371,39 @@ std::vector<std::array<uint32_t, 3>> ParseSplitBoneTriangles(
 
     std::vector<std::array<uint32_t, 3>> triangles;
     const size_t totalIndicesInECAF = ecafChunk.size / sizeof(uint16_t);
+    size_t runningIndexOffset = 0;
 
     for (size_t block = 0; block < blockCount; ++block) {
         const size_t base = dnerChunk.data + block * kBoneRecordSize;
 
-        // IGI 1 Bone DNER Layout:
-        //  0-11: floats
-        // 12-13: numFace (embedded indices count, usually 0)
-        // 14-15: nextOffs
-        // 16-17: indexOffset (into ECAF chunk, in indices)
-        // 18-19: triangleCount
-        // 20-21: vertsOffset
-        // 22-23: vertsCount
+        // IGI 1 Bone DNER Layout (matches DNER_0):
+        // 0-11: floats px, py, pz
+        // 12-13: num_face
+        // 14-15: nextoffs
+        // 16-17: td (material slot)
+        // 18-19: off_verts
+        // 20-21: num_verts
+        // 22-23: opacity
+        // 24-27: eflame, mshine, scolor, opacitd
 
-        const uint16_t u12         = ReadValue<uint16_t>(bytes, base + 12);
-        const uint16_t u14         = ReadValue<uint16_t>(bytes, base + 14);
-        const uint16_t indexOffset = ReadValue<uint16_t>(bytes, base + 16);
-        const uint16_t u18         = ReadValue<uint16_t>(bytes, base + 18);
-        const uint16_t vertsOffset = ReadValue<uint16_t>(bytes, base + 20);
-
-        // IGI 1 bone models have inconsistent field usage for face/triangle counts.
-        size_t triangleCount = 0;
-        if (u12 > 0)      triangleCount = u12 / 3;
-        else if (u18 > 0) triangleCount = u18;
-        else if (u14 > 0) triangleCount = u14;
+        const uint16_t numIndices  = ReadValue<uint16_t>(bytes, base + 12);
+        const uint16_t nextOffs    = ReadValue<uint16_t>(bytes, base + 14);
+        const int16_t  td          = ReadValue<int16_t>(bytes, base + 16);
+        const uint16_t offVerts    = ReadValue<uint16_t>(bytes, base + 18);
+        const uint16_t numVerts    = ReadValue<uint16_t>(bytes, base + 20);
+        
+        // ECAF indices are sequential per block. The number of indices is given by numIndices (at offset 12).
+        // Since each triangle has 3 indices, triangleCount is numIndices / 3.
+        size_t triangleCount = numIndices / 3;
+        
+        // Fallback just in case IGI 1 bone models put the count somewhere else
+        if (triangleCount == 0 && offVerts > 0) triangleCount = offVerts;
+        if (triangleCount == 0 && nextOffs > 0) triangleCount = nextOffs;
 
         const size_t blockTriangleStart = triangles.size();
 
         for (size_t tri = 0; tri < triangleCount; ++tri) {
-            const size_t firstIndex = static_cast<size_t>(indexOffset) + tri * 3;
+            const size_t firstIndex = runningIndexOffset + tri * 3;
             if (firstIndex + 2 >= totalIndicesInECAF) break;
 
             const size_t indexBase = ecafChunk.data + firstIndex * sizeof(uint16_t);
@@ -406,9 +411,6 @@ std::vector<std::array<uint32_t, 3>> ParseSplitBoneTriangles(
             const uint16_t b = ReadValue<uint16_t>(bytes, indexBase + 2);
             const uint16_t c = ReadValue<uint16_t>(bytes, indexBase + 4);
 
-            // Winding order: IGI 1 bone models use CW winding in raw data.
-            // Swap to {a, c, b} to match reference dconv OBJ export and OpenGL CCW expectation.
-            // ECAF indices are global (absolute vertex buffer offsets) — do NOT add vertsOffset.
             triangles.push_back({
                 static_cast<uint32_t>(a),
                 static_cast<uint32_t>(c),
@@ -416,14 +418,12 @@ std::vector<std::array<uint32_t, 3>> ParseSplitBoneTriangles(
             });
         }
 
-        // Read td (diffuse texture index) from bone DNER record at base+24
-        // This determines which texture from the DAT file this submesh uses.
-        const int16_t td = ReadValue<int16_t>(bytes, base + 24);
-        // Use td as the material slot when valid; fall back to sequential block index.
+        runningIndexOffset += triangleCount * 3;
+
         const int materialSlot = (td >= 0) ? static_cast<int>(td) : static_cast<int>(block);
 
         if (triangles.size() > blockTriangleStart) {
-            outBlocks.push_back({ blockTriangleStart, triangles.size() - blockTriangleStart, materialSlot });
+            outBlocks.push_back({ blockTriangleStart, triangles.size() - blockTriangleStart, materialSlot, 1.0f });
         }
     }
 

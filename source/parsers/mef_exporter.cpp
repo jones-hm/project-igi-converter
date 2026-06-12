@@ -38,9 +38,11 @@ void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
   for (const auto &v : geometry.vertices)
     f << "v " << v.pos.x << " " << v.pos.y << " " << v.pos.z << "\n";
 
-  // v.uv.y flipped for OpenGL/OBJ convention
-  for (const auto &v : geometry.vertices)
-    f << "vt " << v.uv.x << " " << (1.0f - v.uv.y) << "\n";
+  bool isBoneModel = (geometry.renderLayout.find("type1") != std::string::npos);
+  for (const auto &v : geometry.vertices) {
+    float v_coord = isBoneModel ? v.uv.y : (1.0f - v.uv.y);
+    f << "vt " << v.uv.x << " " << v_coord << "\n";
+  }
 
   f << "\no model_mesh\n";
 
@@ -128,7 +130,8 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
                        const std::string &modelStem,
                        const std::string &outDir,
                        const std::string &datPath,
-                       const std::string &texDir) {
+                       const std::string &texDir,
+                       bool skipObj) {
   namespace fs = std::filesystem;
 
   // 1. Create bundle folder: outDir/modelStem/
@@ -190,15 +193,17 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
   }
 
   // 4. Write OBJ
-  std::string objPath = (bundleDir / (modelStem + ".obj")).string();
-  std::ofstream f(objPath);
-  if (!f.is_open()) {
-    Logger::Get().Log(LogLevel::ERR,
-                      "[MefExporter] Cannot open OBJ: " + objPath);
-    return false;
+  if (!skipObj) {
+    std::string objPath = (bundleDir / (modelStem + ".obj")).string();
+    std::ofstream f(objPath);
+    if (!f.is_open()) {
+      Logger::Get().Log(LogLevel::ERR,
+                        "[MefExporter] Cannot open OBJ: " + objPath);
+      return false;
+    }
+    WriteObjBody(f, geometry, modelStem + ".mtl");
+    f.close();
   }
-  WriteObjBody(f, geometry, modelStem + ".mtl");
-  f.close();
 
   // 5. Write MTL
   std::string mtlPath = (bundleDir / (modelStem + ".mtl")).string();

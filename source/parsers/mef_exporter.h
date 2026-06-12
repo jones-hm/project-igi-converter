@@ -14,7 +14,8 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
                        const std::string &modelStem,
                        const std::string &outDir,
                        const std::string &datPath,
-                       const std::string &texDir);
+                       const std::string &texDir,
+                       bool skipObj = false);
 
 // Export binary ParsedGeometry to text-based MEF format (parsed by MEFParser).
 bool ExportToMefAscii(const ParsedGeometry &geometry,

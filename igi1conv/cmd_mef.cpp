@@ -319,12 +319,14 @@ int cmd_mef(int argc, char** argv)
         std::string input = argv[2];
 
         std::string outdir, dat_path, tex_dir;
-        for (int i = 3; i < argc - 1; ++i)
+        bool skipObj = false;
+        for (int i = 3; i < argc; ++i)
         {
             std::string a = argv[i];
             if (a == "-o"       && i + 1 < argc) { outdir   = argv[++i]; }
             else if (a == "--dat"    && i + 1 < argc) { dat_path = argv[++i]; }
             else if (a == "--texdir" && i + 1 < argc) { tex_dir  = argv[++i]; }
+            else if (a == "--no-obj") { skipObj = true; }
         }
 
         if (outdir.empty())
@@ -357,7 +359,7 @@ int cmd_mef(int argc, char** argv)
                     continue;
                 }
                 std::string model_stem = entry.path().stem().string();
-                if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir)) {
+                if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir, skipObj)) {
                     std::cerr << "mef bundle: export failed for " << model_stem << "\n";
                     any_failed = true;
                 } else {
@@ -377,7 +379,7 @@ int cmd_mef(int argc, char** argv)
             }
 
             std::string model_stem = fs::path(input).stem().string();
-            if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir))
+            if (!MefExporter::ExportToObjBundle(geo, model_stem, outdir, dat_path, tex_dir, skipObj))
             {
                 std::cerr << "mef bundle: export failed\n";
                 return 4;
