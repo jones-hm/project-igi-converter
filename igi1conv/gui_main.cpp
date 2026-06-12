@@ -57,6 +57,7 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QColorDialog>
+#include <QProgressDialog>
 
 #include <vector>
 #include <fstream>
@@ -2207,7 +2208,7 @@ private:
             if (!dir.entryList(QStringList() << "*.mef", QDir::Files).isEmpty()) hasMefs = true;
             if (hasMefs) {
                 menu.addSeparator();
-                menu.addAction("Apply Textures (All MEFs in Folder)", [this, path]() {
+                menu.addAction("Export All (in Folder)", [this, path]() {
                     currentFile = path;
                     executeCommand("mef bundle-all");
                 });
@@ -2236,7 +2237,6 @@ private:
             menu.addAction("Disassemble",    [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
         } else if (ext == "mef") {
-            menu.addAction("Export",         [this, path]() { loadFile(path); executeCommand("mef export"); });
             menu.addAction("Info",             [this, path]() {
                 // Run mef info and display in console
                 loadFile(path);
@@ -2292,7 +2292,7 @@ private:
                 
                 logMessage(report);
             });
-            menu.addAction("Apply Textures (This MEF)", [this, path]() {
+            menu.addAction("Export", [this, path]() {
                 currentFile = path;
                 executeCommand("mef bundle");
                 QString baseName = QFileInfo(path).completeBaseName();
@@ -2305,7 +2305,7 @@ private:
                     logMessage("[INFO] Loaded bundled MEF in 3D View from: " + modelPath);
                 }
             });
-            menu.addAction("Apply Textures (All in Folder)", [this, path]() {
+            menu.addAction("Export All (in Folder)", [this, path]() {
                 currentFile = QFileInfo(path).absolutePath();
                 executeCommand("mef bundle-all");
             });
@@ -2476,7 +2476,7 @@ private:
                 texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory for Bundle", outDir);
             }
             if (texDir.isEmpty()) return;
-            logMessage(QString("[INFO] Applying Textures using DAT: %1, TexDir: %2").arg(datFile, texDir));
+            logMessage(QString("[INFO] Exporting Bundle using DAT: %1, TexDir: %2").arg(datFile, texDir));
             args.clear();
             args << "mef" << "bundle" << target << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
         } else if (cmd == "mef bundle-all") {
@@ -2504,9 +2504,23 @@ private:
             QStringList mefs = dir.entryList(QStringList() << "*.mef" << "*.MEF", QDir::Files);
             logMessage(QString("[INFO] Apply Textures to All: found %1 MEF files in %2").arg(mefs.size()).arg(folderPath));
             
+            QProgressDialog progress("Exporting all MEFs in folder...", "Cancel", 0, mefs.size(), this);
+            progress.setWindowModality(Qt::WindowModal);
+            progress.setMinimumDuration(0);
+            progress.show();
+            
             QString firstModel;
             int bundled = 0;
-            for (const QString& mefName : mefs) {
+            for (int i = 0; i < mefs.size(); ++i) {
+                if (progress.wasCanceled()) {
+                    logMessage("[WARN] Export All was canceled by user.");
+                    break;
+                }
+                const QString& mefName = mefs[i];
+                progress.setValue(i);
+                progress.setLabelText(QString("Exporting %1 (%2 of %3)...").arg(mefName).arg(i+1).arg(mefs.size()));
+                qApp->processEvents();
+
                 QString mefPath = folderPath + "/" + mefName;
                 QString mefBase = QFileInfo(mefName).completeBaseName();
                 QStringList bargs;
@@ -2524,11 +2538,12 @@ private:
                 
                 QString objPath = outBundle + "/" + mefBase + "/" + mefBase + ".obj";
                 if (firstModel.isEmpty() && QFile::exists(objPath)) {
-                    firstModel = objPath;
+                    firstModel = folderPath + "/" + mefName; // Load the original MEF file!
                 }
                 bundled++;
             }
-            logMessage(QString("[INFO] Bundle-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
+            progress.setValue(mefs.size());
+            logMessage(QString("[INFO] Export-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
             if (!firstModel.isEmpty()) {
                 modelViewer->loadModel(firstModel);
                 viewModeCombo->blockSignals(true);
@@ -2555,13 +2570,28 @@ private:
 
         if (args.isEmpty()) return;
 
+        QProgressDialog progress("Executing command...", "Cancel", 0, 0, this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        progress.show();
+        qApp->processEvents();
+
         QProcess process;
         process.setProgram(qApp->applicationFilePath());
         process.setArguments(args);
         
         logMessage(QString("> igi1conv %1").arg(args.join(" ")));
         process.start();
-        process.waitForFinished();
+        
+        while (!process.waitForFinished(100)) {
+            qApp->processEvents();
+            if (progress.wasCanceled()) {
+                logMessage("[WARN] Command was canceled by user.");
+                process.kill();
+                process.waitForFinished();
+                break;
+            }
+        }
 
         QString output = process.readAllStandardOutput();
         QString err = process.readAllStandardError();
