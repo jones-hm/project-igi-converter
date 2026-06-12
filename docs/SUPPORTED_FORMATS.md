@@ -12,7 +12,7 @@ This document lists the supported file formats, their conversion targets, and wh
 | **.tex** | Texture Format | Decode, info, convert to `.png` / `.tga`, resize | Supported |
 | **.spr** | Sprite Format | Decode, info, convert to `.png` / `.tga`, resize | Supported |
 | **.pic** | Image Format | Decode, info, convert to `.png` / `.tga`, resize | Supported |
-| **.mef** | 3D Mesh Format | Info, dump, export to `.obj` + `.mtl` bundle | Supported |
+| **.mef** | 3D Mesh Format | Info, dump, export to `.obj` + `.mtl` bundle, export to text MEF, compile text MEF to binary | Supported |
 | **.mtp** | Model-Texture Package | Info, dump to JSON, compile/sync to `.dat` | Supported |
 | **.dat** | Level Mapping / Asset List | Info, export to JSON, compile to `.mtp` / `.dat` | Supported |
 | **.fnt** | Font Format | Info, export font texture atlas to `.png` | Supported |
@@ -24,11 +24,7 @@ This document lists the supported file formats, their conversion targets, and wh
 
 ## Missing & Planned Formats (Future Support)
 
-The following formats from Project I.G.I. 1 are currently missing or planned for future editions:
-
-*   **.wav** (InnerLoop ADPCM Sound files): Decoding and converting proprietary audio files into standard WAV format.
-*   **.qas** (AI Pathing / Action Scripts): Parsing, editing, and compiling AI script assets.
-*   **ILFF** (InnerLoop File Format Container): Standalone extraction and packing command line options for the container wrapper.
+See [ISSUES.md](docs/ISSUES.md) for missing and planned formats.
 
 ---
 

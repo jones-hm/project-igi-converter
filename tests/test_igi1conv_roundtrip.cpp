@@ -58,6 +58,49 @@ TEST_F(IGI1ConvTest, RoundtripTexTgaPng) {
     EXPECT_TRUE(NonEmptyFile(png));
 }
 
+// ─── MEF text/binary round-trips ─────────────────────────────────────────────
+
+// Binary MEF -> Text MEF: to-text must produce a non-empty text file.
+TEST_F(IGI1ConvTest, MefBinaryToText) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt = tmp / "model.mef.txt";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+
+    // Output must start with NewObject(
+    std::ifstream f(txt);
+    std::string firstLine;
+    std::getline(f, firstLine);
+    EXPECT_NE(firstLine.find("NewObject"), std::string::npos)
+        << "Expected text MEF to start with NewObject, got: " << firstLine;
+}
+
+// Binary MEF -> Text MEF -> Binary MEF: compiled output must be parseable.
+TEST_F(IGI1ConvTest, RoundtripMefBinaryTextBinary) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_recompiled.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+
+    ASSERT_EQ(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2)), 0);
+    ASSERT_TRUE(NonEmptyFile(mef2));
+
+    // Compiled binary must have ILFF magic
+    std::ifstream f(mef2, std::ios::binary);
+    char magic[4] = {0};
+    f.read(magic, 4);
+    EXPECT_EQ(std::string(magic, 4), "ILFF")
+        << "Compiled MEF must start with ILFF magic";
+
+    // Compiled binary must be parseable (mef info returns 0)
+    EXPECT_EQ(RunIGI1Conv("mef info " + Q(mef2)), 0);
+}
+
 // ─── version reporting (regression: used to print 3.0) ───────────────────────
 
 TEST_F(IGI1ConvTest, VersionFlagReportsOneZeroZero) {
