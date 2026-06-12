@@ -1,4 +1,4 @@
-# igi1conv — Project IGI 1 Game Asset Converter
+# igi1conv — Project IGI 1 IGI Game Convertor
 
 `igi1conv` is a standalone command-line converter and inspector for *Project IGI 1* game files. Inspired by the original IGI1Conv shipped with IGI 2, it allows you to seamlessly read, convert, and inspect the engine's proprietary formats—textures, meshes, scripts, archives, terrain, fonts, and AI graphs—with **no OpenGL or game-editor dependency**.
 
@@ -10,7 +10,7 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 *   **File Tree Navigator**: Browse game folders with real-time directory searching.
 *   **Interactive 3D Viewer**: Render native `.mef` and `.obj` models with rotation, zoom, and wireframe views.
 *   **2D Image Viewer**: Instantly preview proprietary `.tex`, `.spr`, and `.pic` texture assets.
-*   **Texture Paint & Editor**: Draw, paint, and edit texture assets using pencil, eraser, and color pickers, and save modifications back to the native game format.
+*   **Texture Paint & Editor**: Edit Game assets directly by drawing, painting, and modifying textures using pencil, eraser, and color pickers, and save modifications back to the native game format.
 *   **Script & Hex Inspectors**: Read decompiled `.qsc` script files and inspect raw binary data.
 *   **Right-Click Context Menu**: Trigger conversion tasks directly from the graphical user interface.
 
@@ -43,9 +43,16 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 ![Texture Context Menu](assets/03c_tex_context_menu.png)  
 *Reveals the interactive context menu available on `.tex` files. This vital popup menu grants immediate access to essential conversion commands, dynamically bridging the GUI with the underlying CLI extraction and repacking tools.*
 
-**_6. Texture Paint & Drawing Editor_**  
-![Texture Paint](assets/05a_tex_paint.png)  
-*Showcases the integrated advanced Image Editor. Users can draw, paint, erase, change pen size/color, and save modified texture assets directly back into the game's proprietary format.*
+**_6. Texture Paint & Drawing Editor (Edit Game Assets)_**  
+<p align="center">
+  <img src="assets/05a_tex_paint.png" width="49%" alt="Texture Paint Tools" />
+  <img src="assets/05b_tex_paint.png" width="49%" alt="Texture Paint Brush" />
+</p>
+<p align="center">
+  <img src="assets/05c_tex_paint.png" width="49%" alt="Editing Texture Asset" />
+  <img src="assets/05d_tex_paint.png" width="49%" alt="Save Modified Asset" />
+</p>
+*Showcases the integrated advanced Image Editor. With this tool, we can edit Game assets directly; users can draw, paint, erase, change pen size/color, and save modified texture assets directly back into the game's proprietary format.*
 
 **_7. Raw 3D Mesh Viewer (MEF)_**  
 ![3D Raw Viewer](assets/04a_mef_3d_raw.png)  
