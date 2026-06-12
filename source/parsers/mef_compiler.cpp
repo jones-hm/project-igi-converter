@@ -1,14 +1,18 @@
 #include "mef_compiler.h"
+#include "mef_exporter.h"
 #include "mef_parser.h"
 #include "../logger.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <stdexcept>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 namespace MefCompiler {
 
@@ -309,9 +313,9 @@ static std::vector<uint8_t> BuildDner(
         const uint16_t indexCount = static_cast<uint16_t>(faceIdxs.size() * 3);
 
         // Write 28-byte block header
-        WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); // px,py,pz
+        WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); // px,py,pz (patched later from sidecar)
         WriteU16(d, indexCount);
-        WriteI16(d, isLast ? int16_t(-1) : int16_t(0));  // nextoffs
+        WriteI16(d, isLast ? int16_t(-1) : static_cast<int16_t>(indexCount * 2));  // nextoffs = index byte size
         WriteI16(d, static_cast<int16_t>(mat));           // td = material slot
         WriteU16(d, offVerts);
         WriteU16(d, numVerts);
@@ -365,6 +369,197 @@ static std::vector<uint8_t> BuildTamc(const std::vector<MEFMaterial>& mats,
 // Public API
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Sidecar-aware compile: rebuilds XTRV+DNER from the text geometry, but
+// preserves every other chunk (HPSC, XTVC, ECFC, TAMC, HSMC …) verbatim
+// from the .extra sidecar written by `mef to-text`.
+// ---------------------------------------------------------------------------
+static bool CompileWithSidecar(
+    const MEFObject& obj,
+    const std::string& outBinaryPath,
+    std::vector<ParsedGeometry::RawChunk>& sidecar)
+{
+    const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
+
+    // Build new XTRV + DNER from text geometry
+    std::vector<uint32_t> remA, remB, remC;
+    std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
+
+    const uint32_t numVerts = static_cast<uint32_t>(verts.size());
+    const uint32_t numFaces = static_cast<uint32_t>(obj.faces.size());
+    const float    radius   = ComputeRadius(verts);
+
+    std::map<int, bool> matSeen;
+    for (const auto& f : obj.faces) matSeen[f.material_index] = true;
+    const uint32_t numBlocks = static_cast<uint32_t>(matSeen.empty() ? 1 : matSeen.size());
+    const int numMatSlots    = static_cast<int>(obj.materials.empty()
+                                ? (matSeen.empty() ? 1 : matSeen.rbegin()->first + 1)
+                                : obj.materials.size());
+
+    auto newXtrv = BuildXtrv(verts, modelType);
+    auto newDner = BuildDner(obj.faces, remA, remB, remC, numMatSlots);
+    while (newXtrv.size() % 4) newXtrv.push_back(0);
+    while (newDner.size() % 4) newDner.push_back(0);
+
+    // Append skinning-only verts from sidecar XTRV (indices beyond render mesh,
+    // referenced only by HPSC bone data — not by any DNER face).
+    for (const auto& sc : sidecar) {
+        if (sc.isTag("XTRV") && sc.data.size() > newXtrv.size()) {
+            newXtrv.insert(newXtrv.end(),
+                sc.data.begin() + static_cast<ptrdiff_t>(newXtrv.size()),
+                sc.data.end());
+            while (newXtrv.size() % 4) newXtrv.push_back(0);
+            break;
+        }
+    }
+
+    // Copy block centers (px/py/pz) from sidecar DNER into newDner, matching by td (material slot).
+    // Also verifies nextoffs integrity: nextoffs = indexCount * 2 (set by BuildDner above).
+    {
+        for (const auto& sc : sidecar) {
+            if (!sc.isTag("DNER") || sc.data.empty()) continue;
+            // Parse sidecar DNER: build td → header-bytes map
+            // Stores bytes 0-11 (px,py,pz) and bytes 22-27 (opacity,eflame,mshine,scolor,opacitd)
+            struct DnerHdr { uint8_t centers[12]; uint8_t matProps[6]; };
+            std::map<int16_t, DnerHdr> hdrs;
+            size_t p = 0;
+            while (p + 28 <= sc.data.size()) {
+                DnerHdr h;
+                std::memcpy(h.centers,  sc.data.data() + p,      12);
+                std::memcpy(h.matProps, sc.data.data() + p + 22,  6);
+                uint16_t ic = sc.data[p+12] | (uint16_t(sc.data[p+13]) << 8);
+                int16_t  no; std::memcpy(&no, sc.data.data() + p + 14, 2);
+                int16_t  td; std::memcpy(&td, sc.data.data() + p + 16, 2);
+                hdrs[td] = h;
+                uint32_t stride = 28 + ic * 2u;
+                if (stride % 4) stride += 4 - stride % 4;
+                if (no == int16_t(-1)) break;
+                p += stride;
+            }
+            // Patch centers and material properties in newDner
+            p = 0;
+            while (p + 28 <= newDner.size()) {
+                uint16_t ic = newDner[p+12] | (uint16_t(newDner[p+13]) << 8);
+                int16_t  no; std::memcpy(&no, newDner.data() + p + 14, 2);
+                int16_t  td; std::memcpy(&td, newDner.data() + p + 16, 2);
+                auto it = hdrs.find(td);
+                if (it != hdrs.end()) {
+                    std::memcpy(newDner.data() + p,      it->second.centers,  12);
+                    std::memcpy(newDner.data() + p + 22, it->second.matProps,  6);
+                }
+                uint32_t stride = 28 + ic * 2u;
+                if (stride % 4) stride += 4 - stride % 4;
+                if (no == int16_t(-1)) break;
+                p += stride;
+            }
+            break;
+        }
+    }
+
+    // Update HSEM in sidecar: refresh geometry counts that change with topology edits.
+    // Verified offsets (156-byte IGI1 HSEM):
+    //   96  = num_r_faces
+    //   100 = num_r_verts  ← total XTRV vertex count (render + skinning-only)
+    //   104 = render buffer size (D3DR_data + XTRV_data + DNER_data, in bytes)
+    //   108 = num_c_faces  (unchanged — collision data preserved verbatim)
+    //   112 = num_c_verts  (unchanged)
+    //   116 = collision buffer size (unchanged)
+    //   120 = model_radius (NOT updated here — sidecar has original value; radius
+    //                        from just the render verts may be smaller than from all verts)
+    {
+        const uint32_t vertStride  = (modelType == 1) ? 40u : 32u;
+        const uint32_t totalVerts  = static_cast<uint32_t>(newXtrv.size()) / vertStride;
+
+        uint32_t d3drDataSize = 0;
+        for (const auto& sc : sidecar) {
+            if (sc.isTag("D3DR")) { d3drDataSize = static_cast<uint32_t>(sc.data.size()); break; }
+        }
+        const uint32_t renderBufSize = d3drDataSize
+                                     + static_cast<uint32_t>(newXtrv.size())
+                                     + static_cast<uint32_t>(newDner.size());
+
+        for (auto& rc : sidecar) {
+            if (rc.isTag("HSEM") && rc.data.size() >= 156) {
+                auto wU32 = [&](size_t off, uint32_t v) {
+                    rc.data[off]   =  v        & 0xFF;
+                    rc.data[off+1] = (v >>  8) & 0xFF;
+                    rc.data[off+2] = (v >> 16) & 0xFF;
+                    rc.data[off+3] = (v >> 24) & 0xFF;
+                };
+                wU32( 96, numFaces);       // num_r_faces
+                wU32(100, totalVerts);     // num_r_verts = total XTRV entries
+                wU32(104, renderBufSize);  // render buffer size
+                break;
+            }
+        }
+    }
+
+    // Build output chunk list in sidecar order, replacing XTRV and DNER.
+    struct OutChunk { char fourcc[4]; const std::vector<uint8_t>* data; };
+    std::vector<OutChunk> outChunks;
+    outChunks.reserve(sidecar.size());
+
+    for (const auto& rc : sidecar) {
+        OutChunk oc;
+        std::memcpy(oc.fourcc, rc.fourcc, 4);
+        if (rc.isTag("XTRV"))
+            oc.data = &newXtrv;
+        else if (rc.isTag("DNER"))
+            oc.data = &newDner;
+        else
+            oc.data = &rc.data;
+        outChunks.push_back(oc);
+    }
+
+    // Compute file size: 20 (ILFF) + Σ(16 + aligned(dataSize))
+    uint32_t fileSize = 20;
+    for (const auto& oc : outChunks) {
+        const uint32_t aligned = (static_cast<uint32_t>(oc.data->size()) + 3) & ~3u;
+        fileSize += 16 + aligned;
+    }
+
+    // Assemble binary
+    std::vector<uint8_t> out;
+    out.reserve(fileSize);
+    WriteTag(out, "ILFF");
+    WriteU32(out, fileSize);
+    WriteU32(out, 4u);
+    WriteU32(out, 0u);
+    WriteTag(out, "OCEM");
+
+    for (size_t ci = 0; ci < outChunks.size(); ++ci) {
+        const bool isLast = (ci == outChunks.size() - 1);
+        const uint32_t dataSize = static_cast<uint32_t>(outChunks[ci].data->size());
+        const uint32_t aligned  = (dataSize + 3) & ~3u;
+        const uint32_t skip     = isLast ? 0u : (16u + aligned);
+        WriteChunkHeader(out, outChunks[ci].fourcc, dataSize, skip);
+        out.insert(out.end(), outChunks[ci].data->begin(), outChunks[ci].data->end());
+        for (uint32_t p = dataSize; p < aligned; ++p) out.push_back(0);
+    }
+
+    if (out.size() != fileSize) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefCompiler] Sidecar size mismatch: expected " +
+            std::to_string(fileSize) + " got " + std::to_string(out.size()));
+        return false;
+    }
+
+    std::ofstream f(outBinaryPath, std::ios::binary);
+    if (!f.is_open()) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefCompiler] Cannot open output file: " + outBinaryPath);
+        return false;
+    }
+    f.write(reinterpret_cast<const char*>(out.data()),
+            static_cast<std::streamsize>(out.size()));
+    Logger::Get().Log(LogLevel::INFO,
+        "[MefCompiler] (sidecar) Compiled to: " + outBinaryPath +
+        " (" + std::to_string(out.size()) + " bytes, " +
+        std::to_string(numVerts) + " verts, " +
+        std::to_string(numFaces) + " faces)");
+    return true;
+}
+
 bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     // 1. Parse ASCII MEF
     MEFParser parser;
@@ -391,19 +586,25 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
         return false;
     }
 
-    // 2. Detect model type from parsed data
+    // 2. Try sidecar-aware path first (preserves HPSC, XTVC, ECFC, TAMC, etc.)
+    const std::string sidecarPath = textMefPath + ".extra";
+    if (fs::exists(sidecarPath)) {
+        auto sidecar = MefExporter::ReadMefSidecar(sidecarPath);
+        if (!sidecar.empty()) {
+            return CompileWithSidecar(obj, outBinaryPath, sidecar);
+        }
+    }
+
+    // 3. Fallback: minimal 5-chunk output (no sidecar available)
     const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
 
-    // 3. Build combined vertex buffer
     std::vector<uint32_t> remA, remB, remC;
     std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
 
-    // 4. Compute stats
     const uint32_t numVerts  = static_cast<uint32_t>(verts.size());
     const uint32_t numFaces  = static_cast<uint32_t>(obj.faces.size());
     const float    radius    = ComputeRadius(verts);
 
-    // Count material render blocks
     std::map<int, bool> matSeen;
     for (const auto& f : obj.faces) matSeen[f.material_index] = true;
     const uint32_t numBlocks = static_cast<uint32_t>(matSeen.empty() ? 1 : matSeen.size());
@@ -411,18 +612,11 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
                                 ? (matSeen.empty() ? 1 : matSeen.rbegin()->first + 1)
                                 : obj.materials.size());
 
-    // 5. Build chunk data
-    auto hsemData = BuildHsem(numFaces, numVerts, numBlocks,
-                               0 /* no attachments from ASCII */, radius, modelType);
+    auto hsemData = BuildHsem(numFaces, numVerts, numBlocks, 0, radius, modelType);
     auto d3drData = BuildD3dr(numFaces, numBlocks, numVerts, modelType);
     auto xtrvData = BuildXtrv(verts, modelType);
     auto dnerData = BuildDner(obj.faces, remA, remB, remC, numMatSlots);
     auto tamcData = BuildTamc(obj.materials, numMatSlots);
-
-    // 6. Compute chunk layout & skip values
-    // Chunk order: HSEM, D3DR, XTRV, DNER, TAMC (last)
-    // skip(chunk) = 16 + dataSize for non-last; 0 for last
-    const bool hasTamc = !tamcData.empty();
 
     struct ChunkDesc { const char* tag; std::vector<uint8_t>* data; };
     std::vector<ChunkDesc> chunks;
@@ -430,31 +624,24 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     chunks.push_back({"D3DR", &d3drData});
     chunks.push_back({"XTRV", &xtrvData});
     chunks.push_back({"DNER", &dnerData});
-    if (hasTamc)
+    if (!tamcData.empty())
         chunks.push_back({"TAMC", &tamcData});
 
-    // Ensure all data sizes are 4-byte aligned
     for (auto& c : chunks) {
         while (c.data->size() % 4 != 0) c.data->push_back(0u);
     }
 
-    // Compute total file size
-    // 20 (ILFF header) + sum of (16 + dataSize) for each chunk
     uint32_t fileSize = 20;
     for (auto& c : chunks) fileSize += 16 + static_cast<uint32_t>(c.data->size());
 
-    // 6. Assemble binary
     std::vector<uint8_t> out;
     out.reserve(fileSize);
-
-    // ILFF outer header (20 bytes)
     WriteTag(out, "ILFF");
     WriteU32(out, fileSize);
-    WriteU32(out, 4u);   // alignment
-    WriteU32(out, 0u);   // skip = 0
-    WriteTag(out, "OCEM"); // format ID
+    WriteU32(out, 4u);
+    WriteU32(out, 0u);
+    WriteTag(out, "OCEM");
 
-    // Chunk headers + data
     for (size_t ci = 0; ci < chunks.size(); ++ci) {
         const bool isLast = (ci == chunks.size() - 1);
         const uint32_t dataSize = static_cast<uint32_t>(chunks[ci].data->size());
@@ -465,12 +652,11 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
 
     if (out.size() != fileSize) {
         Logger::Get().Log(LogLevel::ERR,
-            "[MefCompiler] Internal size mismatch: expected " +
+            "[MefCompiler] Size mismatch: expected " +
             std::to_string(fileSize) + " got " + std::to_string(out.size()));
         return false;
     }
 
-    // 7. Write to file
     std::ofstream f(outBinaryPath, std::ios::binary);
     if (!f.is_open()) {
         Logger::Get().Log(LogLevel::ERR,
@@ -479,7 +665,6 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     }
     f.write(reinterpret_cast<const char*>(out.data()),
             static_cast<std::streamsize>(out.size()));
-    f.close();
 
     Logger::Get().Log(LogLevel::INFO,
         "[MefCompiler] Compiled binary MEF to: " + outBinaryPath +

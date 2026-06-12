@@ -230,7 +230,7 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
     return false;
   }
 
-  f << std::fixed << std::setprecision(4);
+  f << std::setprecision(9);
 
   f << "NewObject(\"model_mesh\");\n";
 
@@ -345,6 +345,75 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
                     "[MefExporter] Successfully exported ASCII MEF to: " +
                         outpath);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar: preserves all ILFF chunks verbatim for lossless round-trips.
+// Format: magic "MEXS" + uint32 version=1 + uint32 numChunks
+//         then for each: char fourcc[4] + uint32 dataSize + data (4-byte padded)
+// ---------------------------------------------------------------------------
+
+static void SidecarWriteU32(std::ofstream& f, uint32_t v) {
+    f.write(reinterpret_cast<const char*>(&v), 4);
+}
+
+bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
+                     const std::string& sidecarPath) {
+    std::ofstream f(sidecarPath, std::ios::binary);
+    if (!f.is_open()) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefExporter] Cannot write sidecar: " + sidecarPath);
+        return false;
+    }
+    f.write("MEXS", 4);
+    SidecarWriteU32(f, 1u);  // version
+    SidecarWriteU32(f, static_cast<uint32_t>(chunks.size()));
+    const uint8_t pad4[4] = {0,0,0,0};
+    for (const auto& rc : chunks) {
+        f.write(rc.fourcc, 4);
+        const uint32_t sz = static_cast<uint32_t>(rc.data.size());
+        SidecarWriteU32(f, sz);
+        if (sz > 0) f.write(reinterpret_cast<const char*>(rc.data.data()), sz);
+        const uint32_t rem = (4 - (sz % 4)) % 4;
+        if (rem) f.write(reinterpret_cast<const char*>(pad4), rem);
+    }
+    Logger::Get().Log(LogLevel::INFO,
+        "[MefExporter] Sidecar written: " + sidecarPath +
+        " (" + std::to_string(chunks.size()) + " chunks)");
+    return true;
+}
+
+std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string& sidecarPath) {
+    std::vector<ParsedGeometry::RawChunk> result;
+    std::ifstream f(sidecarPath, std::ios::binary);
+    if (!f.is_open()) return result;
+
+    char magic[4];
+    f.read(magic, 4);
+    if (std::memcmp(magic, "MEXS", 4) != 0) return result;
+
+    uint32_t version = 0, numChunks = 0;
+    f.read(reinterpret_cast<char*>(&version), 4);
+    f.read(reinterpret_cast<char*>(&numChunks), 4);
+
+    result.reserve(numChunks);
+    for (uint32_t i = 0; i < numChunks; ++i) {
+        ParsedGeometry::RawChunk rc;
+        f.read(rc.fourcc, 4);
+        uint32_t sz = 0;
+        f.read(reinterpret_cast<char*>(&sz), 4);
+        if (sz > 0) {
+            rc.data.resize(sz);
+            f.read(reinterpret_cast<char*>(rc.data.data()), sz);
+        }
+        const uint32_t rem = (4 - (sz % 4)) % 4;
+        if (rem) f.seekg(rem, std::ios::cur);
+        result.push_back(std::move(rc));
+    }
+    Logger::Get().Log(LogLevel::INFO,
+        "[MefExporter] Sidecar read: " + sidecarPath +
+        " (" + std::to_string(result.size()) + " chunks)");
+    return result;
 }
 
 } // namespace MefExporter

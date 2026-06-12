@@ -121,6 +121,18 @@ struct ParsedGeometry {
     std::vector<BoneInfo> bones;          // populated from REIH+MANB
     std::vector<Attachment> attachments;  // populated from ATTA
 
+    // ---- Raw ILFF chunks (original order, verbatim bytes) ----
+    // Populated by ParseMefFile for round-trip preservation via sidecar.
+    struct RawChunk {
+        char fourcc[4] = {0,0,0,0};
+        std::vector<uint8_t> data;
+        bool isTag(const char* cc) const {
+            return cc[0]==fourcc[0] && cc[1]==fourcc[1] &&
+                   cc[2]==fourcc[2] && cc[3]==fourcc[3];
+        }
+    };
+    std::vector<RawChunk> rawChunks;
+
     // ---- Collision/material data for ASCII export ----
     std::vector<XtvcVertex>  xtvcVerts;    // XTVC type1 (set 0)
     std::vector<XtvmVertex>  xtvmVerts;    // XTVM (magic vertices)

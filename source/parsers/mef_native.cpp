@@ -1044,6 +1044,17 @@ ParsedGeometry ParseMefGeometry(const std::vector<uint8_t>& bytes, const std::ve
 ParsedGeometry ParseMefFile(const std::string& filepath) {
     const std::vector<uint8_t> bytes  = ReadWholeFile(filepath);
     const std::vector<ChunkInfo> chunks = ParseIlffChunks(bytes, filepath);
-    return ParseMefGeometry(bytes, chunks, filepath);
+    ParsedGeometry geo = ParseMefGeometry(bytes, chunks, filepath);
+
+    // Store all chunks verbatim so round-trip via sidecar is lossless.
+    geo.rawChunks.reserve(chunks.size());
+    for (const auto& ci : chunks) {
+        ParsedGeometry::RawChunk rc;
+        std::memcpy(rc.fourcc, ci.name.c_str(), 4);
+        if (ci.size > 0)
+            rc.data.assign(bytes.begin() + ci.data, bytes.begin() + ci.data + ci.size);
+        geo.rawChunks.push_back(std::move(rc));
+    }
+    return geo;
 }
 

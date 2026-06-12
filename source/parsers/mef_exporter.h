@@ -21,4 +21,11 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
 bool ExportToMefAscii(const ParsedGeometry &geometry,
                       const std::string &outpath);
 
+// Write/read the binary sidecar that preserves all opaque ILFF chunks for
+// lossless text→binary round-trips.  The sidecar path is <textPath>.extra.
+bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
+                     const std::string &sidecarPath);
+
+std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string &sidecarPath);
+
 } // namespace MefExporter

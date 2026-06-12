@@ -225,7 +225,14 @@ static int do_mef_to_text(const std::string& input, const std::string& outpath)
         return 4;
     }
 
+    // Write sidecar with all original ILFF chunks so mef compile can restore them.
+    const std::string sidecarPath = outpath + ".extra";
+    if (!geo.rawChunks.empty())
+        MefExporter::WriteMefSidecar(geo.rawChunks, sidecarPath);
+
     std::cout << "mef to-text: exported to " << outpath << "\n";
+    if (!geo.rawChunks.empty())
+        std::cout << "mef to-text: sidecar written to " << sidecarPath << "\n";
     return 0;
 }
 
