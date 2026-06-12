@@ -349,7 +349,7 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
 
 // ---------------------------------------------------------------------------
 // Sidecar: preserves all ILFF chunks verbatim for lossless round-trips.
-// Format: magic "MEXS" + uint32 version=1 + uint32 numChunks
+// Format: magic "SIDX" + uint32 version=1 + uint32 numChunks
 //         then for each: char fourcc[4] + uint32 dataSize + data (4-byte padded)
 // ---------------------------------------------------------------------------
 
@@ -365,7 +365,7 @@ bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
             "[MefExporter] Cannot write sidecar: " + sidecarPath);
         return false;
     }
-    f.write("MEXS", 4);
+    f.write("SIDX", 4);
     SidecarWriteU32(f, 1u);  // version
     SidecarWriteU32(f, static_cast<uint32_t>(chunks.size()));
     const uint8_t pad4[4] = {0,0,0,0};
@@ -390,7 +390,7 @@ std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string& sidecarP
 
     char magic[4];
     f.read(magic, 4);
-    if (std::memcmp(magic, "MEXS", 4) != 0) return result;
+    if (std::memcmp(magic, "SIDX", 4) != 0) return result;
 
     uint32_t version = 0, numChunks = 0;
     f.read(reinterpret_cast<char*>(&version), 4);

@@ -2297,83 +2297,92 @@ private:
             menu.addAction("Decompile",      [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
             menu.addAction("Disassemble",    [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
-        } else if (ext == "mef") {
-            menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("mef info"); });
-            menu.addAction("Dump", [this, path]() { loadFile(path); executeCommand("mef dump"); });
+        } else if (ext == "mef" || ext == "mex") {
+            bool isBinary = true;
+            QFile f(path);
+            if (f.open(QIODevice::ReadOnly)) {
+                QByteArray magic = f.read(4);
+                if (magic != "ILFF") {
+                    isBinary = false;
+                }
+                f.close();
+            }
 
-            // Export submenu
-            QMenu* exportMenu = menu.addMenu("Export");
-            exportMenu->addAction("Export to OBJ",       [this, path]() { loadFile(path); executeCommand("mef export-obj"); });
-            exportMenu->addAction("Export to MEF (Text)", [this, path]() { loadFile(path); executeCommand("mef to-text"); });
+            QString cmdPrefix = ext;
 
-            // Textures submenu
-            QMenu* texMenu = menu.addMenu("Textures");
-            texMenu->addAction("Apply Textures", [this, path]() {
-                currentFile = path;
-                executeCommand("mef apply-tex");
-                QString baseName = QFileInfo(path).completeBaseName();
-                QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
-                if (QDir(tempDir).exists()) {
-                    logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
-                    viewModeCombo->setCurrentIndex(4);
-                    modelViewer->loadModel(path);
-                    modelViewer->show();
-                }
-            });
-            texMenu->addAction("Apply Textures (All)", [this, path]() {
-                currentFile = QFileInfo(path).absolutePath();
-                executeCommand("mef apply-tex-all");
-            });
-            texMenu->addAction("Map Textures", [this, path]() {
-                QString baseName = QFileInfo(path).completeBaseName();
-                if (globalLevelDatPath.isEmpty()) {
-                    logMessage("[ERROR] No level DAT set. Go to Settings > Level to set one.");
-                    return;
-                }
-                QProcess proc;
-                proc.setProgram(qApp->applicationFilePath());
-                proc.setArguments(QStringList() << "dat" << "export" << globalLevelDatPath);
-                proc.start();
-                proc.waitForFinished(10000);
-                QString datOut = proc.readAllStandardOutput();
+            if (isBinary) {
+                menu.addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
+                menu.addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
 
-                QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
-                int modelIdx = datOut.indexOf(QString("\"modelName\": \"%1\"").arg(baseName), 0, Qt::CaseInsensitive);
-                if (modelIdx != -1) {
-                    int texStart = datOut.indexOf("\"textures\": [", modelIdx);
-                    if (texStart != -1) {
-                        int texEnd = datOut.indexOf("]", texStart);
-                        QString texArr = datOut.mid(texStart + 12, texEnd - texStart - 12);
-                        report += "Textures mapped in DAT:\n" + texArr.replace("\"", "").trimmed() + "\n";
-                    } else {
-                        report += "No textures found in DAT for this model.\n";
-                    }
-                } else {
-                    report += "(No texture mapping found in DAT for this model)\n";
+                QMenu* exportMenu = menu.addMenu("Export");
+                exportMenu->addAction("Export to OBJ",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-obj"); });
+                exportMenu->addAction("Export to Text",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+
+                if (ext == "mef") {
+                    // Textures submenu
+                    QMenu* texMenu = menu.addMenu("Textures");
+                    texMenu->addAction("Apply Textures", [this, path]() {
+                        currentFile = path;
+                        executeCommand("mef apply-tex");
+                        QString baseName = QFileInfo(path).completeBaseName();
+                        QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
+                        if (QDir(tempDir).exists()) {
+                            logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
+                            viewModeCombo->setCurrentIndex(4);
+                            modelViewer->loadModel(path);
+                            modelViewer->show();
+                        }
+                    });
+                    texMenu->addAction("Apply Textures (All)", [this, path]() {
+                        currentFile = QFileInfo(path).absolutePath();
+                        executeCommand("mef apply-tex-all");
+                    });
+                    texMenu->addAction("Map Textures", [this, path]() {
+                        QString baseName = QFileInfo(path).completeBaseName();
+                        if (globalLevelDatPath.isEmpty()) {
+                            logMessage("[ERROR] No level DAT set. Go to Settings > Level to set one.");
+                            return;
+                        }
+                        QProcess proc;
+                        proc.setProgram(qApp->applicationFilePath());
+                        proc.setArguments(QStringList() << "dat" << "export" << globalLevelDatPath);
+                        proc.start();
+                        proc.waitForFinished(10000);
+                        QString datOut = proc.readAllStandardOutput();
+
+                        QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
+                        int modelIdx = datOut.indexOf(QString("\"modelName\": \"%1\"").arg(baseName), 0, Qt::CaseInsensitive);
+                        if (modelIdx != -1) {
+                            int texStart = datOut.indexOf("\"textures\": [", modelIdx);
+                            if (texStart != -1) {
+                                int texEnd = datOut.indexOf("]", texStart);
+                                QString texArr = datOut.mid(texStart + 12, texEnd - texStart - 12);
+                                report += "Textures mapped in DAT:\n" + texArr.replace("\"", "").trimmed() + "\n";
+                            } else {
+                                report += "No textures found in DAT for this model.\n";
+                            }
+                        } else {
+                            report += "(No texture mapping found in DAT for this model)\n";
+                        }
+                        QProcess mefProc;
+                        mefProc.setProgram(qApp->applicationFilePath());
+                        mefProc.setArguments(QStringList() << "mef" << "dump" << path);
+                        mefProc.start();
+                        mefProc.waitForFinished(5000);
+                        QString mefOut = mefProc.readAllStandardOutput();
+                        report += "\n=== MEF Materials & Attachments ===\n";
+                        for (const QString& line : mefOut.split('\n')) {
+                            if (line.startsWith("material") || line.startsWith("ATTA") || line.startsWith("attachment"))
+                                report += line.trimmed() + "\n";
+                        }
+                        logMessage(report);
+                    });
                 }
-                QProcess mefProc;
-                mefProc.setProgram(qApp->applicationFilePath());
-                mefProc.setArguments(QStringList() << "mef" << "dump" << path);
-                mefProc.start();
-                mefProc.waitForFinished(5000);
-                QString mefOut = mefProc.readAllStandardOutput();
-                report += "\n=== MEF Materials & Attachments ===\n";
-                for (const QString& line : mefOut.split('\n')) {
-                    if (line.startsWith("material") || line.startsWith("ATTA") || line.startsWith("attachment"))
-                        report += line.trimmed() + "\n";
-                }
-                logMessage(report);
-            });
-        } else if (ext == "mex") {
-            menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("mex info"); });
-            menu.addAction("Dump", [this, path]() { loadFile(path); executeCommand("mex dump"); });
-            QMenu* exportMenu = menu.addMenu("Export");
-            exportMenu->addAction("Export to OBJ", [this, path]() { loadFile(path); executeCommand("mex export-obj"); });
-        } else if (ext == "txt") {
-            // Text MEF — compile and export options
-            menu.addAction("Compile to Binary MEF", [this, path]() { loadFile(path); executeCommand("mef compile-text"); });
-            QMenu* exportMenu = menu.addMenu("Export");
-            exportMenu->addAction("Export to OBJ", [this, path]() { loadFile(path); executeCommand("mef export-obj"); });
+            } else {
+                menu.addAction("Compile to Binary", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " compile-text"); });
+                QMenu* exportMenu = menu.addMenu("Export");
+                exportMenu->addAction("Export to OBJ", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-obj"); });
+            }
         } else if (ext == "res") {
             menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
             menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
@@ -2681,21 +2690,16 @@ private:
             logMessage(QString("[INFO] Export-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
             return; // Already ran all sub-processes above
 
-        } else if (cmd == "mef export-obj") {
-            QString outObj = outDir + "/" + baseName + ".obj";
-            args.clear();
-            args << "mef" << "export" << currentFile << "-o" << outObj;
-            logMessage(QString("[INFO] Exporting OBJ to: %1").arg(outObj));
-        } else if (cmd == "mef to-text") {
-            QString outTxt = outDir + "/" + baseName + ".mef.txt";
+        } else if (cmd == "mef to-text" || cmd == "mex to-text") {
+            QString outTxt = currentFile;
             args.clear();
             args << "mef" << "to-text" << currentFile << "-o" << outTxt;
-            logMessage(QString("[INFO] Exporting text MEF to: %1").arg(outTxt));
-        } else if (cmd == "mef compile-text") {
-            QString outMef = outDir + "/" + baseName + ".mef";
+            logMessage(QString("[INFO] Exporting text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+        } else if (cmd == "mef compile-text" || cmd == "mex compile-text") {
+            QString outBin = currentFile;
             args.clear();
-            args << "mef" << "compile" << currentFile << "-o" << outMef;
-            logMessage(QString("[INFO] Compiling binary MEF to: %1").arg(outMef));
+            args << "mef" << "compile" << currentFile << "-o" << outBin;
+            logMessage(QString("[INFO] Compiling text %1 to binary: %2").arg(currentExt.toUpper(), outBin));
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
         } else {

@@ -56,6 +56,8 @@ std::vector<MEFObject> MEFParser::parse_string(const std::string& content) {
                 handle_modeltype(args);
             } else if (name == "BoneVertex") {
                 handle_bonevertex(args);
+            } else if (name == "Attachment") {
+                handle_attachment(args);
             } else {
                 // Unknown command, ignore
             }
@@ -312,4 +314,27 @@ void MEFParser::handle_bonevertex(const std::vector<std::string>& args) {
     try { bv.weight        = std::stof(args[2]); } catch (...) {}
     try { bv.local_vert_id = static_cast<uint16_t>(std::stoi(args[3])); } catch (...) {}
     m_current_object.bone_vertices.push_back(bv);
+}
+
+void MEFParser::handle_attachment(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.size() < 14) return;
+    MefAttachment a;
+    std::memset(&a, 0, sizeof(a));
+    
+    std::string name = args[0];
+    if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+        name = name.substr(1, name.size() - 2);
+    }
+    std::strncpy(a.name, name.c_str(), 15);
+    
+    auto floats = parse_floats(std::vector<std::string>(args.begin() + 1, args.begin() + 13));
+    if (floats.size() == 12) {
+        a.px = floats[0]; a.py = floats[1]; a.pz = floats[2];
+        a.r00 = floats[3]; a.r01 = floats[4]; a.r02 = floats[5];
+        a.r03 = floats[6]; a.r04 = floats[7]; a.r05 = floats[8];
+        a.r06 = floats[9]; a.r07 = floats[10]; a.r08 = floats[11];
+    }
+    
+    try { a.boneId = std::stoi(args[13]); } catch (...) { a.boneId = -1; }
+    m_current_object.attachments.push_back(a);
 }

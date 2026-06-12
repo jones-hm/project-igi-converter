@@ -4,6 +4,32 @@
 
 using namespace igi1conv_test;
 
+namespace {
+
+void RemoveLastFunctionLine(const std::string& path, const std::string& prefix) {
+    std::ifstream in(path);
+    ASSERT_TRUE(in.is_open()) << "failed to open text MEF: " << path;
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line))
+        lines.push_back(line);
+    in.close();
+
+    auto it = std::find_if(lines.rbegin(), lines.rend(), [&prefix](const std::string& s) {
+        return s.rfind(prefix, 0) == 0;
+    });
+    ASSERT_NE(it, lines.rend()) << "text MEF has no " << prefix << " lines: " << path;
+    lines.erase(std::next(it).base());
+
+    std::ofstream out(path, std::ios::trunc);
+    ASSERT_TRUE(out.is_open()) << "failed to rewrite text MEF: " << path;
+    for (const auto& s : lines)
+        out << s << "\n";
+}
+
+} // namespace
+
 // ─── round-trips ─────────────────────────────────────────────────────────────
 
 // QVM -> QSC -> QVM: decompiled source must recompile cleanly.
@@ -99,6 +125,45 @@ TEST_F(IGI1ConvTest, RoundtripMefBinaryTextBinary) {
 
     // Compiled binary must be parseable (mef info returns 0)
     EXPECT_EQ(RunIGI1Conv("mef info " + Q(mef2)), 0);
+}
+
+// Sidecar compile preserves raw DNER/D3DR/PMTL topology. Vertex and UV edits are
+// supported, but face topology edits must be rejected instead of producing a
+// binary whose text-derived HSEM counts disagree with preserved DNER data.
+TEST_F(IGI1ConvTest, MefSidecarCompileRejectsFaceTopologyEdits) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_topology_changed.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+    std::string mex = txt.substr(0, txt.find_last_of(".")) + ".mex";
+    ASSERT_TRUE(NonEmptyFile(mex));
+
+    RemoveLastFunctionLine(txt, "Face(");
+
+    std::string out;
+    EXPECT_NE(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2), &out), 0)
+        << "sidecar compile must reject Face() topology edits; output:\n" << out;
+}
+
+TEST_F(IGI1ConvTest, MefSidecarCompileRejectsVertexCountEdits) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_vertex_count_changed.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+    std::string mex = txt.substr(0, txt.find_last_of(".")) + ".mex";
+    ASSERT_TRUE(NonEmptyFile(mex));
+
+    RemoveLastFunctionLine(txt, "Vertex(");
+
+    std::string out;
+    EXPECT_NE(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2), &out), 0)
+        << "sidecar compile must reject Vertex() count edits; output:\n" << out;
 }
 
 // ─── version reporting (regression: used to print 3.0) ───────────────────────

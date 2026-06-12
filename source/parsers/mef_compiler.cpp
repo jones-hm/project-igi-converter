@@ -410,12 +410,49 @@ static std::vector<uint8_t> BuildTamc(const std::vector<MEFMaterial>& mats,
 // preserves every other chunk (HPSC, XTVC, ECFC, TAMC, HSMC …) verbatim
 // from the .extra sidecar written by `mef to-text`.
 // ---------------------------------------------------------------------------
-static bool CompileWithSidecar(
-    const MEFObject& obj,
-    const std::string& outBinaryPath,
-    std::vector<ParsedGeometry::RawChunk>& sidecar)
-{
+static uint32_t TryReadSidecarD3drFaceCount(const std::vector<ParsedGeometry::RawChunk>& sidecar, uint32_t modelType) {
+    for (const auto& rc : sidecar) {
+        if (rc.isTag("D3DR") && rc.data.size() >= 12) {
+            const size_t off = (modelType == 3) ? 8 : 4;
+            return static_cast<uint32_t>(rc.data[off]) |
+                  (static_cast<uint32_t>(rc.data[off+1]) << 8) |
+                  (static_cast<uint32_t>(rc.data[off+2]) << 16) |
+                  (static_cast<uint32_t>(rc.data[off+3]) << 24);
+        }
+    }
+    return 0;
+}
+
+static bool CompileWithSidecar(const MEFObject& obj,
+                               const std::string& outBinaryPath,
+                               std::vector<ParsedGeometry::RawChunk>& sidecar) {
+
     const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
+    const uint32_t d3drFaces = TryReadSidecarD3drFaceCount(sidecar, modelType);
+    if (d3drFaces > 0 && obj.faces.size() != d3drFaces) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefCompiler] Face() topology edits are not supported when compiling with sidecar. "
+            "Original sidecar has " + std::to_string(d3drFaces) + " D3DR faces, "
+            "but text file has " + std::to_string(obj.faces.size()) + " Face() entries. "
+            "Delete the sidecar to compile a raw geometry block.");
+        return false;
+    }
+
+    uint32_t expectedVerts = 0;
+    for (const auto& sc : sidecar) {
+        if (sc.isTag("XTRV")) {
+            const uint32_t vertStride = (obj.model_type == 1 || obj.model_type == 3) ? 40u : 32u;
+            expectedVerts = static_cast<uint32_t>(sc.data.size()) / vertStride;
+            break;
+        }
+    }
+    if (expectedVerts > 0 && obj.vertices.size() != expectedVerts) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefCompiler] Vertex() count edits are not supported when compiling with sidecar. "
+            "Original sidecar has " + std::to_string(expectedVerts) + " XTRV vertices, "
+            "but text file has " + std::to_string(obj.vertices.size()) + " Vertex() entries.");
+        return false;
+    }
     const uint32_t dnerHeaderSize = (modelType == 3) ? 32u : 28u;
 
     // For Type 0 (Rigid) and Type 3 (Lightmap), use sidecar XTRV and DNER
@@ -552,7 +589,14 @@ static bool CompileWithSidecar(
         }
     }
 
-    // Build output chunk list in sidecar order, replacing XTRV and DNER.
+    std::vector<uint8_t> newAtta;
+    const size_t attaStride = 68;
+    newAtta.resize(obj.attachments.size() * attaStride, 0);
+    for (size_t i = 0; i < obj.attachments.size(); ++i) {
+        std::memcpy(&newAtta[i * attaStride], &obj.attachments[i], attaStride);
+    }
+
+    // Build output chunk list in sidecar order, replacing XTRV, DNER, and ATTA.
     struct OutChunk { char fourcc[4]; const std::vector<uint8_t>* data; };
     std::vector<OutChunk> outChunks;
     outChunks.reserve(sidecar.size());
@@ -564,6 +608,8 @@ static bool CompileWithSidecar(
             oc.data = &newXtrv;
         else if (rc.isTag("DNER"))
             oc.data = &newDner;
+        else if (rc.isTag("ATTA"))
+            oc.data = &newAtta;
         else
             oc.data = &rc.data;
         outChunks.push_back(oc);
@@ -645,7 +691,13 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     }
 
     // 2. Try sidecar-aware path first (preserves HPSC, XTVC, ECFC, TAMC, etc.)
-    const std::string sidecarPath = textMefPath + ".extra";
+    std::string sidecarPath = textMefPath;
+    size_t extPos = sidecarPath.find_last_of(".");
+    if (extPos != std::string::npos) {
+        sidecarPath = sidecarPath.substr(0, extPos) + ".mex";
+    } else {
+        sidecarPath += ".mex";
+    }
     if (fs::exists(sidecarPath)) {
         auto sidecar = MefExporter::ReadMefSidecar(sidecarPath);
         if (!sidecar.empty()) {

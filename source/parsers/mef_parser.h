@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include "mef_native.h"
 
 struct MEFMaterial {
     int index = 0;
@@ -43,6 +44,7 @@ struct MEFObject {
     std::vector<MEFFace>                 faces;
     std::vector<std::vector<float>>      uvs;
     std::vector<MEFBoneVertex>           bone_vertices; // Type 1 only
+    std::vector<MefAttachment>           attachments;
     std::vector<std::string>             parse_errors;
     int model_type = 0; // 0=rigid, 1=bone, 3=lightmap
 };
@@ -71,6 +73,7 @@ private:
     void handle_breakscript(const std::vector<std::string>& args);
     void handle_modeltype(const std::vector<std::string>& args);
     void handle_bonevertex(const std::vector<std::string>& args);
+    void handle_attachment(const std::vector<std::string>& args);
 
     std::vector<MEFObject> m_objects;
     MEFObject m_current_object;
