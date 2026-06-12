@@ -38,9 +38,11 @@ void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
   for (const auto &v : geometry.vertices)
     f << "v " << v.pos.x << " " << v.pos.y << " " << v.pos.z << "\n";
 
-  // v.uv.y flipped for OpenGL/OBJ convention
-  for (const auto &v : geometry.vertices)
-    f << "vt " << v.uv.x << " " << (1.0f - v.uv.y) << "\n";
+  bool isBoneModel = (geometry.renderLayout.find("type1") != std::string::npos);
+  for (const auto &v : geometry.vertices) {
+    float v_coord = isBoneModel ? v.uv.y : (1.0f - v.uv.y);
+    f << "vt " << v.uv.x << " " << v_coord << "\n";
+  }
 
   f << "\no model_mesh\n";
 
