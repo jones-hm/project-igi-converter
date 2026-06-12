@@ -234,6 +234,9 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
 
   f << "NewObject(\"model_mesh\");\n";
 
+  if (geometry.modelType != 0)
+    f << "ModelType(" << geometry.modelType << ");\n";
+
   // Emit one Material() + MaterialShininess() per TAMC entry.
   // Use white diffuse (1,1,1) so textures render at full brightness.
   // TAMC opacity==0 means fully opaque — passing it as diffuse.r would make
@@ -279,6 +282,15 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
   for (size_t i = 0; i < numVerts; ++i) {
     const auto &v = geometry.vertices[i];
     f << "UV(" << i << ", " << v.uv.x << ", " << v.uv.y << ");\n";
+  }
+
+  // Bone vertex data (Type 1 skeletal models only)
+  if (geometry.modelType == 1) {
+    for (size_t i = 0; i < numVerts; ++i) {
+      const auto &v = geometry.vertices[i];
+      f << "BoneVertex(" << i << ", " << v.boneIndex
+        << ", " << v.weight << ", " << v.localVertexId << ");\n";
+    }
   }
 
   // Faces: clamp normal indices to valid range

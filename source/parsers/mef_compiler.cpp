@@ -74,12 +74,16 @@ static void WriteChunkHeader(std::vector<uint8_t>& out,
 }
 
 // ---------------------------------------------------------------------------
-// Per-vertex combined data for XTRV Type 0 (32 bytes each)
+// Per-vertex combined data — supports both Type 0 (32 bytes) and Type 1 (40 bytes)
 // ---------------------------------------------------------------------------
 struct BinaryVertex {
-    float px{0}, py{0}, pz{0};
-    float nx{0}, ny{0}, nz{1};
-    float u{0},  v{0};
+    float    px{0}, py{0}, pz{0};
+    float    nx{0}, ny{0}, nz{1};
+    float    u{0},  v{0};
+    // Type 1 bone fields (unused for Type 0)
+    float    weight{1.0f};
+    uint16_t localVertexId{0};
+    uint16_t boneIndex{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -121,6 +125,12 @@ static std::vector<BinaryVertex> BuildVertices(
             const auto& uv = obj.uvs[vi];
             if (uv.size() >= 2) { bv.u = uv[0]; bv.v = uv[1]; }
         }
+        // Bone data: bone_vertices are in-order by vertex index
+        if (vi >= 0 && vi < static_cast<int>(obj.bone_vertices.size())) {
+            bv.weight        = obj.bone_vertices[vi].weight;
+            bv.localVertexId = obj.bone_vertices[vi].local_vert_id;
+            bv.boneIndex     = obj.bone_vertices[vi].bone_index;
+        }
 
         uint32_t idx = static_cast<uint32_t>(verts.size());
         verts.push_back(bv);
@@ -156,14 +166,15 @@ static std::vector<uint8_t> BuildHsem(uint32_t numFaces,
                                        uint32_t numVerts,
                                        uint32_t numBlocks,
                                        uint16_t numAttachments,
-                                       float    radius)
+                                       float    radius,
+                                       uint32_t modelType = 0)
 {
     std::vector<uint8_t> d;
     d.reserve(156);
 
-    WriteFloat(d, 0.0f);          // _V (4)
+    WriteFloat(d, 0.10f);         // _V = version 0.10 required by engine (4)
     WriteZeros(d, 28);            // Date[7] (28)
-    WriteU32(d, 0u);              // model_type = 0 rigid (4) [offset 32]
+    WriteU32(d, modelType);       // model_type: 0=rigid, 1=bone (4) [offset 32]
     WriteZeros(d, 12);            // reserved_0[3] (12)
     WriteZeros(d, 48);            // vectors[12] (48)
     WriteU32(d, numFaces);        // num_r_faces (4)
@@ -182,27 +193,45 @@ static std::vector<uint8_t> BuildHsem(uint32_t numFaces,
 }
 
 // ---------------------------------------------------------------------------
-// Build D3DR chunk data (16 bytes, Type 0)
+// Build D3DR chunk data:
+//   Type 0 — 16 bytes: unknown, numFaces, numMeshes, numVerts
+//   Type 1 — 24 bytes: unknown, numFaces, numMeshes(=0), verts0, verts1, numVerts
+//   numMeshes=0 forces the parser to use packed-DNER path for Type 1.
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> BuildD3dr(uint32_t numFaces,
                                        uint32_t numMeshes,
-                                       uint32_t numVerts)
+                                       uint32_t numVerts,
+                                       uint32_t modelType = 0)
 {
     std::vector<uint8_t> d;
-    d.reserve(16);
-    WriteU32(d, 0u);        // unknown
-    WriteU32(d, numFaces);
-    WriteU32(d, numMeshes);
-    WriteU32(d, numVerts);
+    if (modelType == 1) {
+        d.reserve(24);
+        WriteU32(d, 0u);        // unknown
+        WriteU32(d, numFaces);
+        WriteU32(d, 0u);        // numMeshes=0 → packed DNER path
+        WriteU32(d, numVerts);  // verts0
+        WriteU32(d, 0u);        // verts1
+        WriteU32(d, numVerts);  // numVerts
+    } else {
+        d.reserve(16);
+        WriteU32(d, 0u);        // unknown
+        WriteU32(d, numFaces);
+        WriteU32(d, numMeshes);
+        WriteU32(d, numVerts);
+    }
     return d;
 }
 
 // ---------------------------------------------------------------------------
-// Build XTRV chunk data (32 bytes per vertex, Type 0)
+// Build XTRV chunk data:
+//   Type 0 — 32 bytes/vertex: px,py,pz, nx,ny,nz, u,v
+//   Type 1 — 40 bytes/vertex: px,py,pz, nx,ny,nz, u,v, weight, localVertId, boneIdx
 // ---------------------------------------------------------------------------
-static std::vector<uint8_t> BuildXtrv(const std::vector<BinaryVertex>& verts) {
+static std::vector<uint8_t> BuildXtrv(const std::vector<BinaryVertex>& verts,
+                                       uint32_t modelType = 0) {
     std::vector<uint8_t> d;
-    d.reserve(verts.size() * 32);
+    const size_t stride = (modelType == 1) ? 40 : 32;
+    d.reserve(verts.size() * stride);
     for (const auto& v : verts) {
         WriteFloat(d, v.px);
         WriteFloat(d, v.py);
@@ -212,6 +241,11 @@ static std::vector<uint8_t> BuildXtrv(const std::vector<BinaryVertex>& verts) {
         WriteFloat(d, v.nz);
         WriteFloat(d, v.u);
         WriteFloat(d, v.v);
+        if (modelType == 1) {
+            WriteFloat(d, v.weight);
+            WriteU16(d, v.localVertexId);
+            WriteU16(d, v.boneIndex);
+        }
     }
     return d;
 }
@@ -357,11 +391,14 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
         return false;
     }
 
-    // 2. Build combined vertex buffer
+    // 2. Detect model type from parsed data
+    const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
+
+    // 3. Build combined vertex buffer
     std::vector<uint32_t> remA, remB, remC;
     std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
 
-    // 3. Compute stats
+    // 4. Compute stats
     const uint32_t numVerts  = static_cast<uint32_t>(verts.size());
     const uint32_t numFaces  = static_cast<uint32_t>(obj.faces.size());
     const float    radius    = ComputeRadius(verts);
@@ -374,15 +411,15 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
                                 ? (matSeen.empty() ? 1 : matSeen.rbegin()->first + 1)
                                 : obj.materials.size());
 
-    // 4. Build chunk data
+    // 5. Build chunk data
     auto hsemData = BuildHsem(numFaces, numVerts, numBlocks,
-                               0 /* no attachments from ASCII */, radius);
-    auto d3drData = BuildD3dr(numFaces, numBlocks, numVerts);
-    auto xtrvData = BuildXtrv(verts);
+                               0 /* no attachments from ASCII */, radius, modelType);
+    auto d3drData = BuildD3dr(numFaces, numBlocks, numVerts, modelType);
+    auto xtrvData = BuildXtrv(verts, modelType);
     auto dnerData = BuildDner(obj.faces, remA, remB, remC, numMatSlots);
     auto tamcData = BuildTamc(obj.materials, numMatSlots);
 
-    // 5. Compute chunk layout & skip values
+    // 6. Compute chunk layout & skip values
     // Chunk order: HSEM, D3DR, XTRV, DNER, TAMC (last)
     // skip(chunk) = 16 + dataSize for non-last; 0 for last
     const bool hasTamc = !tamcData.empty();

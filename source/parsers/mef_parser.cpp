@@ -52,6 +52,10 @@ std::vector<MEFObject> MEFParser::parse_string(const std::string& content) {
                 handle_uv(args);
             } else if (name == "BreakScript") {
                 handle_breakscript(args);
+            } else if (name == "ModelType") {
+                handle_modeltype(args);
+            } else if (name == "BoneVertex") {
+                handle_bonevertex(args);
             } else {
                 // Unknown command, ignore
             }
@@ -293,4 +297,19 @@ void MEFParser::handle_uv(const std::vector<std::string>& args) {
 void MEFParser::handle_breakscript(const std::vector<std::string>& args) {
     // BreakScript is a separator; no action needed in Python other than pass, but if we wanted to push the current object we could.
     // The python code just does `pass`
+}
+
+void MEFParser::handle_modeltype(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.empty()) return;
+    try { m_current_object.model_type = std::stoi(args[0]); } catch (...) {}
+}
+
+void MEFParser::handle_bonevertex(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.size() < 4) return;
+    MEFBoneVertex bv;
+    try { bv.index         = std::stoi(args[0]); } catch (...) {}
+    try { bv.bone_index    = static_cast<uint16_t>(std::stoi(args[1])); } catch (...) {}
+    try { bv.weight        = std::stof(args[2]); } catch (...) {}
+    try { bv.local_vert_id = static_cast<uint16_t>(std::stoi(args[3])); } catch (...) {}
+    m_current_object.bone_vertices.push_back(bv);
 }

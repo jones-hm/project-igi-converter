@@ -2330,8 +2330,9 @@ private:
                 currentFile = QFileInfo(path).absolutePath();
                 executeCommand("mef apply-tex-all");
             });
-            menu.addAction("Dump",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
-            menu.addAction("Export to Text MEF", [this, path]() { loadFile(path); executeCommand("mef to-text"); });
+            menu.addAction("Dump",               [this, path]() { loadFile(path); executeCommand("mef dump"); });
+            menu.addAction("Export to OBJ",      [this, path]() { loadFile(path); executeCommand("mef export-obj"); });
+            menu.addAction("Export to MEF(Text)", [this, path]() { loadFile(path); executeCommand("mef to-text"); });
         } else if (ext == "txt") {
             // Text MEF (.txt) — offer compile to binary
             menu.addAction("Compile to Binary MEF", [this, path]() { loadFile(path); executeCommand("mef compile-text"); });
@@ -2642,6 +2643,11 @@ private:
             logMessage(QString("[INFO] Export-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
             return; // Already ran all sub-processes above
 
+        } else if (cmd == "mef export-obj") {
+            QString outObj = outDir + "/" + baseName + ".obj";
+            args.clear();
+            args << "mef" << "export" << currentFile << "-o" << outObj;
+            logMessage(QString("[INFO] Exporting OBJ to: %1").arg(outObj));
         } else if (cmd == "mef to-text") {
             QString outTxt = outDir + "/" + baseName + ".mef.txt";
             args.clear();
