@@ -17,7 +17,7 @@
 //   4 = write error
 
 #ifndef IGI1CONV_VERSION
-#define IGI1CONV_VERSION "1.5.0"
+#define IGI1CONV_VERSION "1.6.0"
 #endif
 
 static void print_help()

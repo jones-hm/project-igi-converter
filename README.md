@@ -17,8 +17,8 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > [!IMPORTANT]
 > To use **Apply Textures** on 3D models in the GUI, you must first select the active level folder from the **Settings** menu to resolve the correct texture mappings.
 
-> [!WARNING]
-> **AI Models / Characters Warning**: AI models currently have issues loading textures and bone models. See [Issue #7](https://github.com/jones-hm/project-igi-conv/issues/7) for more details. The rest of the models (rigid models, weapons, environment meshes) are working fine.
+> [!NOTE]
+> **AI Models / Characters Support**: As of v1.6.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
 
 
 ### GUI Screenshots
@@ -221,7 +221,7 @@ cmake --build build --config Release --target igi1conv
 ```
 This generates `igi1conv.exe` and automatically copies the required runtime assets (`IGIModels.json`, `IGIModelsAllLevel.json`, and `IGIAutoComplete.txt`) into `bin/Release/`.
 
-The version string is defined once by the CMake `project(... VERSION 1.5.0)` declaration and injected as `IGI1CONV_VERSION`; `igi1conv --version` reports it.
+The version string is defined once by the CMake `project(... VERSION 1.6.0)` declaration and injected as `IGI1CONV_VERSION`; `igi1conv --version` reports it.
 
 ---
 

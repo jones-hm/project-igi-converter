@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-06-12
+### Added
+- **Export and Apply Textures Separation**: Implemented the `--no-obj` flag to decouple texture extraction and applying textures from standard OBJ generation.
+- **Progress Dialog for Long Operations**: Integrated a non-blocking `QProgressDialog` when exporting/applying textures in the GUI to improve visual responsiveness.
+- **Configurable Texture Cache Folder**: Added setting and persistent caching configurations to save and select custom Cache Folders for OpenGL 3D viewer texture parsing.
+- **Dual Architecture Packages**: The release script now compresses both 32-bit (`igi1conv_v1.6.0_x86.zip`) and 64-bit (`igi1conv_v1.6.0_x64.zip`) binaries without `opengl32sw.dll` to minimize distribution sizes.
+
+### Fixed
+- **AI Model & Character Texture Distortion**: Fixed a critical bug where character bone models had distorted or upside-down face textures by preventing V-coordinate flipping on bone models.
+- **Bone Model Parsing (DNER)**: Fixed DNER chunk parsing for proper compatibility with IGI 1 bone models.
+- **Startup Crash**: Resolved a segmentation fault on application startup caused by a null ModelViewer pointer.
+
 ## [1.5.0] - 2026-06-12
 ### Added
 - **32-Bit (Win32) Architecture Support**: Integrated complete compilation and deployment pipelines for 32-bit Windows targets, enabling compatibility with legacy systems.

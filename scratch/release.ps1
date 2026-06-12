@@ -1,7 +1,7 @@
-# igi1conv Packaging & Release Script (v1.5.0)
+# igi1conv Packaging & Release Script (v1.6.0)
 # Automatically packages the 32-bit (x86) and 64-bit (x64) Release folders into ZIP files.
 
-$version = "1.5.0"
+$version = "1.6.0"
 $x86Zip = "igi1conv_v${version}_x86.zip"
 $x64Zip = "igi1conv_v${version}_x64.zip"
 
