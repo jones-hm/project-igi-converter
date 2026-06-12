@@ -17,6 +17,10 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > [!IMPORTANT]
 > To use **Apply Textures** on 3D models in the GUI, you must first select the active level folder from the **Settings** menu to resolve the correct texture mappings.
 
+> [!WARNING]
+> **AI Models / Characters Warning**: AI models currently have issues loading textures and bone models. See [Issue #7](https://github.com/jones-hm/project-igi-conv/issues/7) for more details. The rest of the models (rigid models, weapons, environment meshes) are working fine.
+
+
 ### GUI Screenshots
 
 **_1. Main View Interface_**  
