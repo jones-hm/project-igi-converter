@@ -553,9 +553,33 @@ std::string QVM_DecompileToString(const QVMFile& qvm) {
 }
 
 bool QVM_Decompile(const QVMFile& qvm, const std::string& outpath) {
-    std::string qvmtext = QVM_DecompileToString(qvm);
-    if (qvmtext.empty() && !qvm.instructions.empty()) {
+    if (!qvm.valid) {
+        Logger::Get().Log(LogLevel::ERR, "[QVM_Decompile] QVM is not valid: " + qvm.error);
         return false;
+    }
+
+    std::string qvmtext;
+    if (!qvm.instructions.empty()) {
+        std::map<uint32_t, size_t> addrToInstrIndex;
+        for (size_t i = 0; i < qvm.instructions.size(); ++i) {
+            addrToInstrIndex[qvm.instructions[i].address] = i;
+        }
+
+        uint32_t address = 0;
+        bool success = true;
+        auto qvmtree = walk(qvm, addrToInstrIndex, address, success);
+        if (!success) {
+            Logger::Get().Log(LogLevel::ERR, "[QVM_Decompile] Decompilation failed during AST reconstruction.");
+            return false;
+        }
+
+        for (const auto& st : qvmtree) {
+            if (st->type == ASTNodeType::StatementIf || st->type == ASTNodeType::StatementWhile) {
+                qvmtext += st->strepr(0);
+            } else {
+                qvmtext += st->strepr(0) + ";\n";
+            }
+        }
     }
 
     std::ofstream out(outpath, std::ios::binary);

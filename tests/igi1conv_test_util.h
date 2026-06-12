@@ -2,7 +2,7 @@
 //
 // The suite spawns the freshly built igi1conv.exe (next to igi1conv_tests.exe) and
 // drives it against a corpus of real IGI game files.  The corpus directory is
-// taken from the IGI1CONV_TEST_CORPUS environment variable, defaulting to
+// taken from the IGI_GAME_PATH environment variable, defaulting to
 // D:\IGI1\full_test.  Tests that need a file which is absent are SKIPPED (not
 // failed) so the suite stays green on machines without the corpus.
 #pragma once
@@ -12,10 +12,14 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <random>
+#include <algorithm>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <wincrypt.h>
 
 namespace igi1conv_test {
 
@@ -35,7 +39,7 @@ inline std::string IGI1ConvExe() {
 inline std::string CorpusDir() {
     char* env = nullptr;
     size_t len = 0;
-    if (_dupenv_s(&env, &len, "IGI1CONV_TEST_CORPUS") == 0 && env) {
+    if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
         std::string v(env);
         free(env);
         if (!v.empty()) return v;
@@ -51,12 +55,12 @@ inline std::string Corpus(const std::string& rel) {
 class TempDir {
 public:
     TempDir() {
-        char buf[MAX_PATH];
-        GetTempPathA(MAX_PATH, buf);
+        std::filesystem::path workspace_temp = std::filesystem::current_path() / "tests_temp";
+        std::filesystem::create_directories(workspace_temp);
         static unsigned counter = 0;
-        path_ = std::string(buf) + "igi1conv_test_" +
+        path_ = (workspace_temp / ("igi1conv_test_" +
                 std::to_string(GetCurrentProcessId()) + "_" +
-                std::to_string(++counter);
+                std::to_string(++counter))).string();
         std::filesystem::create_directories(path_);
     }
     ~TempDir() {
@@ -84,10 +88,10 @@ inline int RunIGI1Conv(const std::string& args, std::string* captureOut = nullpt
     std::string outFile;
     HANDLE hOut = INVALID_HANDLE_VALUE;
     if (captureOut) {
-        char tmp[MAX_PATH], name[MAX_PATH];
-        GetTempPathA(MAX_PATH, tmp);
-        GetTempFileNameA(tmp, "gcv", 0, name);
-        outFile = name;
+        std::filesystem::path workspace_temp = std::filesystem::current_path() / "tests_temp";
+        std::filesystem::create_directories(workspace_temp);
+        static unsigned file_counter = 0;
+        outFile = (workspace_temp / ("gcv_out_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(++file_counter) + ".tmp")).string();
         hOut = CreateFileA(outFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
     } else {
@@ -142,8 +146,6 @@ inline bool NonEmptyFile(const std::string& p) {
     return std::filesystem::exists(p) && std::filesystem::file_size(p, ec) > 0;
 }
 
-#include <regex>
-
 // Find a file in the corpus matching the given regex pattern (case-insensitive).
 inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
     std::string dir = CorpusDir();
@@ -160,6 +162,110 @@ inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
         }
     }
     return "";
+}
+
+extern bool g_test_qvm;
+extern bool g_test_res;
+extern bool g_test_mtp;
+extern bool g_test_dat;
+extern bool g_test_spr;
+extern bool g_test_tex;
+extern bool g_test_pic;
+
+// Get SHA256 hex string of a file using Windows Crypto API
+inline std::string GetFileSHA256(const std::string& filepath) {
+    std::ifstream f(filepath, std::ios::binary);
+    if (!f.is_open()) return "";
+    
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    
+    if (!CryptAcquireContext(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        return "";
+    }
+    
+    if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+        CryptReleaseContext(hProv, 0);
+        return "";
+    }
+    
+    char buffer[8192];
+    while (f.good()) {
+        f.read(buffer, sizeof(buffer));
+        std::streamsize bytes = f.gcount();
+        if (bytes > 0) {
+            CryptHashData(hHash, reinterpret_cast<const BYTE*>(buffer), static_cast<DWORD>(bytes), 0);
+        }
+    }
+    
+    DWORD hashLen = 32;
+    BYTE hash[32];
+    std::string result = "";
+    
+    if (CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
+        char hex[65];
+        for (DWORD i = 0; i < hashLen; ++i) {
+            snprintf(hex + (i * 2), 3, "%02x", hash[i]);
+        }
+        result = hex;
+    }
+    
+    CryptDestroyHash(hHash);
+    CryptReleaseContext(hProv, 0);
+    return result;
+}
+
+// Find a set of count random files in the corpus matching the given regex pattern
+inline std::vector<std::string> FindRandomCorpusFiles(const std::string& pattern_str, int count) {
+    std::string dir = CorpusDir();
+    std::vector<std::string> matched_paths;
+    if (!std::filesystem::exists(dir)) return {};
+    
+    std::regex pattern(pattern_str, std::regex_constants::icase);
+    
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        std::string path_str = entry.path().string();
+        if (path_str.find("build") != std::string::npos ||
+            path_str.find("bin") != std::string::npos ||
+            path_str.find("scratch") != std::string::npos ||
+            path_str.find("input_files") != std::string::npos ||
+            path_str.find("converted_files") != std::string::npos ||
+            path_str.find("final_files") != std::string::npos ||
+            path_str.find(".git") != std::string::npos) {
+            continue;
+        }
+        
+        if (!entry.is_regular_file()) continue;
+        
+        std::string filename = entry.path().filename().string();
+        
+        if (filename.find("_out") != std::string::npos ||
+            filename.find("_temp") != std::string::npos ||
+            filename.find("_recompiled") != std::string::npos ||
+            filename.find("_converted") != std::string::npos ||
+            filename.find("_cleaned") != std::string::npos ||
+            filename.find("_back") != std::string::npos ||
+            filename.find("_rnd2") != std::string::npos) {
+            continue;
+        }
+        
+        if (std::regex_search(filename, pattern)) {
+            matched_paths.push_back(entry.path().string());
+        }
+    }
+    
+    if (matched_paths.empty()) return {};
+    
+    // We want unseeded shuffling to select dynamically random files at run-time
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(matched_paths.begin(), matched_paths.end(), g);
+    
+    if ((int)matched_paths.size() > count) {
+        matched_paths.resize(count);
+    }
+    
+    return matched_paths;
 }
 
 // Base fixture: ensures igi1conv.exe exists.
@@ -179,5 +285,5 @@ protected:
     std::string var = ::igi1conv_test::FindCorpusFileByRegex(pattern);     \
     if (var.empty())                                                    \
         GTEST_SKIP() << "corpus file missing for regex: " << pattern    \
-                     << " (set IGI1CONV_TEST_CORPUS)"
+                     << " (set IGI_GAME_PATH)"
 

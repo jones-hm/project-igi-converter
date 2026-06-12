@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -28,6 +29,76 @@ static bool read_file_content(const fs::path& path, std::string& out) {
 static std::string to_lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
     return s;
+}
+
+static void compare_binary(const fs::path& f1, const fs::path& f2) {
+    std::ifstream s1(f1, std::ios::binary | std::ios::ate);
+    std::ifstream s2(f2, std::ios::binary | std::ios::ate);
+    if (!s1 || !s2) {
+        std::cout << "    [VERIFY] Could not open files for binary compare.\n";
+        return;
+    }
+    
+    std::streamsize size1 = s1.tellg();
+    std::streamsize size2 = s2.tellg();
+    s1.seekg(0);
+    s2.seekg(0);
+    
+    std::cout << "    [VERIFY_BIN] Size: Orig=" << size1 << ", New=" << size2 << "\n";
+    
+    if (size1 != size2) {
+        std::cout << "    [VERIFY_BIN] Mismatch: Files differ in size by " << std::abs(size1 - size2) << " bytes.\n";
+        return;
+    }
+    
+    std::vector<char> b1(size1), b2(size2);
+    s1.read(b1.data(), size1);
+    s2.read(b2.data(), size2);
+    
+    size_t diff_count = 0;
+    for (size_t i = 0; i < size1; ++i) {
+        if (b1[i] != b2[i]) diff_count++;
+    }
+    
+    if (diff_count == 0) {
+        std::cout << "    [VERIFY_BIN] Match: 100% identical.\n";
+    } else {
+        double pct = (double)diff_count / size1 * 100.0;
+        std::cout << "    [VERIFY_BIN] Mismatch: " << diff_count << " bytes differ (" << std::fixed << std::setprecision(2) << pct << "%).\n";
+    }
+}
+
+static void compare_text(const fs::path& f1, const fs::path& f2) {
+    std::ifstream s1(f1);
+    std::ifstream s2(f2);
+    if (!s1 || !s2) {
+        std::cout << "    [VERIFY] Could not open files for text compare.\n";
+        return;
+    }
+    
+    std::string l1, l2;
+    size_t lines1 = 0, lines2 = 0;
+    size_t diff_count = 0;
+    
+    while (!s1.eof() || !s2.eof()) {
+        bool b1 = (bool)std::getline(s1, l1);
+        bool b2 = (bool)std::getline(s2, l2);
+        if (b1) lines1++;
+        if (b2) lines2++;
+        if (b1 && b2) {
+            if (l1 != l2) diff_count++;
+        }
+    }
+    
+    std::cout << "    [VERIFY_TXT] Lines: Orig=" << lines1 << ", New=" << lines2 << "\n";
+    if (lines1 != lines2) {
+        std::cout << "    [VERIFY_TXT] Mismatch: Line counts differ by " << (lines1 > lines2 ? lines1 - lines2 : lines2 - lines1) << " lines.\n";
+    }
+    if (diff_count > 0) {
+        std::cout << "    [VERIFY_TXT] Mismatch: " << diff_count << " common lines differ.\n";
+    } else if (lines1 == lines2) {
+        std::cout << "    [VERIFY_TXT] Match: 100% identical.\n";
+    }
 }
 
 int cmd_test(int argc, char** argv)
@@ -119,6 +190,8 @@ int cmd_test(int argc, char** argv)
                           run_test_cmd(exe_path + " qsc compile \"" + qsc1 + "\" -o \"" + qvm2 + "\"") &&
                           run_test_cmd(exe_path + " qvm decompile \"" + qvm2 + "\" -o \"" + qsc2 + "\"");
                 if (ok) {
+                    compare_binary(path_str, qvm2);
+                    compare_text(qsc1, qsc2);
                     std::string s1, s2;
                     if (read_file_content(qsc1, s1) && read_file_content(qsc2, s2) && s1 == s2) {
                         std::cout << "  [OK] Semantic roundtrip matches.\n";
@@ -141,6 +214,8 @@ int cmd_test(int argc, char** argv)
                           run_test_cmd(exe_path + " dat to-mtp \"" + dat2 + "\" -o \"" + mtp3 + "\"") &&
                           run_test_cmd(exe_path + " mtp dump \"" + mtp3 + "\" -o \"" + json4 + "\"");
                 if (ok) {
+                    compare_binary(path_str, mtp3);
+                    compare_text(json1, json4);
                     std::string s1, s2;
                     if (read_file_content(json1, s1) && read_file_content(json4, s2) && s1 == s2) {
                         std::cout << "  [OK] Semantic roundtrip matches.\n";
@@ -173,6 +248,8 @@ int cmd_test(int argc, char** argv)
                               run_test_cmd(exe_path + " mtp to-dat \"" + mtp2 + "\" -o \"" + dat3 + "\"") &&
                               run_test_cmd(exe_path + " dat export \"" + dat3 + "\" -o \"" + json4 + "\"");
                     if (ok) {
+                        compare_binary(path_str, dat3);
+                        compare_text(json1, json4);
                         std::string s1, s2;
                         if (read_file_content(json1, s1) && read_file_content(json4, s2) && s1 == s2) {
                             std::cout << "  [OK] Semantic roundtrip matches.\n";
@@ -196,6 +273,8 @@ int cmd_test(int argc, char** argv)
                           run_test_cmd(exe_path + " res pack \"" + dir2 + "\" \"" + res3 + "\"") &&
                           run_test_cmd(exe_path + " res list \"" + res3 + "\" > \"" + list4 + "\"");
                 if (ok) {
+                    compare_binary(path_str, res3);
+                    compare_text(list1, list4);
                     std::cout << "  [OK] Archive repacked successfully.\n";
                     success_count++;
                 } else {

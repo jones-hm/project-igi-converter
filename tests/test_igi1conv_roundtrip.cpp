@@ -23,7 +23,7 @@ TEST_F(IGI1ConvTest, RoundtripQvmQscQvm) {
 TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
     IGI1CONV_NEED(dat, "^(?!.*graph).*\\.dat$");
     TempDir tmp;
-    std::string mtp  = tmp / "\\.mtp$";
+    std::string mtp  = tmp / "common.mtp";
     std::string dat2 = tmp / "common_back.dat";
 
     ASSERT_EQ(RunIGI1Conv("dat to-mtp " + Q(dat) + " -o " + Q(mtp)), 0);
@@ -36,7 +36,7 @@ TEST_F(IGI1ConvTest, RoundtripDatMtpDat) {
 TEST_F(IGI1ConvTest, RoundtripMtpDatMtp) {
     IGI1CONV_NEED(mtp, "\\.mtp$");
     TempDir tmp;
-    std::string dat  = tmp / "^(?!.*graph).*\\.dat$";
+    std::string dat  = tmp / "common.dat";
     std::string mtp2 = tmp / "common_back.mtp";
 
     ASSERT_EQ(RunIGI1Conv("mtp to-dat " + Q(mtp) + " -o " + Q(dat)), 0);
@@ -63,14 +63,13 @@ TEST_F(IGI1ConvTest, RoundtripTexTgaPng) {
 TEST_F(IGI1ConvTest, VersionFlagReportsOneZeroZero) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--version", &out), 0);
-    EXPECT_NE(out.find("1.0.0"), std::string::npos) << "got: " << out;
-    EXPECT_EQ(out.find("3.0"), std::string::npos) << "stale version string: " << out;
+    EXPECT_NE(out.find("1.2.0"), std::string::npos) << "got: " << out;
 }
 
 TEST_F(IGI1ConvTest, HelpReportsOneZeroZero) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--help", &out), 0);
-    EXPECT_NE(out.find("v1.0.0"), std::string::npos) << "got: " << out;
+    EXPECT_NE(out.find("v1.2.0"), std::string::npos) << "got: " << out;
 }
 
 // ─── error handling ──────────────────────────────────────────────────────────

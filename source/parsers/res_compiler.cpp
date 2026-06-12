@@ -44,31 +44,33 @@ static void WriteResChunk(std::ostream& os, uint32_t fourcc,
     if (padding) { char pad[3] = {0}; os.write(pad, padding); }
 }
 
-bool RES_GenerateQSC(const std::string& inputDir, const std::string& outQscPath, const std::string& outResName, std::string& error) {
-    std::ofstream out(outQscPath);
+bool RES_GenerateQSC(const std::string& inputDirStr, const std::string& outQSCPath, const std::string& outResName, std::string& error, const std::string& prefix) {
+    namespace fs = std::filesystem;
+    fs::path inputDir = fs::absolute(fs::path(inputDirStr));
+    fs::path qscPath = fs::absolute(fs::path(outQSCPath));
+    std::string qscBase = qscPath.filename().string();
+    std::ofstream out(qscPath);
     if (!out) {
-        error = "Failed to create " + outQscPath;
+        error = "Failed to create QSC file: " + qscPath.string();
         return false;
     }
 
     out << "BeginResource(\"" << outResName << "\");\n";
 
-    namespace fs = std::filesystem;
     try {
-        if (!fs::exists(inputDir)) {
-            error = "Input directory does not exist: " + inputDir;
-            return false;
-        }
-
-        std::string qscBase = fs::path(outQscPath).filename().string();
-        for (const auto& entry : fs::recursive_directory_iterator(inputDir)) {
+        for (auto& entry : fs::recursive_directory_iterator(inputDir)) {
             if (!entry.is_regular_file()) continue;
-            // Skip the generated QSC itself
+            // Skip the generated QSC itself and any nested .res archives
             if (entry.path().filename().string() == qscBase) continue;
+            std::string ext = entry.path().extension().string();
+            for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".res") continue;
 
             std::string relPath = fs::relative(entry.path(), inputDir).string();
             for (auto& c : relPath) if (c == '\\') c = '/';
-            out << "AddResource(\"" << relPath << "\", \"LOCAL:" << relPath << "\");\n";
+            std::string firstArg = prefix + relPath;
+            std::string secondArg = "LOCAL:" + prefix + relPath;
+            out << "AddResource(\"" << firstArg << "\", \"" << secondArg << "\");\n";
         }
     } catch(const std::exception& e) {
         error = "Filesystem error: " + std::string(e.what());
@@ -142,7 +144,9 @@ bool RES_Compile(const std::string& scriptPath, std::string& error) {
     WriteFourCC(os, FOURCC_IRES);
 
     for (const auto& res : resources) {
-        std::string internalName = res.first;
+        // res.first = source path (relative to QSC dir, used to find the file on disk)
+        // res.second = archive entry name (e.g. "LOCAL:textures/foo.tex") — what the game searches for
+        std::string internalName = res.second;
         std::string localPath = res.second;
         
         if (localPath.substr(0, 6) == "LOCAL:") {
