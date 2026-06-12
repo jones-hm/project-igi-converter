@@ -3,6 +3,7 @@
 #include "mef_native.h"
 #include "mef_exporter.h"
 #include "mef_parser.h"
+#include "mef_compiler.h"
 
 namespace fs = std::filesystem;
 
@@ -12,11 +13,13 @@ static void print_mef_help()
         "Usage: igi1conv mef <subcommand> [options]\n"
         "\n"
         "Subcommands:\n"
-        "  export <input.mef> -o <output.obj>\n"
-        "  export <folder/> -o <output_dir> --batch\n"
-        "  dump   <input.mef> [-o <output.txt>]\n"
-        "  info   <input.mef>\n"
-        "  bundle <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>\n"
+        "  export  <input.mef> -o <output.obj>\n"
+        "  export  <folder/> -o <output_dir> --batch\n"
+        "  dump    <input.mef> [-o <output.txt>]\n"
+        "  info    <input.mef>\n"
+        "  bundle  <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>\n"
+        "  to-text <input.mef> -o <output.txt>   (binary MEF -> text MEF)\n"
+        "  compile <input.txt> -o <output.mef>   (text MEF -> binary MEF)\n"
         "\n"
         "Exit codes: 0=success 1=bad args 2=file not found 3=parse error 4=write error\n";
 }
@@ -185,6 +188,62 @@ static int do_mef_info(const std::string& input)
                       << " parent=" << b.parent << "\n";
         }
     }
+    return 0;
+}
+
+static int do_mef_to_text(const std::string& input, const std::string& outpath)
+{
+    if (!fs::exists(input))
+    {
+        std::cerr << "mef to-text: file not found: " << input << "\n";
+        return 2;
+    }
+
+    // Only binary MEF (ILFF magic) is accepted as input
+    {
+        std::ifstream probe(input, std::ios::binary);
+        char magic[4] = {0};
+        probe.read(magic, 4);
+        if (std::memcmp(magic, "ILFF", 4) != 0)
+        {
+            std::cerr << "mef to-text: input is not a binary MEF (expected ILFF magic): " << input << "\n";
+            return 3;
+        }
+    }
+
+    ParsedGeometry geo;
+    try { geo = ParseMefFile(input); }
+    catch (const std::exception& e)
+    {
+        std::cerr << "mef to-text: parse error: " << e.what() << "\n";
+        return 3;
+    }
+
+    if (!MefExporter::ExportToMefAscii(geo, outpath))
+    {
+        std::cerr << "mef to-text: failed to write text MEF: " << outpath << "\n";
+        return 4;
+    }
+
+    std::cout << "mef to-text: exported to " << outpath << "\n";
+    return 0;
+}
+
+static int do_mef_compile(const std::string& input, const std::string& outpath)
+{
+    if (!fs::exists(input))
+    {
+        std::cerr << "mef compile: file not found: " << input << "\n";
+        return 2;
+    }
+
+    if (!MefCompiler::Compile(input, outpath))
+    {
+        std::cerr << "mef compile: compilation failed for: " << input << "\n";
+        return 3;
+    }
+
+    std::cout << "mef compile: compiled to " << outpath << "\n";
     return 0;
 }
 
@@ -387,6 +446,46 @@ int cmd_mef(int argc, char** argv)
             std::cout << "mef bundle: exported to " << (fs::path(outdir) / model_stem).string() << "\n";
             return 0;
         }
+    }
+
+    if (subcmd == "to-text")
+    {
+        if (argc < 3)
+        {
+            std::cerr << "mef to-text: missing input file\n";
+            return 1;
+        }
+        std::string outpath;
+        for (int i = 3; i < argc - 1; ++i)
+        {
+            if (std::string(argv[i]) == "-o") { outpath = argv[i + 1]; break; }
+        }
+        if (outpath.empty())
+        {
+            std::cerr << "mef to-text: missing -o <output.txt>\n";
+            return 1;
+        }
+        return do_mef_to_text(argv[2], outpath);
+    }
+
+    if (subcmd == "compile")
+    {
+        if (argc < 3)
+        {
+            std::cerr << "mef compile: missing input file\n";
+            return 1;
+        }
+        std::string outpath;
+        for (int i = 3; i < argc - 1; ++i)
+        {
+            if (std::string(argv[i]) == "-o") { outpath = argv[i + 1]; break; }
+        }
+        if (outpath.empty())
+        {
+            std::cerr << "mef compile: missing -o <output.mef>\n";
+            return 1;
+        }
+        return do_mef_compile(argv[2], outpath);
     }
 
     std::cerr << "mef: unknown subcommand '" << subcmd << "'\n";
