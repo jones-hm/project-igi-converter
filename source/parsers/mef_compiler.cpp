@@ -78,16 +78,20 @@ static void WriteChunkHeader(std::vector<uint8_t>& out,
 }
 
 // ---------------------------------------------------------------------------
-// Per-vertex combined data — supports both Type 0 (32 bytes) and Type 1 (40 bytes)
+// Per-vertex combined data:
+//   Type 0 — 32 bytes: pos + normal + uv
+//   Type 1 — 40 bytes: pos + normal + uv + weight + localVertId/boneIdx
+//   Type 3 — 40 bytes: pos + normal + uv0 + uv1 (lightmap)
 // ---------------------------------------------------------------------------
 struct BinaryVertex {
     float    px{0}, py{0}, pz{0};
     float    nx{0}, ny{0}, nz{1};
     float    u{0},  v{0};
-    // Type 1 bone fields (unused for Type 0)
-    float    weight{1.0f};
-    uint16_t localVertexId{0};
-    uint16_t boneIndex{0};
+    // Type 1 bone fields / Type 3 lightmap UV1
+    float    weight{1.0f};      // Type 1: bone weight, Type 3: uv1.u
+    uint16_t localVertexId{0};  // Type 1 only
+    uint16_t boneIndex{0};      // Type 1 only
+    float    uv1_v{0.0f};       // Type 3: lightmap V
 };
 
 // ---------------------------------------------------------------------------
@@ -200,6 +204,7 @@ static std::vector<uint8_t> BuildHsem(uint32_t numFaces,
 // Build D3DR chunk data:
 //   Type 0 — 16 bytes: unknown, numFaces, numMeshes, numVerts
 //   Type 1 — 24 bytes: unknown, numFaces, numMeshes(=0), verts0, verts1, numVerts
+//   Type 3 — 20 bytes: unknown, unknown, numFaces, numMeshes, numVerts
 //   numMeshes=0 forces the parser to use packed-DNER path for Type 1.
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> BuildD3dr(uint32_t numFaces,
@@ -216,6 +221,13 @@ static std::vector<uint8_t> BuildD3dr(uint32_t numFaces,
         WriteU32(d, numVerts);  // verts0
         WriteU32(d, 0u);        // verts1
         WriteU32(d, numVerts);  // numVerts
+    } else if (modelType == 3) {
+        d.reserve(20);
+        WriteU32(d, 0u);        // unknown
+        WriteU32(d, 0u);        // unknown
+        WriteU32(d, numFaces);
+        WriteU32(d, numMeshes);
+        WriteU32(d, numVerts);
     } else {
         d.reserve(16);
         WriteU32(d, 0u);        // unknown
@@ -234,7 +246,7 @@ static std::vector<uint8_t> BuildD3dr(uint32_t numFaces,
 static std::vector<uint8_t> BuildXtrv(const std::vector<BinaryVertex>& verts,
                                        uint32_t modelType = 0) {
     std::vector<uint8_t> d;
-    const size_t stride = (modelType == 1) ? 40 : 32;
+    const size_t stride = (modelType == 1 || modelType == 3) ? 40 : 32;
     d.reserve(verts.size() * stride);
     for (const auto& v : verts) {
         WriteFloat(d, v.px);
@@ -249,31 +261,48 @@ static std::vector<uint8_t> BuildXtrv(const std::vector<BinaryVertex>& verts,
             WriteFloat(d, v.weight);
             WriteU16(d, v.localVertexId);
             WriteU16(d, v.boneIndex);
+        } else if (modelType == 3) {
+            WriteFloat(d, v.weight);  // uv1.u stored in weight field
+            WriteFloat(d, v.uv1_v);  // uv1.v
         }
     }
     return d;
 }
 
 // ---------------------------------------------------------------------------
-// Build DNER chunk data (packed, Type 0)
+// Build DNER chunk data (packed).
 // Groups faces by material and emits one render block per material.
-// Block layout (28-byte fixed header + uint16 indices):
+//
+// Type 0/1 block layout (28-byte header + uint16 indices):
 //   bytes  0-11: px,py,pz (float, zeroed)
 //   bytes 12-13: indexCount (uint16) = numFacesInBlock * 3
-//   bytes 14-15: nextoffs (int16): 0 for non-last, -1 for last
+//   bytes 14-15: nextoffs (int16): indexCount*2 for non-last, -1 for last
 //   bytes 16-17: td / materialSlot (int16)
 //   bytes 18-19: offVerts (uint16): min vertex index in block
 //   bytes 20-21: numVerts (uint16): max - min + 1
 //   bytes 22-23: opacity (uint16): 0 = opaque
 //   bytes 24-27: eflame, mshine, scolor, opacitd (uint8 x4)
 //   bytes 28+:   uint16 indices[indexCount] (local, relative to offVerts)
+//
+// Type 3 block layout (32-byte header + uint16 indices):
+//   bytes  0-11: px,py,pz (float, zeroed)
+//   bytes 12-13: indexCount (uint16)
+//   bytes 14-15: nextoffs (int16): indexCount*2 for non-last, -1 for last
+//   bytes 16-17: materialSlot (int16) — extra field for Type 3
+//   bytes 18-19: offVerts (uint16)
+//   bytes 20-21: numVerts (uint16)
+//   bytes 22-23: opacity (uint16)
+//   bytes 24-27: eflame, mshine, scolor, opacitd (uint8 x4)
+//   bytes 28-31: padding/zero (4 bytes)
+//   bytes 32+:   uint16 indices[indexCount]
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> BuildDner(
     const std::vector<MEFFace>& faces,
     const std::vector<uint32_t>& remA,
     const std::vector<uint32_t>& remB,
     const std::vector<uint32_t>& remC,
-    int numMaterials)
+    int numMaterials,
+    uint32_t modelType = 0)
 {
     // Collect sorted unique material indices
     std::vector<int> matList;
@@ -284,6 +313,7 @@ static std::vector<uint8_t> BuildDner(
     }
     if (matList.empty()) matList.push_back(0);
 
+    const uint32_t headerSize = (modelType == 3) ? 32u : 28u;
     std::vector<uint8_t> d;
 
     for (size_t bi = 0; bi < matList.size(); ++bi) {
@@ -312,11 +342,14 @@ static std::vector<uint8_t> BuildDner(
         const uint16_t numVerts  = static_cast<uint16_t>(maxV - minV + 1);
         const uint16_t indexCount = static_cast<uint16_t>(faceIdxs.size() * 3);
 
-        // Write 28-byte block header
+        // Write block header (28 bytes for Type 0/1, 32 bytes for Type 3)
         WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); WriteFloat(d, 0.0f); // px,py,pz (patched later from sidecar)
         WriteU16(d, indexCount);
         WriteI16(d, isLast ? int16_t(-1) : static_cast<int16_t>(indexCount * 2));  // nextoffs = index byte size
-        WriteI16(d, static_cast<int16_t>(mat));           // td = material slot
+        if (modelType == 3) {
+            WriteI16(d, static_cast<int16_t>(mat));   // materialSlot (extra field for Type 3)
+        }
+        WriteI16(d, static_cast<int16_t>(mat));           // td = material slot (for Type 0/1) / offVerts-related (for Type 3 this is duplicate slot)
         WriteU16(d, offVerts);
         WriteU16(d, numVerts);
         WriteU16(d, 0u);  // opacity (0 = opaque)
@@ -324,6 +357,9 @@ static std::vector<uint8_t> BuildDner(
         WriteU8 (d, 0u);  // mshine
         WriteU8 (d, 0u);  // scolor
         WriteU8 (d, 0u);  // opacitd
+        if (modelType == 3) {
+            WriteU32(d, 0u);  // padding for Type 3 (4 bytes)
+        }
 
         // Write local face indices
         for (size_t fi : faceIdxs) {
@@ -380,79 +416,102 @@ static bool CompileWithSidecar(
     std::vector<ParsedGeometry::RawChunk>& sidecar)
 {
     const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
+    const uint32_t dnerHeaderSize = (modelType == 3) ? 32u : 28u;
 
-    // Build new XTRV + DNER from text geometry
-    std::vector<uint32_t> remA, remB, remC;
-    std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
+    // For Type 0 (Rigid) and Type 3 (Lightmap), use sidecar XTRV and DNER
+    // verbatim. The text MEF doesn't preserve UV1 (lightmap) data or other
+    // per-vertex fields that can't be round-tripped through the text format.
+    // Only Type 1 (Bone) models have all their data exported to text
+    // (BoneVertex lines) so we can safely rebuild those.
+    bool useSidecarVerbatim = (modelType == 0 || modelType == 3);
 
-    const uint32_t numVerts = static_cast<uint32_t>(verts.size());
-    const uint32_t numFaces = static_cast<uint32_t>(obj.faces.size());
-    const float    radius   = ComputeRadius(verts);
+    std::vector<uint8_t> newXtrv;
+    std::vector<uint8_t> newDner;
+    uint32_t numVerts = 0;
+    uint32_t numFaces = static_cast<uint32_t>(obj.faces.size());
 
-    std::map<int, bool> matSeen;
-    for (const auto& f : obj.faces) matSeen[f.material_index] = true;
-    const uint32_t numBlocks = static_cast<uint32_t>(matSeen.empty() ? 1 : matSeen.size());
-    const int numMatSlots    = static_cast<int>(obj.materials.empty()
-                                ? (matSeen.empty() ? 1 : matSeen.rbegin()->first + 1)
-                                : obj.materials.size());
-
-    auto newXtrv = BuildXtrv(verts, modelType);
-    auto newDner = BuildDner(obj.faces, remA, remB, remC, numMatSlots);
-    while (newXtrv.size() % 4) newXtrv.push_back(0);
-    while (newDner.size() % 4) newDner.push_back(0);
-
-    // Append skinning-only verts from sidecar XTRV (indices beyond render mesh,
-    // referenced only by HPSC bone data — not by any DNER face).
-    for (const auto& sc : sidecar) {
-        if (sc.isTag("XTRV") && sc.data.size() > newXtrv.size()) {
-            newXtrv.insert(newXtrv.end(),
-                sc.data.begin() + static_cast<ptrdiff_t>(newXtrv.size()),
-                sc.data.end());
-            while (newXtrv.size() % 4) newXtrv.push_back(0);
-            break;
-        }
-    }
-
-    // Copy block centers (px/py/pz) from sidecar DNER into newDner, matching by td (material slot).
-    // Also verifies nextoffs integrity: nextoffs = indexCount * 2 (set by BuildDner above).
-    {
+    if (useSidecarVerbatim) {
+        // Use sidecar XTRV and DNER data as-is for lossless roundtrip
         for (const auto& sc : sidecar) {
-            if (!sc.isTag("DNER") || sc.data.empty()) continue;
-            // Parse sidecar DNER: build td → header-bytes map
-            // Stores bytes 0-11 (px,py,pz) and bytes 22-27 (opacity,eflame,mshine,scolor,opacitd)
-            struct DnerHdr { uint8_t centers[12]; uint8_t matProps[6]; };
-            std::map<int16_t, DnerHdr> hdrs;
-            size_t p = 0;
-            while (p + 28 <= sc.data.size()) {
-                DnerHdr h;
-                std::memcpy(h.centers,  sc.data.data() + p,      12);
-                std::memcpy(h.matProps, sc.data.data() + p + 22,  6);
-                uint16_t ic = sc.data[p+12] | (uint16_t(sc.data[p+13]) << 8);
-                int16_t  no; std::memcpy(&no, sc.data.data() + p + 14, 2);
-                int16_t  td; std::memcpy(&td, sc.data.data() + p + 16, 2);
-                hdrs[td] = h;
-                uint32_t stride = 28 + ic * 2u;
-                if (stride % 4) stride += 4 - stride % 4;
-                if (no == int16_t(-1)) break;
-                p += stride;
+            if (sc.isTag("XTRV")) {
+                newXtrv = sc.data;
+            } else if (sc.isTag("DNER")) {
+                newDner = sc.data;
             }
-            // Patch centers and material properties in newDner
-            p = 0;
-            while (p + 28 <= newDner.size()) {
-                uint16_t ic = newDner[p+12] | (uint16_t(newDner[p+13]) << 8);
-                int16_t  no; std::memcpy(&no, newDner.data() + p + 14, 2);
-                int16_t  td; std::memcpy(&td, newDner.data() + p + 16, 2);
-                auto it = hdrs.find(td);
-                if (it != hdrs.end()) {
-                    std::memcpy(newDner.data() + p,      it->second.centers,  12);
-                    std::memcpy(newDner.data() + p + 22, it->second.matProps,  6);
+        }
+        while (newXtrv.size() % 4) newXtrv.push_back(0);
+        while (newDner.size() % 4) newDner.push_back(0);
+
+        const uint32_t vertStride = (modelType == 1 || modelType == 3) ? 40u : 32u;
+        numVerts = newXtrv.empty() ? 0 : static_cast<uint32_t>(newXtrv.size()) / vertStride;
+    } else {
+        // Type 1 (Bone): rebuild XTRV + DNER from text geometry
+        std::vector<uint32_t> remA, remB, remC;
+        std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
+        numVerts = static_cast<uint32_t>(verts.size());
+
+        std::map<int, bool> matSeen;
+        for (const auto& f : obj.faces) matSeen[f.material_index] = true;
+        const int numMatSlots = static_cast<int>(obj.materials.empty()
+                                    ? (matSeen.empty() ? 1 : matSeen.rbegin()->first + 1)
+                                    : obj.materials.size());
+
+        newXtrv = BuildXtrv(verts, modelType);
+        newDner = BuildDner(obj.faces, remA, remB, remC, numMatSlots, modelType);
+        while (newXtrv.size() % 4) newXtrv.push_back(0);
+        while (newDner.size() % 4) newDner.push_back(0);
+
+        // Append skinning-only verts from sidecar XTRV (indices beyond render mesh,
+        // referenced only by HPSC bone data — not by any DNER face).
+        for (const auto& sc : sidecar) {
+            if (sc.isTag("XTRV") && sc.data.size() > newXtrv.size()) {
+                newXtrv.insert(newXtrv.end(),
+                    sc.data.begin() + static_cast<ptrdiff_t>(newXtrv.size()),
+                    sc.data.end());
+                while (newXtrv.size() % 4) newXtrv.push_back(0);
+                break;
+            }
+        }
+
+        // Copy block centers (px/py/pz) and material properties from sidecar DNER,
+        // matching by td (material slot).
+        {
+            for (const auto& sc : sidecar) {
+                if (!sc.isTag("DNER") || sc.data.empty()) continue;
+                struct DnerHdr { uint8_t centers[12]; uint8_t matProps[6]; };
+                std::map<int16_t, DnerHdr> hdrs;
+                size_t p = 0;
+                while (p + dnerHeaderSize <= sc.data.size()) {
+                    DnerHdr h;
+                    std::memcpy(h.centers,  sc.data.data() + p,      12);
+                    std::memcpy(h.matProps, sc.data.data() + p + 22,  6);
+                    uint16_t ic = sc.data[p+12] | (uint16_t(sc.data[p+13]) << 8);
+                    int16_t  no; std::memcpy(&no, sc.data.data() + p + 14, 2);
+                    int16_t  td; std::memcpy(&td, sc.data.data() + p + 16, 2);
+                    hdrs[td] = h;
+                    uint32_t stride = dnerHeaderSize + ic * 2u;
+                    if (stride % 4) stride += 4 - stride % 4;
+                    if (no == int16_t(-1)) break;
+                    p += stride;
                 }
-                uint32_t stride = 28 + ic * 2u;
-                if (stride % 4) stride += 4 - stride % 4;
-                if (no == int16_t(-1)) break;
-                p += stride;
+                // Patch centers and material properties in newDner
+                p = 0;
+                while (p + dnerHeaderSize <= newDner.size()) {
+                    uint16_t ic = newDner[p+12] | (uint16_t(newDner[p+13]) << 8);
+                    int16_t  no; std::memcpy(&no, newDner.data() + p + 14, 2);
+                    int16_t  td; std::memcpy(&td, newDner.data() + p + 16, 2);
+                    auto it = hdrs.find(td);
+                    if (it != hdrs.end()) {
+                        std::memcpy(newDner.data() + p,      it->second.centers,  12);
+                        std::memcpy(newDner.data() + p + 22, it->second.matProps,  6);
+                    }
+                    uint32_t stride = dnerHeaderSize + ic * 2u;
+                    if (stride % 4) stride += 4 - stride % 4;
+                    if (no == int16_t(-1)) break;
+                    p += stride;
+                }
+                break;
             }
-            break;
         }
     }
 
@@ -464,10 +523,9 @@ static bool CompileWithSidecar(
     //   108 = num_c_faces  (unchanged — collision data preserved verbatim)
     //   112 = num_c_verts  (unchanged)
     //   116 = collision buffer size (unchanged)
-    //   120 = model_radius (NOT updated here — sidecar has original value; radius
-    //                        from just the render verts may be smaller than from all verts)
-    {
-        const uint32_t vertStride  = (modelType == 1) ? 40u : 32u;
+    //   120 = model_radius (NOT updated here — sidecar has original value)
+    if (!useSidecarVerbatim) {
+        const uint32_t vertStride  = (modelType == 1 || modelType == 3) ? 40u : 32u;
         const uint32_t totalVerts  = static_cast<uint32_t>(newXtrv.size()) / vertStride;
 
         uint32_t d3drDataSize = 0;
@@ -615,7 +673,7 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     auto hsemData = BuildHsem(numFaces, numVerts, numBlocks, 0, radius, modelType);
     auto d3drData = BuildD3dr(numFaces, numBlocks, numVerts, modelType);
     auto xtrvData = BuildXtrv(verts, modelType);
-    auto dnerData = BuildDner(obj.faces, remA, remB, remC, numMatSlots);
+    auto dnerData = BuildDner(obj.faces, remA, remB, remC, numMatSlots, modelType);
     auto tamcData = BuildTamc(obj.materials, numMatSlots);
 
     struct ChunkDesc { const char* tag; std::vector<uint8_t>* data; };
