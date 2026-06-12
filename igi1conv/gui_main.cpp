@@ -120,6 +120,7 @@ public:
     bool showWireframe = false;
     bool showGrid = true;
     QString currentModelPath;
+    QString cacheDir;
 
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
@@ -227,7 +228,7 @@ public:
                         QString matName = QString("mat_%1.tga").arg(i);
                         auto tex = loadCachedTexture(matName, info);
                         if (!tex) {
-                            QString tempDir = QDir::tempPath() + "/igi_temp_mef/bundle/" + info.completeBaseName() + "/";
+                            QString tempDir = cacheDir + "/bundle/" + info.completeBaseName() + "/";
                             QFileInfo tempInfo(tempDir + matName);
                             tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
                         }
@@ -1674,6 +1675,7 @@ public:
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
         globalCacheDir = settings.value("CacheDir", QDir::tempPath() + "/igi_temp_mef").toString();
+        modelViewer->cacheDir = globalCacheDir;
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
@@ -1746,6 +1748,7 @@ public:
             QString newCache = QFileDialog::getExistingDirectory(this, "Select Temp Cache Folder", globalCacheDir);
             if (!newCache.isEmpty()) {
                 globalCacheDir = newCache;
+                modelViewer->cacheDir = globalCacheDir;
                 QSettings(iniPath, QSettings::IniFormat).setValue("CacheDir", globalCacheDir);
                 logMessage("[INFO] Cache Folder set to: " + globalCacheDir);
             }
