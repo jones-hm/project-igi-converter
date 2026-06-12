@@ -130,7 +130,8 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
                        const std::string &modelStem,
                        const std::string &outDir,
                        const std::string &datPath,
-                       const std::string &texDir) {
+                       const std::string &texDir,
+                       bool skipObj) {
   namespace fs = std::filesystem;
 
   // 1. Create bundle folder: outDir/modelStem/
@@ -192,15 +193,17 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
   }
 
   // 4. Write OBJ
-  std::string objPath = (bundleDir / (modelStem + ".obj")).string();
-  std::ofstream f(objPath);
-  if (!f.is_open()) {
-    Logger::Get().Log(LogLevel::ERR,
-                      "[MefExporter] Cannot open OBJ: " + objPath);
-    return false;
+  if (!skipObj) {
+    std::string objPath = (bundleDir / (modelStem + ".obj")).string();
+    std::ofstream f(objPath);
+    if (!f.is_open()) {
+      Logger::Get().Log(LogLevel::ERR,
+                        "[MefExporter] Cannot open OBJ: " + objPath);
+      return false;
+    }
+    WriteObjBody(f, geometry, modelStem + ".mtl");
+    f.close();
   }
-  WriteObjBody(f, geometry, modelStem + ".mtl");
-  f.close();
 
   // 5. Write MTL
   std::string mtlPath = (bundleDir / (modelStem + ".mtl")).string();
