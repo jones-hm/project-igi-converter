@@ -45,8 +45,9 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 
 **_6. Texture Paint & Drawing Editor (Edit Game Assets)_**  
 <p align="center">
-  <img src="assets/05a_tex_paint.png" width="49%" alt="Texture Paint Tools" />
-  <img src="assets/05b_tex_paint.png" width="49%" alt="Texture Paint Brush" />
+  <img src="assets/05a_tex_paint.png" width="32%" alt="Texture Paint Tools" />
+  <img src="assets/05aa_tex_paint.png" width="32%" alt="Texture Paint Canvas" />
+  <img src="assets/05b_tex_paint.png" width="32%" alt="Texture Paint Brush" />
 </p>
 <p align="center">
   <img src="assets/05c_tex_paint.png" width="49%" alt="Editing Texture Asset" />
