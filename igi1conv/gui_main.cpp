@@ -1673,6 +1673,7 @@ public:
         globalLevelMtpPath = settings.value("LevelMTP", "").toString();
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
+        globalCacheDir = settings.value("CacheDir", QDir::tempPath() + "/igi_temp_mef").toString();
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
@@ -1739,6 +1740,15 @@ public:
             QMessageBox::information(this, "Level Set",
                 QString("Level: %1\nDAT: %2\nMTP: %3\nTextures: %4")
                 .arg(levelDir, globalLevelDatPath, globalLevelMtpPath, globalTextureDir));
+        });
+
+        settingsMenu->addAction("Cache Folder...", this, [this, iniPath]() {
+            QString newCache = QFileDialog::getExistingDirectory(this, "Select Temp Cache Folder", globalCacheDir);
+            if (!newCache.isEmpty()) {
+                globalCacheDir = newCache;
+                QSettings(iniPath, QSettings::IniFormat).setValue("CacheDir", globalCacheDir);
+                logMessage("[INFO] Cache Folder set to: " + globalCacheDir);
+            }
         });
 
         QMenu* logsMenu = settingsMenu->addMenu("&Logs");
@@ -2032,6 +2042,7 @@ private:
     QString globalLevelMtpPath;
     QString globalLevelDatPath;
     QString globalTextureDir;
+    QString globalCacheDir;
 
     void hideAllViewers() {
         viewerEdit->hide();
@@ -2208,9 +2219,13 @@ private:
             if (!dir.entryList(QStringList() << "*.mef", QDir::Files).isEmpty()) hasMefs = true;
             if (hasMefs) {
                 menu.addSeparator();
+                menu.addAction("Apply Textures All (in Folder)", [this, path]() {
+                    currentFile = path;
+                    executeCommand("mef apply-tex-all");
+                });
                 menu.addAction("Export All (in Folder)", [this, path]() {
                     currentFile = path;
-                    executeCommand("mef bundle-all");
+                    executeCommand("mef export-bundle-all");
                 });
             }
         } else if (ext == "tex" || ext == "spr" || ext == "pic") {
@@ -2300,7 +2315,7 @@ private:
                 currentFile = path;
                 executeCommand("mef apply-tex");
                 QString baseName = QFileInfo(path).completeBaseName();
-                QString tempDir = QDir::tempPath() + "/igi_temp_mef/bundle/" + baseName + "/";
+                QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
                 if (QDir(tempDir).exists()) {
                     logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
                     viewModeCombo->setCurrentIndex(4);
@@ -2479,8 +2494,7 @@ private:
             args << "mef" << "bundle" << target << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
         } else if (cmd == "mef apply-tex") {
             QString target = currentFile;
-            QString tempDir = QDir::tempPath() + "/igi_temp_mef";
-            QString outBundle = tempDir + "/bundle";
+            QString outBundle = globalCacheDir + "/bundle";
             QString datFile = globalLevelDatPath;
             if (datFile.isEmpty()) {
                 datFile = QFileDialog::getOpenFileName(this, "Select DAT File for Bundle", outDir, "DAT Files (*.dat)");
@@ -2510,8 +2524,7 @@ private:
             }
             if (texDir.isEmpty()) return;
             
-            QString tempDir = QDir::tempPath() + "/igi_temp_mef";
-            QString outBundle = tempDir + "/bundle";
+            QString outBundle = globalCacheDir + "/bundle";
             QDir bundleDir(outBundle);
             bundleDir.mkpath(".");
             
@@ -2567,6 +2580,59 @@ private:
                 modelViewer->show();
                 logMessage("[INFO] Loaded first bundled MEF in 3D View: " + firstModel);
             }
+            return; // Already ran all sub-processes above
+
+        } else if (cmd == "mef export-bundle-all") {
+            QString folderPath = currentFile;
+            if (!QFileInfo(folderPath).isDir()) folderPath = QFileInfo(folderPath).absolutePath();
+            
+            QString outBundle = QFileDialog::getExistingDirectory(this, "Select Export Folder", folderPath);
+            if (outBundle.isEmpty()) return;
+            
+            QString datFile = globalLevelDatPath;
+            if (datFile.isEmpty()) datFile = QFileDialog::getOpenFileName(this, "Select DAT File", folderPath, "DAT Files (*.dat)");
+            if (datFile.isEmpty()) return;
+            QString texDir = globalTextureDir;
+            if (texDir.isEmpty()) texDir = QFileDialog::getExistingDirectory(this, "Select Textures Directory", folderPath);
+            if (texDir.isEmpty()) return;
+            
+            QDir dir(folderPath);
+            QStringList mefs = dir.entryList(QStringList() << "*.mef" << "*.MEF", QDir::Files);
+            logMessage(QString("[INFO] Export All: found %1 MEF files in %2").arg(mefs.size()).arg(folderPath));
+            
+            QProgressDialog progress("Exporting all MEFs in folder...", "Cancel", 0, mefs.size(), this);
+            progress.setWindowModality(Qt::WindowModal);
+            progress.setMinimumDuration(0);
+            progress.show();
+            
+            int bundled = 0;
+            for (int i = 0; i < mefs.size(); ++i) {
+                if (progress.wasCanceled()) {
+                    logMessage("[WARN] Export All was canceled by user.");
+                    break;
+                }
+                const QString& mefName = mefs[i];
+                progress.setValue(i);
+                progress.setLabelText(QString("Exporting %1 (%2 of %3)...").arg(mefName).arg(i+1).arg(mefs.size()));
+                qApp->processEvents();
+
+                QString mefPath = folderPath + "/" + mefName;
+                QStringList bargs;
+                bargs << "mef" << "bundle" << mefPath << "-o" << outBundle << "--dat" << datFile << "--texdir" << texDir;
+                logMessage(QString("> igi1conv %1").arg(bargs.join(" ")));
+                QProcess proc;
+                proc.setProgram(qApp->applicationFilePath());
+                proc.setArguments(bargs);
+                proc.start();
+                proc.waitForFinished(30000);
+                QString out = proc.readAllStandardOutput();
+                QString err = proc.readAllStandardError();
+                if (!out.isEmpty()) logMessage(out.trimmed());
+                if (!err.isEmpty()) logMessage("ERROR: " + err.trimmed());
+                bundled++;
+            }
+            progress.setValue(mefs.size());
+            logMessage(QString("[INFO] Export-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
             return; // Already ran all sub-processes above
 
         } else if (cmd == "res unpack") {
