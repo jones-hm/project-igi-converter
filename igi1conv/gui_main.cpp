@@ -1675,7 +1675,6 @@ public:
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
         globalCacheDir = settings.value("CacheDir", QDir::tempPath() + "/igi_temp_mef").toString();
-        modelViewer->cacheDir = globalCacheDir;
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
@@ -1931,6 +1930,7 @@ public:
         imageEditor->hide();
 
         modelViewer = new ModelViewer();
+        modelViewer->cacheDir = globalCacheDir;
 
         rightLayout->addWidget(viewerEdit, 3);
         rightLayout->addWidget(imageEditor, 3);
