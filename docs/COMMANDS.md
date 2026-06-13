@@ -34,6 +34,9 @@ igi1conv mef dump   <input.mef> [-o <output.txt>]
 igi1conv mef export <input.mef> -o <output.obj>
 igi1conv mef export <folder/> -o <output_dir> --batch
 igi1conv mef bundle <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>
+igi1conv mef to-text <input.mef> -o <output.txt>
+igi1conv mef compile <input.txt> -o <output.mef>
+igi1conv mef build-rigid <input.mef> [-o <output.mef>]
 ```
 
 ## `qsc` — Q Script (source)

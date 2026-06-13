@@ -2373,14 +2373,12 @@ private:
                 QMenu* infoMenu = menu.addMenu("Details");
                 infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
                 infoMenu->addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
-                if (ext == "mef") {
-                    menu.addAction("Build Model", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " build-rigid"); });
-                }
 
                 QMenu* exportMenu = menu.addMenu("Export");
                 exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-bundle"); });
                 if (ext == "mef") {
                     exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                    exportMenu->addAction("Build Rigid Model", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " build-rigid"); });
                 } else {
                     exportMenu->addAction("Export to Mex(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
                 }
@@ -2793,6 +2791,10 @@ private:
             QString outFolder = QFileDialog::getExistingDirectory(this, "Select Export Folder", outDir);
             if (outFolder.isEmpty()) return;
             args << currentFile << "-o" << (outFolder + "/" + baseName + ".obj");
+        } else if (cmd == "mef build-rigid") {
+            QString outFolder = QFileDialog::getExistingDirectory(this, "Select Output Folder for Rigid Model", outDir);
+            if (outFolder.isEmpty()) return;
+            args << currentFile << "-o" << (outFolder + "/" + baseName + ".mef");
         } else {
             args << currentFile;
             if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");

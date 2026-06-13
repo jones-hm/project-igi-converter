@@ -138,6 +138,9 @@ igi1conv mef export models/weapons/ -o output_objs/ --batch
 
 # Bundle a MEF with its actual textures (requires the map's .dat file)
 igi1conv mef bundle models/level1/model2.mef -o out_model2 --dat common.dat --texdir textures/
+
+# Recursively merge all ATTA sub-models into a single rigid MEF geometry (flatten hierarchy)
+igi1conv mef build-rigid models/435_01_1.mef -o models/435_01_1_rigid.mef
 ```
 
 #### 3. Modifying Game Logic (`.qvm` & `.qsc`)
@@ -181,7 +184,7 @@ igi1conv dat to-mtp level1_modded.dat -o level1.mtp
 | Format | Extension | Operations Available |
 | :------- | :----- | :--------- |
 | **Textures** | `.tex`, `.spr`, `.pic` | info, decode, to-png, to-tga (+resize) |
-| **3D Meshes** | `.mef` | info, dump, export (OBJ), bundle |
+| **3D Meshes** | `.mef` | info, dump, export (OBJ), bundle, to-text, compile, build-rigid |
 | **Q Source** | `.qsc` | validate, compile → QVM |
 | **Q VM** | `.qvm` | info, disasm, decompile → QSC |
 | **Archives** | `.res` | list, extract, compile, pack, unpack, append |
