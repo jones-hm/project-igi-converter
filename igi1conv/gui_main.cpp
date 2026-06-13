@@ -200,9 +200,8 @@ public:
             .arg(rotX, 0,'f',0).arg(rotY, 0,'f',0).arg(rotZ, 0,'f',0));
     }
 
-    void loadMefRecursive(const QString& path, const QMatrix4x4& transform, QSet<QString>& visited) {
-        if (visited.contains(path)) return;
-        visited.insert(path);
+    void loadMefRecursive(const QString& path, const QMatrix4x4& transform, int depth) {
+        if (depth > 20) return;
         
         QFileInfo info(path);
         if (!info.exists()) return;
@@ -292,10 +291,10 @@ public:
             QString path3 = dir.filePath(childName + ".mex");
             QString path4 = dir.filePath(childName + ".MEX");
             
-            if (QFileInfo::exists(path1)) loadMefRecursive(path1, childTransform, visited);
-            else if (QFileInfo::exists(path2)) loadMefRecursive(path2, childTransform, visited);
-            else if (QFileInfo::exists(path3)) loadMefRecursive(path3, childTransform, visited);
-            else if (QFileInfo::exists(path4)) loadMefRecursive(path4, childTransform, visited);
+            if (QFileInfo::exists(path1)) loadMefRecursive(path1, childTransform, depth + 1);
+            else if (QFileInfo::exists(path2)) loadMefRecursive(path2, childTransform, depth + 1);
+            else if (QFileInfo::exists(path3)) loadMefRecursive(path3, childTransform, depth + 1);
+            else if (QFileInfo::exists(path4)) loadMefRecursive(path4, childTransform, depth + 1);
         }
     }
 
@@ -312,10 +311,9 @@ public:
         updateModelInfo(info.completeBaseName());
         
         if (ext == "mef" || ext == "mex") {
-            QSet<QString> visited;
             QMatrix4x4 identity;
             identity.setToIdentity();
-            loadMefRecursive(path, identity, visited);
+            loadMefRecursive(path, identity, 0);
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;

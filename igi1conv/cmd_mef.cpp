@@ -299,8 +299,8 @@ static int do_mef_compile(const std::string& input, const std::string& outpath)
     return 0;
 }
 
-static void MergeGeometryRecursive(ParsedGeometry& baseGeo, const std::string& currentPath, glm::mat4 transform, std::set<std::string>& visited) {
-    if (!visited.insert(currentPath).second) return;
+static void MergeGeometryRecursive(ParsedGeometry& baseGeo, const std::string& currentPath, glm::mat4 transform, int depth) {
+    if (depth > 20) return;
 
     ParsedGeometry child;
     try { child = ParseMefFile(currentPath); } catch (...) { return; }
@@ -368,10 +368,10 @@ static void MergeGeometryRecursive(ParsedGeometry& baseGeo, const std::string& c
         std::string path3 = dir + "/" + childName + ".mex";
         std::string path4 = dir + "/" + childName + ".MEX";
 
-        if      (fs::exists(path1)) MergeGeometryRecursive(baseGeo, path1, childTransform, visited);
-        else if (fs::exists(path2)) MergeGeometryRecursive(baseGeo, path2, childTransform, visited);
-        else if (fs::exists(path3)) MergeGeometryRecursive(baseGeo, path3, childTransform, visited);
-        else if (fs::exists(path4)) MergeGeometryRecursive(baseGeo, path4, childTransform, visited);
+        if      (fs::exists(path1)) MergeGeometryRecursive(baseGeo, path1, childTransform, depth + 1);
+        else if (fs::exists(path2)) MergeGeometryRecursive(baseGeo, path2, childTransform, depth + 1);
+        else if (fs::exists(path3)) MergeGeometryRecursive(baseGeo, path3, childTransform, depth + 1);
+        else if (fs::exists(path4)) MergeGeometryRecursive(baseGeo, path4, childTransform, depth + 1);
     }
 }
 
@@ -382,9 +382,8 @@ static int do_mef_build_rigid(const std::string& input, const std::string& outpa
     }
     ParsedGeometry baseGeo;
     baseGeo.modelType = 0; // Rigid
-    std::set<std::string> visited;
     glm::mat4 identity(1.0f);
-    MergeGeometryRecursive(baseGeo, input, identity, visited);
+    MergeGeometryRecursive(baseGeo, input, identity, 0);
 
     if (!MefCompiler::BuildRigidFromParsedGeometry(baseGeo, outpath)) {
         std::cerr << "mef build-rigid: failed to build rigid model\n";
