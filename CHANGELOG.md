@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-06-13
+### Added
+- **Text MEF/MEX Export Folder Selection**: GUI now prompts for a destination folder when exporting ASCII-format MEF/MEX models to OBJ, matching binary bundle exports.
+- **GUI & CLI Documentation Update**: Expanded README.md to document the GUI and CLI usage regarding ASCII vs Binary exports and folder prompts.
+- **Menu Label Optimization**: Reverted "Export to OBJ+MTL+TGA" back to "Export to Obj" in GUI contextual menus for conciseness while keeping full MTL/TGA extraction intact.
+
 ## [1.6.0] - 2026-06-12
 ### Added
 - **Export and Apply Textures Separation**: Implemented the `--no-obj` flag to decouple texture extraction and applying textures from standard OBJ generation.

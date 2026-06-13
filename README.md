@@ -18,7 +18,10 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > To use **Apply Textures** on 3D models in the GUI, you must first select the active level folder from the **Settings** menu to resolve the correct texture mappings.
 
 > [!NOTE]
-> **AI Models / Characters Support**: As of v1.6.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
+> **AI Models / Characters Support**: As of v1.7.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
+
+> [!NOTE]
+> **v1.7.0 Updates**: The GUI "Export to Obj" now intuitively prompts for a destination folder when exporting both **binary** and **ASCII/text** `MEF/MEX` models. All textures and `.mtl` materials are generated in the chosen output directory seamlessly without cluttering the game directory.
 
 
 ### GUI Screenshots
@@ -229,7 +232,7 @@ cmake --build build --config Release --target igi1conv
 ```
 This generates `igi1conv.exe` and automatically copies the required runtime assets (`IGIModels.json`, `IGIModelsAllLevel.json`, and `IGIAutoComplete.txt`) into `bin/Release/`.
 
-The version string is defined once by the CMake `project(... VERSION 1.6.0)` declaration and injected as `IGI1CONV_VERSION`; `igi1conv --version` reports it.
+The version string is defined once by the CMake `project(... VERSION 1.7.0)` declaration and injected as `IGI1CONV_VERSION`; `igi1conv --version` reports it.
 
 ---
 

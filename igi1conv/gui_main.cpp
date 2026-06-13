@@ -1833,7 +1833,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.6.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.7.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
@@ -2330,7 +2330,7 @@ private:
                 }
 
                 QMenu* exportMenu = menu.addMenu("Export");
-                exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export"); });
+                exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-bundle"); });
                 if (ext == "mef") {
                     exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
                 } else {
@@ -2741,11 +2741,14 @@ private:
             logMessage(QString("[INFO] Compiling text %1 to binary: %2").arg(currentExt.toUpper(), outBin));
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
+        } else if (cmd == "mef export" || cmd == "mex export") {
+            QString outFolder = QFileDialog::getExistingDirectory(this, "Select Export Folder", outDir);
+            if (outFolder.isEmpty()) return;
+            args << currentFile << "-o" << (outFolder + "/" + baseName + ".obj");
         } else {
             args << currentFile;
             if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");
             else if (cmd == "qvm decompile") args << "-o" << (outDir + "/" + baseName + ".qsc");
-            else if (cmd == "mef export" || cmd == "mex export") args << "-o" << (outDir + "/" + baseName + ".obj");
             else if (cmd == "mef dump" || cmd == "mex dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
             else if (cmd == "res extract") args << "-o" << outDir;
             else if (cmd == "fnt export") args << "-o" << (outDir + "/" + baseName + ".png");

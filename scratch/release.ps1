@@ -1,7 +1,7 @@
-# igi1conv Packaging & Release Script (v1.6.0)
+# igi1conv Packaging & Release Script (v1.7.0)
 # Automatically packages the 32-bit (x86) and 64-bit (x64) Release folders into ZIP files.
 
-$version = "1.6.0"
+$version = "1.7.0"
 $x86Zip = "igi1conv_v${version}_x86.zip"
 $x64Zip = "igi1conv_v${version}_x64.zip"
 
@@ -45,5 +45,5 @@ Write-Host "=================================================="
 Write-Host "ZIP files successfully generated!"
 Write-Host "=================================================="
 Write-Host "To publish this release to GitHub, copy and run the command below:"
-Write-Host "gh release create v$version $x86Zip $x64Zip --title 'v$version - Dual Architecture Support & Texture Painting' --notes-file CHANGELOG.md"
+Write-Host "gh release create v$version $x86Zip $x64Zip --title 'v$version - Text MEF/MEX Export Folder Selection' --notes-file CHANGELOG.md"
 Write-Host "=================================================="

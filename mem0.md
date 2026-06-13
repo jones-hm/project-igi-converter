@@ -14,3 +14,7 @@
 ## Feature Request: GUI Rename Info & Dump
 **Description:** Renamed the Info & Dump submenu to Details as per user preference.
 **Resolution:** Renamed in gui_main.cpp and compiled the Release build.
+
+## Feature Request: GUI Export Obj tweaks
+**Description:** User requested to rename "Export to Obj" to "Export to OBJ+MTL+TGA" and have text MEF/MEX export prompt for a folder.
+**Resolution:** Updated gui_main.cpp to rename the export menu items to "Export to OBJ+MTL+TGA". Added `QFileDialog::getExistingDirectory` logic for text mef/mex exports so they ask for a folder, matching the binary export behavior. Built and ran Release version.
