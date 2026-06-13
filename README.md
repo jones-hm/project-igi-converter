@@ -20,7 +20,10 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > **AI Models / Characters Support**: As of v1.7.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
 
 > [!NOTE]
-> **v1.7.0 Updates**: The GUI "Export to Obj" now intuitively prompts for a destination folder when exporting both **binary** and **ASCII/text** `MEF/MEX` models. All textures and `.mtl` materials are generated in the chosen output directory seamlessly without cluttering the game directory.
+> **v1.7.0 Updates**: 
+> - The GUI "Export to Obj" now intuitively prompts for a destination folder when exporting both **binary** and **ASCII/text** `MEF/MEX` models. All textures and `.mtl` materials are generated in the chosen output directory seamlessly without cluttering the game directory.
+> - **Recursive ATTA Support**: Both "Export to Obj" and "Build Rigid Model" now walk the full attachment hierarchy, merging all sub-models and resolving their textures automatically from the level's DAT file.
+> - **Fixed Bone Model Rendering**: Character bone models (type1) now render correctly in the GUI with proper world-space positioning.
 
 
 ### GUI Screenshots
@@ -141,6 +144,9 @@ igi1conv mef bundle models/level1/model2.mef -o out_model2 --dat common.dat --te
 
 # Recursively merge all ATTA sub-models into a single rigid MEF geometry (flatten hierarchy)
 igi1conv mef build-rigid models/435_01_1.mef -o models/435_01_1_rigid.mef
+
+# Build rigid model and resolve all textures from the level DAT file
+igi1conv mef build-rigid models/435_01_1.mef -o models/435_01_1_rigid.mef --dat level1.dat --texdir textures/
 ```
 
 #### 3. Modifying Game Logic (`.qvm` & `.qsc`)

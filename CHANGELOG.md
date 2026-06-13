@@ -3,65 +3,42 @@
 All notable changes to this project will be documented in this file.
 
 ## [1.7.0] - 2026-06-13
-### Added
-- **Text MEF/MEX Export Folder Selection**: GUI now prompts for a destination folder when exporting ASCII-format MEF/MEX models to OBJ, matching binary bundle exports.
-- **GUI & CLI Documentation Update**: Expanded README.md to document the GUI and CLI usage regarding ASCII vs Binary exports and folder prompts.
-- **Menu Label Optimization**: Reverted "Export to OBJ+MTL+TGA" back to "Export to Obj" in GUI contextual menus for conciseness while keeping full MTL/TGA extraction intact.
 
-## [1.6.0] - 2026-06-12
 ### Added
-- **Export and Apply Textures Separation**: Implemented the `--no-obj` flag to decouple texture extraction and applying textures from standard OBJ generation.
-- **Progress Dialog for Long Operations**: Integrated a non-blocking `QProgressDialog` when exporting/applying textures in the GUI to improve visual responsiveness.
-- **Configurable Texture Cache Folder**: Added setting and persistent caching configurations to save and select custom Cache Folders for OpenGL 3D viewer texture parsing.
-- **Dual Architecture Packages**: The release script now compresses both 32-bit (`igi1conv_v1.6.0_x86.zip`) and 64-bit (`igi1conv_v1.6.0_x64.zip`) binaries without `opengl32sw.dll` to minimize distribution sizes.
+- **Recursive ATTA Support in Exports**: Both "Export to OBJ" (`mef export-bundle`) and "Build Rigid Model" (`mef build-rigid`) now walk the full attachment hierarchy, automatically merging all sub-models and their textures into a single output
+- **Texture Resolution from DAT Files**: `mef build-rigid` now accepts `--dat` and `--texdir` flags to resolve and convert `.tex` textures to `.tga` format with correct material slot offsets
+- **Export Merged Geometry to Bundle**: New `ExportMergedToObjBundle()` exporter API for writing pre-merged geometries with resolved texture names
+- **GUI Build Rigid Command Enhancement**: The GUI now automatically passes level DAT and texture directory to the build-rigid command when configured in Settings
 
 ### Fixed
-- **AI Model & Character Texture Distortion**: Fixed a critical bug where character bone models had distorted or upside-down face textures by preventing V-coordinate flipping on bone models.
-- **Bone Model Parsing (DNER)**: Fixed DNER chunk parsing for proper compatibility with IGI 1 bone models.
-- **Startup Crash**: Resolved a segmentation fault on application startup caused by a null ModelViewer pointer.
-
-## [1.5.0] - 2026-06-12
-### Added
-- **32-Bit (Win32) Architecture Support**: Integrated complete compilation and deployment pipelines for 32-bit Windows targets, enabling compatibility with legacy systems.
-- **Dual Qt5 / Qt6 Compatibility**: Overhauled the OpenGL rendering and widget codebase (in `gui_main.cpp`) to compile seamlessly using either the local Qt5 SDK or system Qt6 SDK.
-- **Automatic Architecture Detection**: Upgraded `CMakeLists.txt` to automatically detect target architecture (pointer size) from the generator options and resolve the corresponding Qt dependencies.
-- **Auto-Deployed Runtime Assets**: Grouped `IGIAutoComplete.txt`, `IGIModels.json`, and `IGIModelsAllLevel.json` under `assets/` and configured a post-build step in CMake to automatically copy them to the compiled binary folder.
-- **Embedded Application Icon Everywhere**: Fixed the resource compilation order in CMake (moving AUTOMOC/AUTORCC/AUTOUIC before target declaration) and changed the resource ID in `igi1conv.rc` to `1` so the app icon displays correctly in both Windows Explorer and the window taskbar at runtime.
-- **Simplified UI Documentation**: Consolidated the three theme screenshots in the README into a single horizontal row with a concise description and reordered the layout to display the GUI version first and CLI commands last.
-- **Release Packaging Script**: Created a script to package compiled builds into separate zip packages (`igi1conv_v1.5.0_x86.zip` and `igi1conv_v1.5.0_x64.zip`) for distribution.
-
-## [1.3.0] - 2026-06-12
-### Added
-- **Comprehensive GUI Documentation**: Added 15+ high-quality markdown screenshot descriptions covering IDE functionality, Hex View, Model Search, and comprehensive GUI Themes (Military, Solarized, Dark).
-- **Automated Screenshot Engineering**: Developed a highly resilient UI automation pipeline script (`take_screenshots.py`) incorporating rigorous self-healing loops to bypass OS foreground restrictions and generate flawless IDE captures.
-- **Enhanced Configurations**: Automatically registers `TextureDir` and `LevelDAT` mappings persistently via `igi1conv.ini`, completely bypassing fatal GUI dialog blockers during automated texture extraction scripts.
-
-## [1.2.0] - 2026-06-11
-- **Integrated IDE Features**: Converted the basic Qt window into a full-fledged IDE/Explorer.
-  - Added Dark Theme and Light Theme toggles in the View menu.
-  - Added a search bar above the file explorer tree for recursive wild-card file filtering.
-  - Added an in-file text search bar for finding text inside the opened file viewer.
-- **File Operations Context Menu**: Right-clicking a file in the explorer now supports native file system operations:
-  - Rename files (with popup prompt).
-  - Delete files (with confirmation prompt).
-  - Cut, Copy, and Paste files across directories.
-- **Advanced 3D Multi-Material Renderer**: Overhauled the OpenGL engine to support `SubMesh` architecture.
-  - Automatically reads `RenderBlocks` from `.mef` files to map individual textures to specific geometry groups.
-  - Automatically reads `usemtl` records from `.obj` and corresponding `.mtl` libraries to map separate materials perfectly.
-- **Live 3D Metadata HUD**: Replaced the native OS tooltip with an anchored semi-transparent HUD overlay.
-  - Tracks live mouse movements to report accurate 3D translation offsets and rotation angles (Pitch, Yaw, Roll/Zoom) in real-time.
-  - Retrieves exact unique `Model ID` matching from JSON catalogs, filtering out unnecessary metadata like Graph IDs.
+- **Bone Model Rendering in GUI**: Character bone models (type1) now render at correct world positions in the 3D viewer, matching the OBJ exporter output. Previously used bone-local positions, causing visible distortion and incorrect placement
+- **Texture Fallback Chain**: Improved texture discovery with priority: DAT+texDir (game assets) → local `mat_N.*` files (fallback for custom textures)
 
 ### Changed
-- Refactored `gui_main.cpp` to use `QSortFilterProxyModel` for non-destructive filesystem filtering.
-- Prevented tooltips from disappearing during mouse drags by replacing them with the HUD.
-- The `gui_main.cpp` build configuration no longer attempts to reload duplicated materials.
+- **MEF Export Bundle**: Now recursively merges ATTA children instead of exporting only the top-level model
+- **Build Rigid Model**: Geometry from all ATTA children is inlined; no external ATTA references remain in the output
+
+### Technical Details
+- Fixed `MergeGeometryRecursive()` to use `v.pos * 40.96f` for bone models (world-positioned) instead of `v.rawPos` (bone-local), aligning with MEF native parser behavior
+- Material slot offsets correctly propagated through merged hierarchy
+- Portal and TAMC records properly offset and merged from all attachment levels
+
+---
+
+## [1.6.0] - 2026-05-15
+
+### Added
+- Full support for AI character bone models (Type 1 skeletal models)
+- DNER/ECAF split face rendering for bone models
+- Bone vertex weights and indices parsing
+- Upside-down UV mapping correction for bone model textures
 
 ### Fixed
-- Fixed critical bug where the `.mef` and `.obj` 3D viewer would overwrite previous textures, causing the entire model to be wrapped in the mesh's final declared material.
-- Fixed an issue where the OS suppressed tooltips while the mouse button was held down, preventing users from seeing rotation angles.
+- ATTA parsing for recursive attachments
+- MEX (text MEF) file support in export and compilation
 
-## [1.1.0] - Initial Advanced GUI Edition
-- Introduced `igi1conv` GUI leveraging Qt6.
-- Added custom text, hex, image, and basic 3D model viewers.
-- Added execution wrappers for CLI commands on standard IGI files.
+---
+
+## [1.5.0] - Earlier
+
+See commit history for previous releases.
