@@ -2311,14 +2311,19 @@ private:
             QString cmdPrefix = ext;
 
             if (isBinary) {
-                menu.addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
-                menu.addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
+                QMenu* infoMenu = menu.addMenu("Details");
+                infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
+                infoMenu->addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
+                if (ext == "mef") {
+                    menu.addAction("Build Model", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " build-rigid"); });
+                }
 
                 QMenu* exportMenu = menu.addMenu("Export");
-                exportMenu->addAction("Export to OBJ",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-obj"); });
-                exportMenu->addAction("Export to Text",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export"); });
+                exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
 
                 if (ext == "mef") {
+
                     // Textures submenu
                     QMenu* texMenu = menu.addMenu("Textures");
                     texMenu->addAction("Apply Textures", [this, path]() {
@@ -2381,7 +2386,7 @@ private:
             } else {
                 menu.addAction("Compile to Binary", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " compile-text"); });
                 QMenu* exportMenu = menu.addMenu("Export");
-                exportMenu->addAction("Export to OBJ", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-obj"); });
+                exportMenu->addAction("Export to Obj", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export"); });
             }
         } else if (ext == "res") {
             menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
@@ -2413,7 +2418,21 @@ private:
         if (mode == 0) {
             if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic" || currentExt == "tga") {
                 mode = 3; // Image
-            } else if (currentExt == "mef" || currentExt == "mex" || currentExt == "obj") {
+            } else if (currentExt == "mef" || currentExt == "mex") {
+                bool isBinary = true;
+                QFile f(path);
+                if (f.open(QIODevice::ReadOnly)) {
+                    QByteArray magic = f.read(4);
+                    if (magic != "ILFF") isBinary = false;
+                    f.close();
+                }
+                if (isBinary) {
+                    if (currentExt == "mef") mode = 4; // 3D
+                    else mode = 2; // Hex
+                } else {
+                    mode = 1; // Text
+                }
+            } else if (currentExt == "obj") {
                 mode = 4; // 3D
             } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat") {
                 mode = 1; // Text
@@ -2706,8 +2725,8 @@ private:
             args << currentFile;
             if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");
             else if (cmd == "qvm decompile") args << "-o" << (outDir + "/" + baseName + ".qsc");
-            else if (cmd == "mef export") args << "-o" << (outDir + "/" + baseName + ".obj");
-            else if (cmd == "mef dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
+            else if (cmd == "mef export" || cmd == "mex export") args << "-o" << (outDir + "/" + baseName + ".obj");
+            else if (cmd == "mef dump" || cmd == "mex dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
             else if (cmd == "res extract") args << "-o" << outDir;
             else if (cmd == "fnt export") args << "-o" << (outDir + "/" + baseName + ".png");
             else if (cmd == "qvm disasm") args << "-o" << (outDir + "/" + baseName + ".qas");
@@ -2715,7 +2734,11 @@ private:
 
         if (args.isEmpty()) return;
 
-        QProgressDialog progress("Executing command...", "Cancel", 0, 0, this);
+        QString progressText = "Executing command...";
+        if (cmd.endsWith("build-rigid")) {
+            progressText = "Completing Build model finding attachments textures.... Please wait";
+        }
+        QProgressDialog progress(progressText, "Cancel", 0, 0, this);
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
         progress.show();

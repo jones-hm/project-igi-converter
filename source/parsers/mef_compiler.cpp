@@ -693,10 +693,12 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
     // 2. Try sidecar-aware path first (preserves HPSC, XTVC, ECFC, TAMC, etc.)
     std::string sidecarPath = textMefPath;
     size_t extPos = sidecarPath.find_last_of(".");
-    if (extPos != std::string::npos) {
-        sidecarPath = sidecarPath.substr(0, extPos) + ".mex";
+    std::string ext = (extPos != std::string::npos) ? sidecarPath.substr(extPos) : "";
+    if (ext == ".mex") {
+        sidecarPath += ".extra";
     } else {
-        sidecarPath += ".mex";
+        if (extPos != std::string::npos) sidecarPath = sidecarPath.substr(0, extPos) + ".mex";
+        else sidecarPath += ".mex";
     }
     if (fs::exists(sidecarPath)) {
         auto sidecar = MefExporter::ReadMefSidecar(sidecarPath);
@@ -778,11 +780,155 @@ bool Compile(const std::string& textMefPath, const std::string& outBinaryPath) {
 
     Logger::Get().Log(LogLevel::INFO,
         "[MefCompiler] Compiled binary MEF to: " + outBinaryPath +
-        " (" + std::to_string(out.size()) + " bytes, " +
-        std::to_string(numVerts) + " verts, " +
-        std::to_string(numFaces) + " faces, " +
-        std::to_string(numBlocks) + " render blocks)");
+        " (without sidecar)");
+    return true;
+}
+
+bool BuildRigidFromParsedGeometry(const ParsedGeometry& geo, const std::string& outBinaryPath) {
+    MEFObject obj;
+    obj.model_type = geo.modelType;
+    
+    bool hasRawPos = false;
+    for (const auto& v : geo.vertices) {
+        if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
+    }
+    
+    for (size_t i = 0; i < geo.vertices.size(); ++i) {
+        const auto& v = geo.vertices[i];
+        glm::vec3 p = hasRawPos ? v.rawPos : (v.pos * 40.96f);
+        obj.vertices.push_back({p.x, p.y, p.z});
+        obj.normals.push_back({v.normal.x, v.normal.y, v.normal.z});
+        obj.uvs.push_back({v.uv.x, v.uv.y});
+        MEFBoneVertex bv;
+        bv.index = static_cast<int>(i);
+        bv.bone_index = v.boneIndex;
+        bv.weight = v.weight;
+        bv.local_vert_id = v.localVertexId;
+        obj.bone_vertices.push_back(bv);
+    }
+    
+    for (const auto& block : geo.renderBlocks) {
+        for (size_t i = 0; i < block.triangleCount; ++i) {
+            const auto& tri = geo.triangles[block.triangleStart + i];
+            MEFFace f;
+            f.v0 = tri[0]; f.v1 = tri[1]; f.v2 = tri[2];
+            f.n0 = tri[0]; f.n1 = tri[1]; f.n2 = tri[2];
+            f.material_index = block.materialSlot;
+            obj.faces.push_back(f);
+        }
+    }
+    
+    for (size_t i = 0; i < geo.tamcRecords.size(); ++i) {
+        MEFMaterial m;
+        m.index = static_cast<int>(i);
+        m.name = "mat_" + std::to_string(i);
+        obj.materials.push_back(m);
+    }
+    
+    std::vector<uint32_t> remA, remB, remC;
+    std::vector<BinaryVertex> verts = BuildVertices(obj, obj.faces, remA, remB, remC);
+    
+    const uint32_t numVerts  = static_cast<uint32_t>(verts.size());
+    const uint32_t numFaces  = static_cast<uint32_t>(obj.faces.size());
+    const float    radius    = ComputeRadius(verts);
+    const uint32_t numBlocks = static_cast<uint32_t>(geo.tamcRecords.empty() ? 1 : geo.tamcRecords.size());
+    const int numMatSlots    = static_cast<int>(numBlocks);
+    
+    auto hsemData = BuildHsem(numFaces, numVerts, numBlocks, geo.mefAttachments.size(), radius, obj.model_type);
+    auto d3drData = BuildD3dr(numFaces, numBlocks, numVerts, obj.model_type);
+    auto xtrvData = BuildXtrv(verts, obj.model_type);
+    auto dnerData = BuildDner(obj.faces, remA, remB, remC, numMatSlots, obj.model_type);
+    auto tamcData = BuildTamc(obj.materials, numMatSlots);
+    
+    std::vector<uint8_t> attaData(geo.mefAttachments.size() * 68, 0);
+    for (size_t i = 0; i < geo.mefAttachments.size(); ++i) {
+        std::memcpy(&attaData[i * 68], &geo.mefAttachments[i], 68);
+    }
+    
+    std::vector<uint8_t> pmtlData;
+    for (const auto& p : geo.portals) {
+        WriteU32(pmtlData, p.materialId);
+        WriteZeros(pmtlData, 12);
+    }
+    
+    std::vector<uint8_t> xvtpData, cftpData, tropData;
+    for (const auto& p : geo.portals) {
+        uint32_t vOff = static_cast<uint32_t>(xvtpData.size() / 12);
+        uint32_t vCnt = static_cast<uint32_t>(p.verts.size());
+        for (const auto& v : p.verts) {
+            WriteFloat(xvtpData, v.x);
+            WriteFloat(xvtpData, v.y);
+            WriteFloat(xvtpData, v.z);
+        }
+        
+        uint32_t fOff = static_cast<uint32_t>(cftpData.size() / 12);
+        uint32_t fCnt = static_cast<uint32_t>(p.faces.size());
+        for (const auto& f : p.faces) {
+            WriteU32(cftpData, f[0]);
+            WriteU32(cftpData, f[1]);
+            WriteU32(cftpData, f[2]);
+        }
+        
+        WriteU32(tropData, vOff);
+        WriteU32(tropData, vCnt);
+        WriteU32(tropData, fOff);
+        WriteU32(tropData, fCnt);
+        WriteU32(tropData, p.portalId);
+    }
+    
+    if (hsemData.size() >= 156) {
+        auto wU16 = [&](size_t off, uint16_t v) {
+            hsemData[off]   =  v       & 0xFF;
+            hsemData[off+1] = (v >> 8) & 0xFF;
+        };
+        wU16(132, static_cast<uint16_t>(geo.mefAttachments.size()));
+        wU16(136, static_cast<uint16_t>(geo.portals.size()));
+        wU16(140, static_cast<uint16_t>(xvtpData.size() / 12));
+        wU16(142, static_cast<uint16_t>(cftpData.size() / 12));
+    }
+    
+    struct ChunkDesc { const char* tag; std::vector<uint8_t>* data; };
+    std::vector<ChunkDesc> chunks;
+    chunks.push_back({"HSEM", &hsemData});
+    chunks.push_back({"D3DR", &d3drData});
+    chunks.push_back({"XTRV", &xtrvData});
+    chunks.push_back({"DNER", &dnerData});
+    if (!tamcData.empty()) chunks.push_back({"TAMC", &tamcData});
+    if (!attaData.empty()) chunks.push_back({"ATTA", &attaData});
+    if (!pmtlData.empty()) chunks.push_back({"PMTL", &pmtlData});
+    if (!xvtpData.empty()) chunks.push_back({"XVTP", &xvtpData});
+    if (!cftpData.empty()) chunks.push_back({"CFTP", &cftpData});
+    if (!tropData.empty()) chunks.push_back({"TROP", &tropData});
+    
+    for (auto& c : chunks) {
+        while (c.data->size() % 4 != 0) c.data->push_back(0u);
+    }
+    
+    uint32_t fileSize = 20;
+    for (auto& c : chunks) fileSize += 16 + static_cast<uint32_t>(c.data->size());
+    
+    std::vector<uint8_t> out;
+    out.reserve(fileSize);
+    WriteTag(out, "ILFF");
+    WriteU32(out, fileSize);
+    WriteU32(out, 4u);
+    WriteU32(out, 0u);
+    WriteTag(out, "OCEM");
+    
+    for (size_t ci = 0; ci < chunks.size(); ++ci) {
+        const bool isLast = (ci == chunks.size() - 1);
+        const uint32_t dataSize = static_cast<uint32_t>(chunks[ci].data->size());
+        const uint32_t skip = isLast ? 0u : (16u + dataSize);
+        WriteChunkHeader(out, chunks[ci].tag, dataSize, skip);
+        out.insert(out.end(), chunks[ci].data->begin(), chunks[ci].data->end());
+    }
+    
+    std::ofstream f(outBinaryPath, std::ios::binary);
+    if (!f.is_open()) return false;
+    f.write(reinterpret_cast<const char*>(out.data()), out.size());
     return true;
 }
 
 } // namespace MefCompiler
+
+// End of mef_compiler.cpp

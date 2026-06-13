@@ -4,6 +4,7 @@
 #include "mef_exporter.h"
 #include "mef_parser.h"
 #include "mef_compiler.h"
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -20,6 +21,7 @@ static void print_mef_help()
         "  bundle  <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>\n"
         "  to-text <input.mef> -o <output.txt>   (binary MEF -> text MEF)\n"
         "  compile <input.txt> -o <output.mef>   (text MEF -> binary MEF)\n"
+        "  build-rigid <input.mef> [-o <output.mef>] (merge all ATTA into rigid model)\n"
         "\n"
         "Exit codes: 0=success 1=bad args 2=file not found 3=parse error 4=write error\n";
 }
@@ -228,10 +230,12 @@ static int do_mef_to_text(const std::string& input, const std::string& outpath)
     // Write sidecar with all original ILFF chunks so mef compile can restore them.
     std::string sidecarPath = outpath;
     size_t extPos = sidecarPath.find_last_of(".");
-    if (extPos != std::string::npos) {
-        sidecarPath = sidecarPath.substr(0, extPos) + ".mex";
+    std::string ext = (extPos != std::string::npos) ? sidecarPath.substr(extPos) : "";
+    if (ext == ".mex") {
+        sidecarPath += ".extra";
     } else {
-        sidecarPath += ".mex";
+        if (extPos != std::string::npos) sidecarPath = sidecarPath.substr(0, extPos) + ".mex";
+        else sidecarPath += ".mex";
     }
 
     if (!geo.rawChunks.empty())
@@ -258,6 +262,97 @@ static int do_mef_compile(const std::string& input, const std::string& outpath)
     }
 
     std::cout << "mef compile: compiled to " << outpath << "\n";
+    return 0;
+}
+
+static void MergeGeometryRecursive(ParsedGeometry& baseGeo, const std::string& currentPath, glm::mat4 transform, std::set<std::string>& visited) {
+    if (!visited.insert(currentPath).second) return;
+
+    ParsedGeometry child;
+    try { child = ParseMefFile(currentPath); } catch (...) { return; }
+
+    uint32_t vOffset = static_cast<uint32_t>(baseGeo.vertices.size());
+    uint32_t fOffset = static_cast<uint32_t>(baseGeo.triangles.size());
+    uint32_t mOffset = static_cast<uint32_t>(baseGeo.tamcRecords.size());
+
+    for (const auto& tamc : child.tamcRecords) baseGeo.tamcRecords.push_back(tamc);
+    for (const auto& tex : child.pmtlTextures) baseGeo.pmtlTextures.push_back(tex);
+
+    bool hasRawPos = false;
+    for (const auto& v : child.vertices) {
+        if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
+    }
+    for (auto v : child.vertices) {
+        glm::vec3 p = hasRawPos ? v.rawPos : (v.pos * 40.96f);
+        glm::vec4 tp = transform * glm::vec4(p, 1.0f);
+        v.rawPos = glm::vec3(tp);
+        v.pos = v.rawPos / 40.96f;
+        glm::vec4 tn = transform * glm::vec4(v.normal, 0.0f);
+        v.normal = glm::normalize(glm::vec3(tn));
+        baseGeo.vertices.push_back(v);
+    }
+    
+    for (auto tri : child.triangles) {
+        baseGeo.triangles.push_back({tri[0] + vOffset, tri[1] + vOffset, tri[2] + vOffset});
+    }
+
+    for (auto rb : child.renderBlocks) {
+        rb.triangleStart += fOffset;
+        rb.materialSlot += static_cast<int>(mOffset);
+        baseGeo.renderBlocks.push_back(rb);
+    }
+
+    for (auto port : child.portals) {
+        port.materialId += mOffset;
+        for (auto& pv : port.verts) {
+            glm::vec4 tp = transform * glm::vec4(pv, 1.0f);
+            pv = glm::vec3(tp);
+        }
+        baseGeo.portals.push_back(port);
+    }
+
+    for (const auto& atta : child.mefAttachments) {
+        glm::mat4 aMat(1.0f);
+        aMat[0][0] = atta.r00; aMat[1][0] = atta.r01; aMat[2][0] = atta.r02;
+        aMat[0][1] = atta.r03; aMat[1][1] = atta.r04; aMat[2][1] = atta.r05;
+        aMat[0][2] = atta.r06; aMat[1][2] = atta.r07; aMat[2][2] = atta.r08;
+        aMat[3][0] = atta.px;  aMat[3][1] = atta.py;  aMat[3][2] = atta.pz;
+
+        glm::mat4 childTransform = transform * aMat;
+        
+        MefAttachment newAtta = atta;
+        newAtta.px = childTransform[3][0]; newAtta.py = childTransform[3][1]; newAtta.pz = childTransform[3][2];
+        newAtta.r00 = childTransform[0][0]; newAtta.r01 = childTransform[1][0]; newAtta.r02 = childTransform[2][0];
+        newAtta.r03 = childTransform[0][1]; newAtta.r04 = childTransform[1][1]; newAtta.r05 = childTransform[2][1];
+        newAtta.r06 = childTransform[0][2]; newAtta.r07 = childTransform[1][2]; newAtta.r08 = childTransform[2][2];
+        baseGeo.mefAttachments.push_back(newAtta);
+
+        std::string childName(atta.name, strnlen(atta.name, 16));
+        std::string dir = fs::path(currentPath).parent_path().string();
+        std::string path1 = dir + "/" + childName + ".mef";
+        std::string path2 = dir + "/" + childName + ".MEF";
+        
+        if (fs::exists(path1)) MergeGeometryRecursive(baseGeo, path1, childTransform, visited);
+        else if (fs::exists(path2)) MergeGeometryRecursive(baseGeo, path2, childTransform, visited);
+    }
+}
+
+static int do_mef_build_rigid(const std::string& input, const std::string& outpath) {
+    if (!fs::exists(input)) {
+        std::cerr << "mef build-rigid: file not found: " << input << "\n";
+        return 2;
+    }
+    ParsedGeometry baseGeo;
+    baseGeo.modelType = 0; // Rigid
+    std::set<std::string> visited;
+    glm::mat4 identity(1.0f);
+    MergeGeometryRecursive(baseGeo, input, identity, visited);
+
+    if (!MefCompiler::BuildRigidFromParsedGeometry(baseGeo, outpath)) {
+        std::cerr << "mef build-rigid: failed to build rigid model\n";
+        return 4;
+    }
+    std::cout << "mef build-rigid: exported to " << outpath << "\n";
     return 0;
 }
 
@@ -500,6 +595,25 @@ int cmd_mef(int argc, char** argv)
             return 1;
         }
         return do_mef_compile(argv[2], outpath);
+    }
+
+    if (subcmd == "build-rigid")
+    {
+        if (argc < 3)
+        {
+            std::cerr << "mef build-rigid: missing input file\n";
+            return 1;
+        }
+        std::string outpath;
+        for (int i = 3; i < argc - 1; ++i)
+        {
+            if (std::string(argv[i]) == "-o") { outpath = argv[i + 1]; break; }
+        }
+        if (outpath.empty())
+        {
+            outpath = argv[2];
+        }
+        return do_mef_build_rigid(argv[2], outpath);
     }
 
     std::cerr << "mef: unknown subcommand '" << subcmd << "'\n";

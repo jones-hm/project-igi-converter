@@ -365,18 +365,39 @@ bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
             "[MefExporter] Cannot write sidecar: " + sidecarPath);
         return false;
     }
-    f.write("SIDX", 4);
-    SidecarWriteU32(f, 1u);  // version
-    SidecarWriteU32(f, static_cast<uint32_t>(chunks.size()));
-    const uint8_t pad4[4] = {0,0,0,0};
+
+    auto WriteTag = [](std::ofstream& s, const char* t) { s.write(t, 4); };
+    auto WriteU32 = [](std::ofstream& s, uint32_t v) { s.write(reinterpret_cast<const char*>(&v), 4); };
+
+    uint32_t fileSize = 20;
     for (const auto& rc : chunks) {
-        f.write(rc.fourcc, 4);
-        const uint32_t sz = static_cast<uint32_t>(rc.data.size());
-        SidecarWriteU32(f, sz);
-        if (sz > 0) f.write(reinterpret_cast<const char*>(rc.data.data()), sz);
-        const uint32_t rem = (4 - (sz % 4)) % 4;
-        if (rem) f.write(reinterpret_cast<const char*>(pad4), rem);
+        uint32_t sz = static_cast<uint32_t>(rc.data.size());
+        uint32_t rem = (4 - (sz % 4)) % 4;
+        fileSize += 16 + sz + rem;
     }
+
+    WriteTag(f, "ILFF");
+    WriteU32(f, fileSize);
+    WriteU32(f, 4u);
+    WriteU32(f, 0u);
+    WriteTag(f, "OCEM");
+
+    const uint8_t pad4[4] = {0,0,0,0};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const auto& rc = chunks[i];
+        const bool isLast = (i == chunks.size() - 1);
+        uint32_t sz = static_cast<uint32_t>(rc.data.size());
+        uint32_t rem = (4 - (sz % 4)) % 4;
+        uint32_t skip = isLast ? 0u : (16u + sz + rem);
+
+        WriteTag(f, rc.fourcc);
+        WriteU32(f, skip);
+        WriteU32(f, sz);
+        WriteU32(f, 0u);
+        if (sz > 0) f.write(reinterpret_cast<const char*>(rc.data.data()), sz);
+        if (rem > 0) f.write(reinterpret_cast<const char*>(pad4), rem);
+    }
+    
     Logger::Get().Log(LogLevel::INFO,
         "[MefExporter] Sidecar written: " + sidecarPath +
         " (" + std::to_string(chunks.size()) + " chunks)");
@@ -384,36 +405,16 @@ bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
 }
 
 std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string& sidecarPath) {
-    std::vector<ParsedGeometry::RawChunk> result;
-    std::ifstream f(sidecarPath, std::ios::binary);
-    if (!f.is_open()) return result;
-
-    char magic[4];
-    f.read(magic, 4);
-    if (std::memcmp(magic, "SIDX", 4) != 0) return result;
-
-    uint32_t version = 0, numChunks = 0;
-    f.read(reinterpret_cast<char*>(&version), 4);
-    f.read(reinterpret_cast<char*>(&numChunks), 4);
-
-    result.reserve(numChunks);
-    for (uint32_t i = 0; i < numChunks; ++i) {
-        ParsedGeometry::RawChunk rc;
-        f.read(rc.fourcc, 4);
-        uint32_t sz = 0;
-        f.read(reinterpret_cast<char*>(&sz), 4);
-        if (sz > 0) {
-            rc.data.resize(sz);
-            f.read(reinterpret_cast<char*>(rc.data.data()), sz);
-        }
-        const uint32_t rem = (4 - (sz % 4)) % 4;
-        if (rem) f.seekg(rem, std::ios::cur);
-        result.push_back(std::move(rc));
+    try {
+        ParsedGeometry geo = ParseMefFile(sidecarPath);
+        Logger::Get().Log(LogLevel::INFO,
+            "[MefExporter] Sidecar read: " + sidecarPath +
+            " (" + std::to_string(geo.rawChunks.size()) + " chunks)");
+        return geo.rawChunks;
+    } catch (...) {
+        return {};
     }
-    Logger::Get().Log(LogLevel::INFO,
-        "[MefExporter] Sidecar read: " + sidecarPath +
-        " (" + std::to_string(result.size()) + " chunks)");
-    return result;
 }
+
 
 } // namespace MefExporter
