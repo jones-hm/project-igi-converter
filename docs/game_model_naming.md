@@ -16,7 +16,7 @@ MEF model filenames follow the pattern `aaa_bb_c.mef` where each component has a
 
 The `c` value is a Level of Detail index. The engine loads the base model (`c=1`) and substitutes lower-detail versions at increasing distances, as defined by `ModelLODSettings` in objects.qsc (LOD 2 through LOD 5 plus a cutoff distance).
 
-Not all models have 5 LOD levels -- some only have `c=1`, while others go up to `c=5`. File sizes decrease with higher `c` values (median ratio of lowest to highest LOD is ~0.16).
+Not all models have 5 LOD levels -- some only have `c=1`, while others go up to `c=5`. Type 1 character models (skeletal/animated characters) always have exactly 5 LOD levels (`_1` through `_5`), whereas other types vary. File sizes decrease with higher `c` values (median ratio of lowest to highest LOD is ~0.16).
 
 Example -- `940_01` (tall pine tree):
 

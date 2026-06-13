@@ -17,7 +17,7 @@
 //   4 = write error
 
 #ifndef IGI1CONV_VERSION
-#define IGI1CONV_VERSION "1.6.0"
+#define IGI1CONV_VERSION "1.7.0"
 #endif
 
 static void print_help()
@@ -83,6 +83,7 @@ int main(int argc, char** argv)
 
     if (cmd == "tex")     return cmd_tex(sub_argc, sub_argv);
     if (cmd == "mef")     return cmd_mef(sub_argc, sub_argv);
+    if (cmd == "mex")     return cmd_mef(sub_argc, sub_argv);
     if (cmd == "qsc")     return cmd_qsc(sub_argc, sub_argv);
     if (cmd == "qvm")     return cmd_qvm(sub_argc, sub_argv);
     if (cmd == "res")     return cmd_res(sub_argc, sub_argv);

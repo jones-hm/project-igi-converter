@@ -4,6 +4,32 @@
 
 using namespace igi1conv_test;
 
+namespace {
+
+void RemoveLastFunctionLine(const std::string& path, const std::string& prefix) {
+    std::ifstream in(path);
+    ASSERT_TRUE(in.is_open()) << "failed to open text MEF: " << path;
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line))
+        lines.push_back(line);
+    in.close();
+
+    auto it = std::find_if(lines.rbegin(), lines.rend(), [&prefix](const std::string& s) {
+        return s.rfind(prefix, 0) == 0;
+    });
+    ASSERT_NE(it, lines.rend()) << "text MEF has no " << prefix << " lines: " << path;
+    lines.erase(std::next(it).base());
+
+    std::ofstream out(path, std::ios::trunc);
+    ASSERT_TRUE(out.is_open()) << "failed to rewrite text MEF: " << path;
+    for (const auto& s : lines)
+        out << s << "\n";
+}
+
+} // namespace
+
 // ─── round-trips ─────────────────────────────────────────────────────────────
 
 // QVM -> QSC -> QVM: decompiled source must recompile cleanly.
@@ -58,18 +84,100 @@ TEST_F(IGI1ConvTest, RoundtripTexTgaPng) {
     EXPECT_TRUE(NonEmptyFile(png));
 }
 
+// ─── MEF text/binary round-trips ─────────────────────────────────────────────
+
+// Binary MEF -> Text MEF: to-text must produce a non-empty text file.
+TEST_F(IGI1ConvTest, MefBinaryToText) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt = tmp / "model.mef.txt";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+
+    // Output must start with NewObject(
+    std::ifstream f(txt);
+    std::string firstLine;
+    std::getline(f, firstLine);
+    EXPECT_NE(firstLine.find("NewObject"), std::string::npos)
+        << "Expected text MEF to start with NewObject, got: " << firstLine;
+}
+
+// Binary MEF -> Text MEF -> Binary MEF: compiled output must be parseable.
+TEST_F(IGI1ConvTest, RoundtripMefBinaryTextBinary) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_recompiled.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+
+    ASSERT_EQ(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2)), 0);
+    ASSERT_TRUE(NonEmptyFile(mef2));
+
+    // Compiled binary must have ILFF magic
+    std::ifstream f(mef2, std::ios::binary);
+    char magic[4] = {0};
+    f.read(magic, 4);
+    EXPECT_EQ(std::string(magic, 4), "ILFF")
+        << "Compiled MEF must start with ILFF magic";
+
+    // Compiled binary must be parseable (mef info returns 0)
+    EXPECT_EQ(RunIGI1Conv("mef info " + Q(mef2)), 0);
+}
+
+// Sidecar compile preserves raw DNER/D3DR/PMTL topology. Vertex and UV edits are
+// supported, but face topology edits must be rejected instead of producing a
+// binary whose text-derived HSEM counts disagree with preserved DNER data.
+TEST_F(IGI1ConvTest, MefSidecarCompileRejectsFaceTopologyEdits) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_topology_changed.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+    std::string mex = txt.substr(0, txt.find_last_of(".")) + ".mex";
+    ASSERT_TRUE(NonEmptyFile(mex));
+
+    RemoveLastFunctionLine(txt, "Face(");
+
+    std::string out;
+    EXPECT_NE(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2), &out), 0)
+        << "sidecar compile must reject Face() topology edits; output:\n" << out;
+}
+
+TEST_F(IGI1ConvTest, MefSidecarCompileRejectsVertexCountEdits) {
+    IGI1CONV_NEED(mef, "\\.mef$");
+    TempDir tmp;
+    std::string txt  = tmp / "model.mef.txt";
+    std::string mef2 = tmp / "model_vertex_count_changed.mef";
+
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(mef) + " -o " + Q(txt)), 0);
+    ASSERT_TRUE(NonEmptyFile(txt));
+    std::string mex = txt.substr(0, txt.find_last_of(".")) + ".mex";
+    ASSERT_TRUE(NonEmptyFile(mex));
+
+    RemoveLastFunctionLine(txt, "Vertex(");
+
+    std::string out;
+    EXPECT_NE(RunIGI1Conv("mef compile " + Q(txt) + " -o " + Q(mef2), &out), 0)
+        << "sidecar compile must reject Vertex() count edits; output:\n" << out;
+}
+
 // ─── version reporting (regression: used to print 3.0) ───────────────────────
 
 TEST_F(IGI1ConvTest, VersionFlagReportsOneZeroZero) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--version", &out), 0);
-    EXPECT_NE(out.find("1.6.0"), std::string::npos) << "got: " << out;
+    EXPECT_NE(out.find("1.7.0"), std::string::npos) << "got: " << out;
 }
 
 TEST_F(IGI1ConvTest, HelpReportsOneZeroZero) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--help", &out), 0);
-    EXPECT_NE(out.find("v1.6.0"), std::string::npos) << "got: " << out;
+    EXPECT_NE(out.find("v1.7.0"), std::string::npos) << "got: " << out;
 }
 
 // ─── error handling ──────────────────────────────────────────────────────────

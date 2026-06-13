@@ -103,14 +103,31 @@ std::vector<ChunkInfo> ParseIlffChunks(const std::vector<uint8_t>& bytes, const 
     std::vector<ChunkInfo> chunks;
     size_t pos = kIlffHeaderSize;
 
+    // Detect chunk header layout from first chunk:
+    //   New (MEF) format: FourCC | size | align=4 | skip
+    //   Old (MEX) format: FourCC | skip | size    | 0
+    // The alignment field in new format is always 4; old format has the data
+    // size there instead, which is never 4 for any real game chunk.
+    const uint32_t firstField8 = ReadValue<uint32_t>(bytes, pos + 8);
+    const bool isOldFormat = (firstField8 != 4);
+
     while (pos + kChunkHeaderSize <= bytes.size()) {
         ChunkInfo chunk;
         chunk.start = pos;
         chunk.name.assign(reinterpret_cast<const char*>(bytes.data() + pos), 4);
-        chunk.size  = ReadValue<uint32_t>(bytes, pos + 4);
-        chunk.align = ReadValue<uint32_t>(bytes, pos + 8);
-        chunk.skip  = ReadValue<uint32_t>(bytes, pos + 12);
-        chunk.data  = pos + kChunkHeaderSize;
+
+        if (isOldFormat) {
+            // Old MEX format: FourCC | skip | size | 0
+            chunk.skip  = ReadValue<uint32_t>(bytes, pos + 4);
+            chunk.size  = ReadValue<uint32_t>(bytes, pos + 8);
+            chunk.align = 4;
+        } else {
+            // New MEF format: FourCC | size | align | skip
+            chunk.size  = ReadValue<uint32_t>(bytes, pos + 4);
+            chunk.align = ReadValue<uint32_t>(bytes, pos + 8);
+            chunk.skip  = ReadValue<uint32_t>(bytes, pos + 12);
+        }
+        chunk.data = pos + kChunkHeaderSize;
 
         if (chunk.data + chunk.size > bytes.size()) {
             throw std::runtime_error("MEF chunk exceeds file bounds in: " + filepath);
@@ -1044,6 +1061,17 @@ ParsedGeometry ParseMefGeometry(const std::vector<uint8_t>& bytes, const std::ve
 ParsedGeometry ParseMefFile(const std::string& filepath) {
     const std::vector<uint8_t> bytes  = ReadWholeFile(filepath);
     const std::vector<ChunkInfo> chunks = ParseIlffChunks(bytes, filepath);
-    return ParseMefGeometry(bytes, chunks, filepath);
+    ParsedGeometry geo = ParseMefGeometry(bytes, chunks, filepath);
+
+    // Store all chunks verbatim so round-trip via sidecar is lossless.
+    geo.rawChunks.reserve(chunks.size());
+    for (const auto& ci : chunks) {
+        ParsedGeometry::RawChunk rc;
+        std::memcpy(rc.fourcc, ci.name.c_str(), 4);
+        if (ci.size > 0)
+            rc.data.assign(bytes.begin() + ci.data, bytes.begin() + ci.data + ci.size);
+        geo.rawChunks.push_back(std::move(rc));
+    }
+    return geo;
 }
 
