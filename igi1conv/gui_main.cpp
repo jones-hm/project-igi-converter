@@ -249,7 +249,7 @@ public:
                             const auto& v = geo.vertices[idx];
                             glm::vec3 p = hasRawPos ? v.rawPos : (v.pos * 40.96f);
                             QVector4D tp = transform * QVector4D(p.x, p.y, p.z, 1.0f);
-                            vertices.push_back(tp.x()); vertices.push_back(tp.y()); vertices.push_back(tp.z());
+                            vertices.push_back(tp.x() / 40.96f); vertices.push_back(tp.y() / 40.96f); vertices.push_back(tp.z() / 40.96f);
                             
                             QVector4D tn = transform * QVector4D(v.normal.x, v.normal.y, v.normal.z, 0.0f);
                             QVector3D norm(tn.x(), tn.y(), tn.z());
