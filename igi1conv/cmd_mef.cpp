@@ -14,8 +14,8 @@ static void print_mef_help()
         "Usage: igi1conv mef <subcommand> [options]\n"
         "\n"
         "Subcommands:\n"
-        "  export  <input.mef> -o <output.obj>\n"
-        "  export  <folder/> -o <output_dir> --batch\n"
+        "  export  <input.mef|mex> -o <output.obj> [--dat <file.dat> --texdir <dir>]\n"
+        "  export  <folder/> -o <output_dir> --batch [--dat <file.dat> --texdir <dir>]\n"
         "  dump    <input.mef> [-o <output.txt>]\n"
         "  info    <input.mef>\n"
         "  bundle  <input.mef> -o <outdir> --dat <file.dat> --texdir <dir>\n"
@@ -26,7 +26,8 @@ static void print_mef_help()
         "Exit codes: 0=success 1=bad args 2=file not found 3=parse error 4=write error\n";
 }
 
-static int do_mef_export(const std::string& input, const std::string& outpath)
+static int do_mef_export(const std::string& input, const std::string& outpath,
+                         const std::string& datPath = {}, const std::string& texDir = {})
 {
     if (!fs::exists(input))
     {
@@ -51,9 +52,25 @@ static int do_mef_export(const std::string& input, const std::string& outpath)
             std::cerr << "mef: parse error: " << e.what() << "\n";
             return 3;
         }
-        if (!MefExporter::ExportToObj(geo, outpath)) {
-            std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
-            return 4;
+
+        // When --dat/--texdir are provided, use bundle export (DAT+TEX → TGA)
+        if (!datPath.empty() || !texDir.empty())
+        {
+            fs::path objPath(outpath);
+            std::string stem   = objPath.stem().string();
+            std::string outDir = objPath.parent_path().string();
+            if (outDir.empty()) outDir = ".";
+            if (!MefExporter::ExportToObjBundle(geo, stem, outDir, datPath, texDir)) {
+                std::cerr << "mef: failed to write OBJ bundle: " << outpath << "\n";
+                return 4;
+            }
+        }
+        else
+        {
+            if (!MefExporter::ExportToObj(geo, outpath)) {
+                std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
+                return 4;
+            }
         }
     }
     else
@@ -433,14 +450,13 @@ int cmd_mef(int argc, char** argv)
             return 1;
         }
 
-        std::string outpath;
+        std::string outpath, datPath, texDir;
         for (int i = 3; i < argc - 1; ++i)
         {
-            if (std::string(argv[i]) == "-o")
-            {
-                outpath = argv[i + 1];
-                break;
-            }
+            std::string a = argv[i];
+            if (a == "-o")        { outpath = argv[i + 1]; ++i; }
+            else if (a == "--dat")    { datPath = argv[i + 1]; ++i; }
+            else if (a == "--texdir") { texDir  = argv[i + 1]; ++i; }
         }
         if (outpath.empty())
         {
@@ -451,11 +467,7 @@ int cmd_mef(int argc, char** argv)
         bool batch = false;
         for (int i = 3; i < argc; ++i)
         {
-            if (std::string(argv[i]) == "--batch")
-            {
-                batch = true;
-                break;
-            }
+            if (std::string(argv[i]) == "--batch") { batch = true; break; }
         }
 
         std::string input = argv[2];
@@ -485,12 +497,12 @@ int cmd_mef(int argc, char** argv)
                 if (!entry.is_regular_file()) continue;
                 std::string ext = entry.path().extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext != ".mef") continue;
+                if (ext != ".mef" && ext != ".mex") continue;
 
                 std::string stem = entry.path().stem().string();
                 std::string obj_out = (fs::path(outpath) / (stem + ".obj")).string();
 
-                int rc = do_mef_export(entry.path().string(), obj_out);
+                int rc = do_mef_export(entry.path().string(), obj_out, datPath, texDir);
                 if (rc != 0)
                 {
                     std::cerr << "mef: error processing " << entry.path().filename().string() << " (rc=" << rc << ")\n";
@@ -501,7 +513,7 @@ int cmd_mef(int argc, char** argv)
         }
         else
         {
-            return do_mef_export(input, outpath);
+            return do_mef_export(input, outpath, datPath, texDir);
         }
     }
 
