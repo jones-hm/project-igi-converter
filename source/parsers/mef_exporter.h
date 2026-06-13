@@ -7,7 +7,7 @@
 namespace MefExporter {
 
 // Export to OBJ + sibling MTL (placeholder texture names mat_N.tga).
-bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath);
+bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath, const std::string &datPath = "");
 
 // Export text-format MEFObjects (from MEFParser) to OBJ + MTL.
 // Uses DiffuseTMap paths from materials when available.

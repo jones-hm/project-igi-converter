@@ -90,7 +90,7 @@ void WriteMtlBody(std::ostream &m, const ParsedGeometry &geometry,
 
 namespace MefExporter {
 
-bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath) {
+bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath, const std::string &datPath) {
   // Derive MTL filename (same stem as OBJ)
   auto sepPos = outpath.find_last_of("/\\");
   std::string filename =
@@ -115,6 +115,17 @@ bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath) {
   // Placeholder texture names (pmtlTextures populated if DAT data was injected)
   std::vector<std::string> texNames(geometry.pmtlTextures.begin(),
                                     geometry.pmtlTextures.end());
+  
+  if (!datPath.empty() && texNames.empty()) {
+    DATFile dat = DAT_Parse(datPath);
+    for (const auto &entry : dat.models) {
+      if (entry.modelName == stem || entry.modelName.find(stem) != std::string::npos) {
+        texNames = entry.textures;
+        for (auto& t : texNames) t += ".tga";
+        break;
+      }
+    }
+  }
   std::ofstream m(mtlPath);
   if (m.is_open()) {
     WriteMtlBody(m, geometry, texNames);

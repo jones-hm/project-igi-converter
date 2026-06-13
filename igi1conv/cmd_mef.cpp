@@ -53,24 +53,9 @@ static int do_mef_export(const std::string& input, const std::string& outpath,
             return 3;
         }
 
-        // When --dat/--texdir are provided, use bundle export (DAT+TEX → TGA)
-        if (!datPath.empty() || !texDir.empty())
-        {
-            fs::path objPath(outpath);
-            std::string stem   = objPath.stem().string();
-            std::string outDir = objPath.parent_path().string();
-            if (outDir.empty()) outDir = ".";
-            if (!MefExporter::ExportToObjBundle(geo, stem, outDir, datPath, texDir)) {
-                std::cerr << "mef: failed to write OBJ bundle: " << outpath << "\n";
-                return 4;
-            }
-        }
-        else
-        {
-            if (!MefExporter::ExportToObj(geo, outpath)) {
-                std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
-                return 4;
-            }
+        if (!MefExporter::ExportToObj(geo, outpath, datPath)) {
+            std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
+            return 4;
         }
     }
     else
@@ -146,6 +131,14 @@ static int do_mef_dump(const std::string& input, const std::string& outpath)
             out << "  ATTA[" << i << "] bone=" << atta.boneId << " offset=(" 
                 << atta.pos.x << ", " << atta.pos.y << ", " << atta.pos.z << ") "
                 << "name=\"" << atta.name << "\"\n";
+        }
+
+        if (!geo.rawChunks.empty()) {
+            out << "\nchunks: " << geo.rawChunks.size() << "\n";
+            for (const auto& rc : geo.rawChunks) {
+                std::string cc(rc.fourcc, 4);
+                out << "  " << cc << " (size: " << rc.data.size() << ")\n";
+            }
         }
         return 0;
     }

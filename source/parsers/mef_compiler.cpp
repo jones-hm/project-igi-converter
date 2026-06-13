@@ -608,9 +608,10 @@ static bool CompileWithSidecar(const MEFObject& obj,
             oc.data = &newXtrv;
         else if (rc.isTag("DNER"))
             oc.data = &newDner;
-        else if (rc.isTag("ATTA"))
+        else if (rc.isTag("ATTA")) {
+            if (newAtta.empty()) continue;
             oc.data = &newAtta;
-        else
+        } else
             oc.data = &rc.data;
         outChunks.push_back(oc);
     }

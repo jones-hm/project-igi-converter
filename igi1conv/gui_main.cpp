@@ -1393,6 +1393,17 @@ public:
         modelSearchBox->setStyleSheet("background:#333;color:#eee;border:1px solid #555;border-radius:3px;padding:2px 6px;font-family:Consolas;font-size:11px;");
         searchToolBar->addWidget(modelSearchBox);
         
+        QPushButton* btnRefresh = new QPushButton("Refresh");
+        btnRefresh->setStyleSheet("background:#444;color:#eee;border:1px solid #555;border-radius:3px;padding:2px 8px;font-size:11px;");
+        searchToolBar->addWidget(btnRefresh);
+        connect(btnRefresh, &QPushButton::clicked, this, [this]() {
+            if (this->fileModel) {
+                QString currentPath = this->fileModel->rootPath();
+                this->fileModel->setRootPath("");
+                this->fileModel->setRootPath(currentPath);
+            }
+        });
+        
         QLabel* modelSearchResult = new QLabel("  Type to search...");
         modelSearchResult->setStyleSheet("color:#888;font-size:11px;font-family:Consolas;min-width:300px;");
         searchToolBar->addWidget(modelSearchResult);
@@ -2320,7 +2331,11 @@ private:
 
                 QMenu* exportMenu = menu.addMenu("Export");
                 exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export"); });
-                exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                if (ext == "mef") {
+                    exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                } else {
+                    exportMenu->addAction("Export to Mex(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                }
 
                 if (ext == "mef") {
 
@@ -2712,8 +2727,13 @@ private:
         } else if (cmd == "mef to-text" || cmd == "mex to-text") {
             QString outTxt = currentFile;
             args.clear();
-            args << "mef" << "to-text" << currentFile << "-o" << outTxt;
-            logMessage(QString("[INFO] Exporting text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+            if (cmd == "mex to-text") {
+                args << "mef" << "dump" << currentFile << "-o" << outTxt;
+                logMessage(QString("[INFO] Dumping MEX text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+            } else {
+                args << "mef" << "to-text" << currentFile << "-o" << outTxt;
+                logMessage(QString("[INFO] Exporting text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+            }
         } else if (cmd == "mef compile-text" || cmd == "mex compile-text") {
             QString outBin = currentFile;
             args.clear();
