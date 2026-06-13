@@ -24,6 +24,15 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
                        const std::string &texDir,
                        bool skipObj = false);
 
+// Export a pre-merged geometry to a bundle folder using already-resolved texNames.
+// texNames[N] is the filename of the TGA for material slot N (already written to bundleDir).
+// Writes OBJ + MTL only; the caller is responsible for texture files.
+bool ExportMergedToObjBundle(const ParsedGeometry &geometry,
+                              const std::string &modelStem,
+                              const std::string &outDir,
+                              const std::vector<std::string> &texNames,
+                              bool skipObj = false);
+
 // Export binary ParsedGeometry to text-based MEF format (parsed by MEFParser).
 bool ExportToMefAscii(const ParsedGeometry &geometry,
                       const std::string &outpath);

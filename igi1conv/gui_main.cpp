@@ -235,6 +235,7 @@ public:
         for (const auto& v : geo.vertices) {
             if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
         }
+        bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
 
         for (const auto& block : geo.renderBlocks) {
             SubMesh sm;
@@ -247,16 +248,17 @@ public:
                     auto addVert = [&](uint32_t idx) {
                         if (idx < geo.vertices.size()) {
                             const auto& v = geo.vertices[idx];
-                            glm::vec3 p = hasRawPos ? v.rawPos : (v.pos * 40.96f);
+                            // Bone models (type1): use v.pos which has bone world offsets baked in.
+                            // Other XTRV models: use rawPos (raw game units). Collision fallback: v.pos * 40.96f.
+                            glm::vec3 p = (isBoneModel || !hasRawPos) ? (v.pos * 40.96f) : v.rawPos;
                             QVector4D tp = transform * QVector4D(p.x, p.y, p.z, 1.0f);
                             vertices.push_back(tp.x() / 40.96f); vertices.push_back(tp.y() / 40.96f); vertices.push_back(tp.z() / 40.96f);
-                            
+
                             QVector4D tn = transform * QVector4D(v.normal.x, v.normal.y, v.normal.z, 0.0f);
                             QVector3D norm(tn.x(), tn.y(), tn.z());
                             norm.normalize();
                             normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
-                            
-                            bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
+
                             uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
@@ -277,9 +279,9 @@ public:
 
         for (const auto& atta : geo.mefAttachments) {
             QMatrix4x4 aMat(
-                atta.r00, atta.r03, atta.r06, atta.px,
-                atta.r01, atta.r04, atta.r07, atta.py,
-                atta.r02, atta.r05, atta.r08, atta.pz,
+                atta.r00, atta.r01, atta.r02, atta.px,
+                atta.r03, atta.r04, atta.r05, atta.py,
+                atta.r06, atta.r07, atta.r08, atta.pz,
                 0.0f,     0.0f,     0.0f,     1.0f
             );
             QMatrix4x4 childTransform = transform * aMat;
@@ -2793,6 +2795,8 @@ private:
             QString outFolder = QFileDialog::getExistingDirectory(this, "Select Output Folder for Rigid Model", outDir);
             if (outFolder.isEmpty()) return;
             args << currentFile << "-o" << (outFolder + "/" + baseName + ".mef");
+            if (!globalLevelDatPath.isEmpty()) args << "--dat" << globalLevelDatPath;
+            if (!globalTextureDir.isEmpty())   args << "--texdir" << globalTextureDir;
         } else {
             args << currentFile;
             if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");

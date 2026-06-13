@@ -232,6 +232,44 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
   return true;
 }
 
+bool ExportMergedToObjBundle(const ParsedGeometry &geometry,
+                              const std::string &modelStem,
+                              const std::string &outDir,
+                              const std::vector<std::string> &texNames,
+                              bool skipObj) {
+  namespace fs = std::filesystem;
+  fs::path bundleDir = fs::path(outDir) / modelStem;
+  std::error_code ec;
+  fs::create_directories(bundleDir, ec);
+  if (ec) {
+    Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot create bundle dir: " + bundleDir.string());
+    return false;
+  }
+
+  if (!skipObj) {
+    std::string objPath = (bundleDir / (modelStem + ".obj")).string();
+    std::ofstream f(objPath);
+    if (!f.is_open()) {
+      Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot open OBJ: " + objPath);
+      return false;
+    }
+    WriteObjBody(f, geometry, modelStem + ".mtl");
+    f.close();
+  }
+
+  std::string mtlPath = (bundleDir / (modelStem + ".mtl")).string();
+  std::ofstream m(mtlPath);
+  if (!m.is_open()) {
+    Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot open MTL: " + mtlPath);
+    return false;
+  }
+  WriteMtlBody(m, geometry, texNames);
+  m.close();
+
+  Logger::Get().Log(LogLevel::INFO, "[MefExporter] Merged bundle exported to: " + bundleDir.string());
+  return true;
+}
+
 bool ExportToMefAscii(const ParsedGeometry &geometry,
                       const std::string &outpath) {
   std::ofstream f(outpath);
