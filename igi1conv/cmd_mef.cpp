@@ -355,9 +355,13 @@ static void MergeGeometryRecursive(ParsedGeometry& baseGeo, const std::string& c
         std::string dir = fs::path(currentPath).parent_path().string();
         std::string path1 = dir + "/" + childName + ".mef";
         std::string path2 = dir + "/" + childName + ".MEF";
-        
-        if (fs::exists(path1)) MergeGeometryRecursive(baseGeo, path1, childTransform, visited);
+        std::string path3 = dir + "/" + childName + ".mex";
+        std::string path4 = dir + "/" + childName + ".MEX";
+
+        if      (fs::exists(path1)) MergeGeometryRecursive(baseGeo, path1, childTransform, visited);
         else if (fs::exists(path2)) MergeGeometryRecursive(baseGeo, path2, childTransform, visited);
+        else if (fs::exists(path3)) MergeGeometryRecursive(baseGeo, path3, childTransform, visited);
+        else if (fs::exists(path4)) MergeGeometryRecursive(baseGeo, path4, childTransform, visited);
     }
 }
 
