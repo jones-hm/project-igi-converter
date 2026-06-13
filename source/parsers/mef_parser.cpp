@@ -58,6 +58,14 @@ std::vector<MEFObject> MEFParser::parse_string(const std::string& content) {
                 handle_bonevertex(args);
             } else if (name == "Attachment") {
                 handle_attachment(args);
+            } else if (name == "DiffuseTMap") {
+                handle_diffusetmap(args);
+            } else if (name == "OpacityTMap") {
+                handle_opacitytmap(args);
+            } else if (name == "BumpTMap") {
+                handle_bumptmap(args);
+            } else if (name == "ReflectionTMap") {
+                handle_reflectiontmap(args);
             } else {
                 // Unknown command, ignore
             }
@@ -337,4 +345,47 @@ void MEFParser::handle_attachment(const std::vector<std::string>& args) {
     
     try { a.boneId = std::stoi(args[13]); } catch (...) { a.boneId = -1; }
     m_current_object.attachments.push_back(a);
+}
+
+// Helper: extract texture path from DiffuseTMap/etc. args
+// Args: matIndex, "path", mode, flags  (path may be bare or quoted)
+static std::string ExtractTmapPath(const std::vector<std::string>& args) {
+    if (args.size() < 2) return {};
+    std::string path = args[1];
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
+        path = path.substr(1, path.size() - 2);
+    return path;
+}
+
+static MEFMaterial* FindMaterial(MEFObject& obj, const std::vector<std::string>& args) {
+    if (args.empty() || obj.materials.empty()) return nullptr;
+    int idx = 0;
+    try { idx = std::stoi(args[0]); } catch (...) {}
+    for (auto& mat : obj.materials)
+        if (mat.index == idx) return &mat;
+    return nullptr;
+}
+
+void MEFParser::handle_diffusetmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->diffuse_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_opacitytmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->opacity_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_bumptmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->bump_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_reflectiontmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->reflection_tmap = ExtractTmapPath(args);
 }

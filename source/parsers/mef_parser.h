@@ -15,6 +15,11 @@ struct MEFMaterial {
     std::array<float, 3> emissive = {0.0f, 0.0f, 0.0f};
     float shininess = 0.0f;
     bool has_collision = false;
+    // Texture maps (from DiffuseTMap/OpacityTMap/etc. in gconv format)
+    std::string diffuse_tmap;
+    std::string opacity_tmap;
+    std::string bump_tmap;
+    std::string reflection_tmap;
 };
 
 struct MEFFace {
@@ -74,6 +79,10 @@ private:
     void handle_modeltype(const std::vector<std::string>& args);
     void handle_bonevertex(const std::vector<std::string>& args);
     void handle_attachment(const std::vector<std::string>& args);
+    void handle_diffusetmap(const std::vector<std::string>& args);
+    void handle_opacitytmap(const std::vector<std::string>& args);
+    void handle_bumptmap(const std::vector<std::string>& args);
+    void handle_reflectiontmap(const std::vector<std::string>& args);
 
     std::vector<MEFObject> m_objects;
     MEFObject m_current_object;

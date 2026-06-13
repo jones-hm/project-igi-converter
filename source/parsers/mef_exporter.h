@@ -1,11 +1,18 @@
 #pragma once
 #include "mef_native.h"
+#include "mef_parser.h"
 #include <string>
+#include <vector>
 
 namespace MefExporter {
 
 // Export to OBJ + sibling MTL (placeholder texture names mat_N.tga).
 bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath);
+
+// Export text-format MEFObjects (from MEFParser) to OBJ + MTL.
+// Uses DiffuseTMap paths from materials when available.
+bool ExportTextMefToObj(const std::vector<MEFObject> &objects,
+                        const std::string &outpath);
 
 // Export to a self-contained bundle folder: outDir/modelStem/{modelStem.obj,
 // modelStem.mtl, mat_0.tga … mat_N.tga}.  Resolves real texture names from

@@ -34,21 +34,45 @@ static int do_mef_export(const std::string& input, const std::string& outpath)
         return 2;
     }
 
-    ParsedGeometry geo;
-    try
+    // Detect binary vs text format
+    bool isBinary = false;
     {
-        geo = ParseMefFile(input);
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "mef: parse error: " << e.what() << "\n";
-        return 3;
+        std::ifstream probe(input, std::ios::binary);
+        char magic[4] = {0};
+        probe.read(magic, 4);
+        isBinary = (std::memcmp(magic, "ILFF", 4) == 0);
     }
 
-    if (!MefExporter::ExportToObj(geo, outpath))
+    if (isBinary)
     {
-        std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
-        return 4;
+        ParsedGeometry geo;
+        try { geo = ParseMefFile(input); }
+        catch (const std::exception& e) {
+            std::cerr << "mef: parse error: " << e.what() << "\n";
+            return 3;
+        }
+        if (!MefExporter::ExportToObj(geo, outpath)) {
+            std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
+            return 4;
+        }
+    }
+    else
+    {
+        MEFParser parser;
+        std::vector<MEFObject> objects;
+        try { objects = parser.parse_file(input); }
+        catch (const std::exception& e) {
+            std::cerr << "mef: parse error: " << e.what() << "\n";
+            return 3;
+        }
+        if (objects.empty() || objects[0].faces.empty()) {
+            std::cerr << "mef: text MEF has no geometry\n";
+            return 3;
+        }
+        if (!MefExporter::ExportTextMefToObj(objects, outpath)) {
+            std::cerr << "mef: failed to write OBJ: " << outpath << "\n";
+            return 4;
+        }
     }
 
     std::cout << "mef: exported to " << outpath << "\n";

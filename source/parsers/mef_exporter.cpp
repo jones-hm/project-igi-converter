@@ -391,9 +391,9 @@ bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
         uint32_t skip = isLast ? 0u : (16u + sz + rem);
 
         WriteTag(f, rc.fourcc);
-        WriteU32(f, skip);
         WriteU32(f, sz);
-        WriteU32(f, 0u);
+        WriteU32(f, 4u);
+        WriteU32(f, skip);
         if (sz > 0) f.write(reinterpret_cast<const char*>(rc.data.data()), sz);
         if (rem > 0) f.write(reinterpret_cast<const char*>(pad4), rem);
     }
@@ -416,5 +416,128 @@ std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string& sidecarP
     }
 }
 
+
+bool ExportTextMefToObj(const std::vector<MEFObject>& objects,
+                        const std::string& outpath) {
+  namespace fs = std::filesystem;
+
+  if (objects.empty()) return false;
+
+  // Derive MTL path from OBJ path
+  fs::path objPath(outpath);
+  std::string stem = objPath.stem().string();
+  std::string mtlFilename = stem + ".mtl";
+  fs::path mtlPath = objPath.parent_path() / mtlFilename;
+
+  // --- Write MTL ---
+  std::ofstream m(mtlPath.string());
+  if (!m.is_open()) {
+    Logger::Get().Log(LogLevel::ERR,
+                      "[MefExporter] Failed to open MTL: " + mtlPath.string());
+    return false;
+  }
+  m << "# MEF Text -> MTL Export\n";
+  for (const auto& obj : objects) {
+    for (const auto& mat : obj.materials) {
+      if (mat.has_collision) continue;
+      m << "\nnewmtl " << mat.name << "\n";
+      m << std::fixed << std::setprecision(6);
+      m << "Kd " << mat.diffuse[0] << " " << mat.diffuse[1] << " " << mat.diffuse[2] << "\n";
+      m << "Ka " << mat.ambient[0] << " " << mat.ambient[1] << " " << mat.ambient[2] << "\n";
+      m << "Ks " << mat.specular[0] << " " << mat.specular[1] << " " << mat.specular[2] << "\n";
+      if (!mat.diffuse_tmap.empty())
+        m << "map_Kd " << mat.diffuse_tmap << "\n";
+      if (!mat.opacity_tmap.empty())
+        m << "map_d " << mat.opacity_tmap << "\n";
+      if (!mat.bump_tmap.empty())
+        m << "bump " << mat.bump_tmap << "\n";
+    }
+  }
+  m.close();
+
+  // --- Write OBJ ---
+  std::ofstream f(outpath);
+  if (!f.is_open()) {
+    Logger::Get().Log(LogLevel::ERR,
+                      "[MefExporter] Failed to open OBJ: " + outpath);
+    return false;
+  }
+  f << "# MEF Text -> OBJ Export\n";
+  f << "mtllib " << mtlFilename << "\n\n";
+  f << std::fixed << std::setprecision(6);
+
+  size_t vertOffset = 1;  // OBJ indices are 1-based
+  size_t normOffset = 1;
+  size_t uvOffset   = 1;
+
+  for (const auto& obj : objects) {
+    // Vertices
+    for (const auto& v : obj.vertices)
+      f << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+
+    // Normals
+    for (const auto& n : obj.normals)
+      f << "vn " << n[0] << " " << n[1] << " " << n[2] << "\n";
+
+    // UVs: one set of 3 (u,v) per face, stored as vt entries
+    // obj.uvs[i] = {u0,v0, u1,v1, u2,v2} for face i
+    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
+      if (fi < obj.uvs.size() && obj.uvs[fi].size() >= 6) {
+        const auto& uv = obj.uvs[fi];
+        f << "vt " << uv[0] << " " << (1.0f - uv[1]) << "\n";
+        f << "vt " << uv[2] << " " << (1.0f - uv[3]) << "\n";
+        f << "vt " << uv[4] << " " << (1.0f - uv[5]) << "\n";
+      } else {
+        f << "vt 0.0 0.0\nvt 0.0 0.0\nvt 0.0 0.0\n";
+      }
+    }
+
+    f << "\no " << obj.name << "\n";
+
+    // Find material by index helper
+    auto findMat = [&](int idx) -> const MEFMaterial* {
+      for (const auto& mat : obj.materials)
+        if (mat.index == idx) return &mat;
+      return obj.materials.empty() ? nullptr : &obj.materials[0];
+    };
+
+    int currentMat = -1;
+    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
+      const auto& face = obj.faces[fi];
+      if (face.material_index != currentMat) {
+        currentMat = face.material_index;
+        const auto* mat = findMat(currentMat);
+        if (mat) f << "usemtl " << mat->name << "\n";
+        else f << "usemtl mat_" << currentMat << "\n";
+      }
+      const size_t a  = face.v0 + vertOffset;
+      const size_t b  = face.v1 + vertOffset;
+      const size_t c  = face.v2 + vertOffset;
+      const size_t na = face.n0 + normOffset;
+      const size_t nb = face.n1 + normOffset;
+      const size_t nc = face.n2 + normOffset;
+      const size_t ta = fi * 3 + uvOffset;
+      const size_t tb = fi * 3 + uvOffset + 1;
+      const size_t tc = fi * 3 + uvOffset + 2;
+      if (!obj.normals.empty())
+        f << "f " << a << "/" << ta << "/" << na
+          << " " << b << "/" << tb << "/" << nb
+          << " " << c << "/" << tc << "/" << nc << "\n";
+      else
+        f << "f " << a << "/" << ta
+          << " " << b << "/" << tb
+          << " " << c << "/" << tc << "\n";
+    }
+
+    vertOffset += obj.vertices.size();
+    normOffset += obj.normals.size();
+    uvOffset   += obj.faces.size() * 3;
+  }
+  f.close();
+
+  Logger::Get().Log(LogLevel::INFO,
+                    "[MefExporter] Text MEF -> OBJ exported to: " + outpath);
+  return true;
+}
 
 } // namespace MefExporter
