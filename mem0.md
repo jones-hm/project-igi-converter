@@ -18,3 +18,11 @@
 ## Feature Request: GUI Export Obj tweaks
 **Description:** User requested to rename "Export to Obj" to "Export to OBJ+MTL+TGA" and have text MEF/MEX export prompt for a folder.
 **Resolution:** Updated gui_main.cpp to rename the export menu items to "Export to OBJ+MTL+TGA". Added `QFileDialog::getExistingDirectory` logic for text mef/mex exports so they ask for a folder, matching the binary export behavior. Built and ran Release version.
+
+## Bug ID: MEX-Lighting-Fix
+**Description:** When rotating objects in the 3D viewport, the lighting incorrectly shifted non-uniformly because the fragment shader was using a point light tied to FragPos which varied under object translation. Additionally, backfaces became pitch black due to single-sided lighting.
+**Resolution:** Replaced the point light with a fixed directional headlamp in gui_main.cpp's fragment shader, and added abs() to the dot product to implement two-sided lighting so both the front and back of the geometry stay uniformly lit regardless of rotation angle. Built in Release mode.
+
+## Bug ID: MEF-Recursive-ATTA-Scan
+**Description:** The GUI editor did not recursively load ATTA (attachment) models and their textures when a base MEF file was opened. The 'build-rigid' CLI tool also lost textures when compiling the rigid model because it stripped the PMTL/TAMC chunks without generating a proper sidecar. This caused users to see missing geometries and textures when examining assembled levels like 435_01_1.mef.
+**Resolution:** Implemented loadMefRecursive in gui_main.cpp. The GUI now parses ATTA matrices and naturally handles the hierarchical structure, natively scanning for attachments and their textures directly into the viewport. This makes 'build-rigid' unnecessary for merely viewing full levels with textures.

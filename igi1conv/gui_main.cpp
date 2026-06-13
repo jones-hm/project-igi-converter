@@ -200,6 +200,105 @@ public:
             .arg(rotX, 0,'f',0).arg(rotY, 0,'f',0).arg(rotZ, 0,'f',0));
     }
 
+    void loadMefRecursive(const QString& path, const QMatrix4x4& transform, QSet<QString>& visited) {
+        if (visited.contains(path)) return;
+        visited.insert(path);
+        
+        QFileInfo info(path);
+        if (!info.exists()) return;
+        
+        ParsedGeometry geo;
+        try {
+            geo = ParseMefFile(path.toStdString());
+        } catch(...) { return; }
+        
+        std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
+        if (!geo.pmtlTextures.empty()) {
+            for (const auto& tex : geo.pmtlTextures) {
+                loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
+            }
+        } else {
+            int maxSlot = -1;
+            for (const auto& b : geo.renderBlocks) if (b.materialSlot > maxSlot) maxSlot = b.materialSlot;
+            for (int i = 0; i <= maxSlot; ++i) {
+                QString matName = QString("mat_%1.tga").arg(i);
+                auto tex = loadCachedTexture(matName, info);
+                if (!tex) {
+                    QString tempDir = cacheDir + "/bundle/" + info.completeBaseName() + "/";
+                    QFileInfo tempInfo(tempDir + matName);
+                    tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
+                }
+                loadedMaterials.push_back(tex);
+            }
+        }
+
+        bool hasRawPos = false;
+        for (const auto& v : geo.vertices) {
+            if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
+        }
+
+        for (const auto& block : geo.renderBlocks) {
+            SubMesh sm;
+            sm.startIndex = vertices.size() / 3;
+            int triCount = 0;
+            for (size_t i = 0; i < block.triangleCount; ++i) {
+                size_t tIdx = block.triangleStart + i;
+                if (tIdx < geo.triangles.size()) {
+                    const auto& tri = geo.triangles[tIdx];
+                    auto addVert = [&](uint32_t idx) {
+                        if (idx < geo.vertices.size()) {
+                            const auto& v = geo.vertices[idx];
+                            glm::vec3 p = hasRawPos ? v.rawPos : (v.pos * 40.96f);
+                            QVector4D tp = transform * QVector4D(p.x, p.y, p.z, 1.0f);
+                            vertices.push_back(tp.x()); vertices.push_back(tp.y()); vertices.push_back(tp.z());
+                            
+                            QVector4D tn = transform * QVector4D(v.normal.x, v.normal.y, v.normal.z, 0.0f);
+                            QVector3D norm(tn.x(), tn.y(), tn.z());
+                            norm.normalize();
+                            normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
+                            
+                            bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
+                            uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
+                        } else {
+                            vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
+                            normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                            uvs.push_back(0); uvs.push_back(0);
+                        }
+                    };
+                    addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
+                    triCount += 3;
+                }
+            }
+            sm.count = triCount;
+            if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
+                sm.texture = loadedMaterials[block.materialSlot];
+            }
+            if (sm.count > 0) submeshes.push_back(sm);
+        }
+
+        for (const auto& atta : geo.mefAttachments) {
+            QMatrix4x4 aMat(
+                atta.r00, atta.r03, atta.r06, atta.px,
+                atta.r01, atta.r04, atta.r07, atta.py,
+                atta.r02, atta.r05, atta.r08, atta.pz,
+                0.0f,     0.0f,     0.0f,     1.0f
+            );
+            QMatrix4x4 childTransform = transform * aMat;
+            
+            QString childName = QString::fromLocal8Bit(atta.name, strnlen(atta.name, 16));
+            QDir dir = info.absoluteDir();
+            QString path1 = dir.filePath(childName + ".mef");
+            QString path2 = dir.filePath(childName + ".MEF");
+            QString path3 = dir.filePath(childName + ".mex");
+            QString path4 = dir.filePath(childName + ".MEX");
+            
+            if (QFileInfo::exists(path1)) loadMefRecursive(path1, childTransform, visited);
+            else if (QFileInfo::exists(path2)) loadMefRecursive(path2, childTransform, visited);
+            else if (QFileInfo::exists(path3)) loadMefRecursive(path3, childTransform, visited);
+            else if (QFileInfo::exists(path4)) loadMefRecursive(path4, childTransform, visited);
+        }
+    }
+
     void loadModel(const QString& path) {
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
@@ -212,62 +311,11 @@ public:
         
         updateModelInfo(info.completeBaseName());
         
-        if (ext == "mef") {
-            try {
-                ParsedGeometry geo = ParseMefFile(path.toStdString());
-                std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
-                
-                if (!geo.pmtlTextures.empty()) {
-                    for (const auto& tex : geo.pmtlTextures) {
-                        loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
-                    }
-                } else {
-                    int maxSlot = -1;
-                    for (const auto& b : geo.renderBlocks) if (b.materialSlot > maxSlot) maxSlot = b.materialSlot;
-                    for (int i = 0; i <= maxSlot; ++i) {
-                        QString matName = QString("mat_%1.tga").arg(i);
-                        auto tex = loadCachedTexture(matName, info);
-                        if (!tex) {
-                            QString tempDir = cacheDir + "/bundle/" + info.completeBaseName() + "/";
-                            QFileInfo tempInfo(tempDir + matName);
-                            tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
-                        }
-                        loadedMaterials.push_back(tex);
-                    }
-                }
-
-                for (const auto& block : geo.renderBlocks) {
-                    SubMesh sm;
-                    sm.startIndex = vertices.size() / 3;
-                    int triCount = 0;
-                    for (size_t i = 0; i < block.triangleCount; ++i) {
-                        size_t tIdx = block.triangleStart + i;
-                        if (tIdx < geo.triangles.size()) {
-                            const auto& tri = geo.triangles[tIdx];
-                            auto addVert = [&](uint32_t idx) {
-                                if (idx < geo.vertices.size()) {
-                                    const auto& v = geo.vertices[idx];
-                                    vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
-                                    normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
-                                    bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
-                                    uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
-                                } else {
-                                    vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
-                                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
-                                    uvs.push_back(0); uvs.push_back(0);
-                                }
-                            };
-                            addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
-                            triCount += 3;
-                        }
-                    }
-                    sm.count = triCount;
-                    if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
-                        sm.texture = loadedMaterials[block.materialSlot];
-                    }
-                    if (sm.count > 0) submeshes.push_back(sm);
-                }
-            } catch (...) {}
+        if (ext == "mef" || ext == "mex") {
+            QSet<QString> visited;
+            QMatrix4x4 identity;
+            identity.setToIdentity();
+            loadMefRecursive(path, identity, visited);
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;
@@ -534,8 +582,8 @@ protected:
             "uniform bool hasTexture;\n"
             "void main() {\n"
             "    vec3 norm = normalize(Normal);\n"
-            "    vec3 viewDir = normalize(-FragPos);\n" // Headlight from camera
-            "    float diff = max(dot(norm, viewDir), 0.1);\n"
+            "    vec3 viewDir = vec3(0.0, 0.0, 1.0);\n" // Directional headlight
+            "    float diff = max(abs(dot(norm, viewDir)), 0.1);\n" // Two-sided lighting
             "    float ambient = 0.3;\n"
             "    float lighting = min(diff + ambient, 1.0);\n"
             "    vec4 baseColor = hasTexture ? texture(texture1, TexCoord) : vec4(0.8, 0.8, 0.8, 1.0);\n"
