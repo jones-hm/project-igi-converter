@@ -1,4 +1,4 @@
-# IGI Game Convertor — Supported Formats & Conversions
+# IGI Game Converter — Supported Formats & Conversions
 
 This document lists the supported file formats, their conversion targets, and what is currently missing or planned for future versions.
 

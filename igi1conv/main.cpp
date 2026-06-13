@@ -23,7 +23,7 @@
 static void print_help()
 {
     std::cout <<
-        "igi1conv v" IGI1CONV_VERSION " \xe2\x80\x94 IGI Game Convertor\n"
+        "igi1conv v" IGI1CONV_VERSION " \xe2\x80\x94 IGI Game Converter\n"
         "\n"
         "Usage: igi1conv <command> [options]\n"
         "\n"

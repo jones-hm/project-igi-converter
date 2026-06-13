@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(igi1conv
   VERSION 1.6.0
-  DESCRIPTION "Project IGI 1 Game Convertor"
+  DESCRIPTION "Project IGI 1 Game Converter"
   LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)

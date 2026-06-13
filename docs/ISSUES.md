@@ -1,4 +1,4 @@
-# Project IGI 1 Game Convertor — Open Issues & Unimplemented Conversions
+# Project IGI 1 Game Converter — Open Issues & Unimplemented Conversions
 
 This document tracks unimplemented features, formats, and missing reverse-engineering conversions for future development.
 

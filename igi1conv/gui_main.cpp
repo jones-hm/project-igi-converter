@@ -1311,7 +1311,7 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("IGI Game Convertor");
+        setWindowTitle("IGI Game Converter");
         QIcon appIcon(":/igi1conv.ico");
         setWindowIcon(appIcon);
         resize(1200, 800);
@@ -1779,7 +1779,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.6.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Converter\nVersion 1.6.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
