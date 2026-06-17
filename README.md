@@ -1,8 +1,6 @@
 # igi1conv — Project IGI 1 Game Converter
 ![igi1conv Logo](assets/igi1conv_logo.jpg)
 
-![Project IGI 1 banner](assets/01_header.png)
-
 This is a standalone command-line converter and inspector for *Project IGI 1* game files. Inspired by the original IGI1Conv shipped with IGI 2, it allows you to seamlessly read, convert, and inspect the engine's proprietary formats—textures, meshes, scripts, archives, terrain, fonts, and AI graphs—with **no OpenGL or game-editor dependency**.
 
 It's the ultimate tool for modders and researchers looking to extract game assets, modify them using modern tools, and inject them back into the game.
