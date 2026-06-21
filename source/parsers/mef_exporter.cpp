@@ -27,44 +27,35 @@ std::vector<int> CollectMaterialSlots(const ParsedGeometry &geometry) {
 
 // Convert a raw MEF V coordinate to the OBJ/OpenGL convention.
 //
-// MEF UV conventions observed in the wild:
-//   * modelType 0 (rigid)    - V stored in DirectX (V=0 at top of TEX)
-//   * modelType 1 (bone)     - V stored in OpenGL  (V=0 at bottom)
-//   * modelType 3 (lightmap) - V stored in OpenGL  (V=0 at bottom)
+// The user has settled on: V is NEVER flipped.  Both the source
+// MEF (as used by the IGI engine and the GUI 3D viewer) and the
+// exported OBJ / new MEF must carry the same V values.  The
+// original 015_01_1.mef renders fine, and its exported .obj
+// must render identically - so the OBJ must preserve V as-is.
 //
-// OBJ / OpenGL viewers sample with V=0 at the bottom of the texture.
-// We flip V only for modelType 0 (DirectX -> OpenGL).  Type 1
-// (bone) and Type 3 (lightmap) already store V in OpenGL orientation
-// and must NOT be flipped - flipping them turns face textures on
-// bone models upside-down and double-flips lightmap textures.
-// The bone-model rule mirrors what `mef build-rigid` does for the
-// .mef output: V is preserved as-is from the source MEF.
+// This rule is the identity for every model type:
+//   modelType 0 (rigid)    -> V preserved
+//   modelType 1 (bone)     -> V preserved
+//   modelType 3 (lightmap) -> V preserved
 //
 // Historical context:
 //   - Originally (commit f17921a) ALL MEFs had V flipped for OBJ.
 //   - Commit 03642a7 added an isBoneModel check to stop flipping V
 //     on Type 1 bone models (face textures were upside-down).
-//   - The Type 3 lightmap category (which also stores V in OpenGL
-//     orientation) was missed by 03642a7 because its renderLayout
-//     string is "packed DNER" (no "type1" substring), so lightmap
-//     models were being double-flipped.
-//   - The current rule: flip V ONLY for rigid (0); leave bone (1)
-//     and lightmap (3) alone.  This matches the build-rigid output
-//     for bone models and is enforced exclusively through this helper
-//     - see the MefExportVFlip_NoStrayOneMinusVLiterals test.
-float MefVToObjV(float v, uint32_t modelType) {
-  // Flip V only for modelType 0 (rigid).  Type 1 (bone) and
-  // Type 3 (lightmap) already store V in OpenGL orientation.
-  return (modelType == 0) ? (1.0f - v) : v;
+//   - The Type 3 lightmap category was missed by 03642a7 because
+//     its renderLayout string is "packed DNER" (no "type1"
+//     substring), so lightmap models were being double-flipped.
+//   - The current rule is the identity for every model type - V
+//     is preserved verbatim.  This matches what `mef build-rigid`
+//     writes and what the IGI engine / GUI viewer expects.
+float MefVToObjV(float v, uint32_t /*modelType*/) {
+  (void)v; return v;
 }
 
 // Backwards-compat overload for callers that pass a renderLayout
-// string instead of the explicit modelType.  Treats any layout
-// containing "type1" as a bone model (Type 1) and otherwise assumes
-// rigid (Type 0).  Note: this does NOT special-case Type 3 lightmap
-// models, so prefer the modelType overload when it is available.
-float MefVToObjV(float v, bool isBoneModel) {
-  return isBoneModel ? v : (1.0f - v);
+// string instead of the explicit modelType.  Always preserves V.
+float MefVToObjV(float v, bool /*isBoneModel*/) {
+  return v;
 }
 
 // Write the OBJ body to an already-open stream.

@@ -159,16 +159,13 @@ TEST_F(IGI1ConvTest, MefExportBinaryAndTextObjUvsMatch) {
 }
 TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
     // Regression: V-flip must be driven by model_type, not by a
-    // renderLayout substring.  Rule:
-    //   modelType 0 (rigid)    -> V flipped
-    //   modelType 1 (bone)     -> V NOT flipped (face textures only
-    //                              look right when V is preserved;
-    //                              matches the build-rigid output
-    //                              which the user reported working)
-    //   modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
-    //                              orientation; the 03642a7 check
-    //                              missed this category and caused
-    //                              82% of MEFs to be upside-down)
+    // renderLayout substring.  Rule (final):
+    //   modelType 0 (rigid)    -> V preserved
+    //   modelType 1 (bone)     -> V preserved (matches build-rigid)
+    //   modelType 3 (lightmap) -> V preserved (already in OpenGL
+    //                              orientation; 03642a7 missed this
+    //                              category and caused 82% of MEFs
+    //                              to be upside-down)
     IGI1CONV_NEED(f, "\\.mef$");
     TempDir tmp;
     std::string out = tmp / "model.obj";
@@ -194,30 +191,20 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
             vts.emplace_back(u, v);
     }
     ASSERT_GT(vts.size(), 0u) << "OBJ has no vts: " << out;
-    // Check that the V values are not artificially compressed to the
-    // [0, 1] clamp due to a wrong-direction 1.0f - v flip.  A naive
-    // flip of the raw MEF V would produce values clustered near 0 or
-    // 1; correct behavior (no flip for non-rigid, or correct flip for
-    // rigid) gives a V range that spans at least 0.4 of [0,1].
+    // Sanity-check that the V values are not artificially compressed
+    // to the [0, 1] clamp due to a wrong-direction 1.0f - v flip.
+    // Correct behavior (V preserved verbatim) gives a V range that
+    // spans at least 0.4 of [0,1] for a typical model.
     float vmin = 2.f, vmax = -1.f;
     for (auto& p : vts) { vmin = std::min(vmin, p.second); vmax = std::max(vmax, p.second); }
-    EXPECT_LT(vmax,  1.5f)  << "V exploded (wrong V-flip): " << out;
-    EXPECT_GT(vmin, -0.5f)  << "V exploded (wrong V-flip): " << out;
+    EXPECT_LT(vmax,  2.0f)  << "V exploded: " << out;
+    EXPECT_GT(vmin, -1.0f)  << "V exploded: " << out;
     EXPECT_GT(vmax - vmin, 0.4f)
-        << "OBJ V range is too narrow (V was flipped the wrong way): " << out;
-    if (modelType == 3) {
-        // For lightmap (modelType 3), the OBJ V must equal the raw MEF V
-        // (no flip).  The raw V can extend slightly outside [0,1] for
-        // tiled/oversized textures, so we just check that V is finite
-        // and not pinned to exactly 0 or 1 (which would indicate a bad
-        // 1.0f - v flip collapsing every V to one of the extremes).
-        EXPECT_GT(vmin, -1.0f) << "lightmap V out of range: " << out;
-        EXPECT_LT(vmax,  2.0f) << "lightmap V out of range: " << out;
-    }
-    // Note: modelType 0 and 1 both have V flipped, so the [0,1] clamp
-    // can compress the visible range.  We don't add an extra range
-    // assertion for them; the per-type tests above cover the exact
-    // value.
+        << "OBJ V range is too narrow: " << out;
+    // The "V is never flipped" rule applies to every model type
+    // (rigid 0, bone 1, lightmap 3).  The exact value match is
+    // enforced by the per-type tests above and by
+    // MefExportVFlip_AllTypesRespectRule below.
 }
 
 // ─── Regression tests for the V-flip rule per model_type ────────────────────
@@ -230,31 +217,28 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
 //     renderLayout "packed DNER" (no "type1" substring), so they were
 //     STILL being V-flipped, leaving 82% of MEFs (340/415 in
 //     level1/models) upside-down in the 3D viewer and any OBJ export.
-//   - The user clarified the rule: V is only flipped at *export*
-//     time (OBJ / MEF write), NOT in the live 3D viewer.  So the
-//     GUI viewer (guiMefVToObjV) is the identity, and only the
-//     exporter (MefVToObjV) applies the per-model-type flip:
-//        modelType 0 (rigid)    -> V flipped on export
-//        modelType 1 (bone)     -> V NOT flipped on export
-//                                   (same as build-rigid output;
-//                                    flipping breaks face textures)
-//        modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
-//                                   orientation; 03642a7 missed this
-//                                   category and caused 82% of MEFs
-//                                   to be upside-down)
+//   - The user has settled on: V is NEVER flipped.  Both the source
+//     MEF (as used by the IGI engine and the GUI 3D viewer) and
+//     the exported OBJ / new MEF must carry the same V values.
+//     e.g. 015_01_1.mef renders fine and its exported .obj must
+//     render identically, so the OBJ must preserve V as-is.
+//   - So the rule is the identity for every model type:
+//        modelType 0 (rigid)    -> V preserved
+//        modelType 1 (bone)     -> V preserved
+//        modelType 3 (lightmap) -> V preserved
 //
 // These tests pin down the export contract so the bug cannot regress:
-//   1. Type 0 (rigid)    - V is flipped (1.0f - v.uv.y = OBJ v)
-//   2. Type 1 (bone)     - V is NOT flipped (face textures only look
-//                            right when V is passed through unchanged,
-//                            matching what `mef build-rigid` writes)
-//   3. Type 3 (lightmap) - V is NOT flipped (v.uv.y = OBJ v)
+//   1. Type 0 (rigid)    - V is preserved (v.uv.y = OBJ v)
+//   2. Type 1 (bone)     - V is preserved (v.uv.y = OBJ v)
+//   3. Type 3 (lightmap) - V is preserved (v.uv.y = OBJ v)
 //   4. The text MEF -> OBJ path agrees with the binary path for all
 //      three model types.
-//   5. The export MefVToObjV helper is the ONLY place that flips V;
-//      the GUI viewer is the identity.  A structural test grep's
-//      mef_exporter.cpp for stray "1.0f - v.uv.y" / "1.0f - uv["
-//      literals outside the helper so the formula cannot drift.
+//   5. The export MefVToObjV helper is the identity; a structural
+//      test grep's mef_exporter.cpp for stray "1.0f - v.uv.y" /
+//      "1.0f - uv[" literals outside the helper so the formula
+//      cannot drift.
+//   6. The GUI viewer (gui_main.cpp) must not flip V either
+//      (MefViewerDoesNotFlipV).
 
 // Helper: read raw V from the first vt line of an OBJ.
 static float FirstObjV(const std::string& obj) {
@@ -294,9 +278,11 @@ static bool FirstMefRawV(const std::string& mef, float& rawV) {
     return false;
 }
 
-TEST_F(IGI1ConvTest, MefExportVFlip_Type0_Rigid_FlipsV) {
-    // Type 0 (rigid) models store V in DirectX convention, so the OBJ
-    // export must apply 1.0f - v.uv.y to land in OpenGL convention.
+TEST_F(IGI1ConvTest, MefExportVFlip_Type0_Rigid_DoesNotFlipV) {
+    // Type 0 (rigid) models: V is preserved verbatim in the OBJ
+    // export.  The user settled on the rule "V is never flipped"
+    // after observing that the original 015_01_1.mef (Type 0)
+    // renders fine and its exported .obj must render identically.
     std::string f = FindCorpusMefOfModelType(0, "320_01_1\\.mef$");
     if (f.empty()) GTEST_SKIP() << "no Type 0 (rigid) MEF in corpus";
     TempDir tmp;
@@ -306,8 +292,8 @@ TEST_F(IGI1ConvTest, MefExportVFlip_Type0_Rigid_FlipsV) {
     ASSERT_TRUE(FirstMefRawV(f, rawV)) << "could not parse raw MEF UV: " << f;
     objV = FirstObjV(out);
     EXPECT_TRUE(std::isfinite(objV)) << "OBJ V is NaN: " << out;
-    EXPECT_NEAR(objV, 1.0f - rawV, 1e-4f)
-        << "Type 0 rigid: OBJ V should equal 1.0 - raw MEF V "
+    EXPECT_NEAR(objV, rawV, 1e-4f)
+        << "Type 0 rigid: OBJ V should equal raw MEF V (no flip) "
         << "(raw=" << rawV << " objV=" << objV << ")";
 }
 
@@ -333,11 +319,8 @@ TEST_F(IGI1ConvTest, MefExportVFlip_Type1_Bone_DoesNotFlipV) {
 }
 
 TEST_F(IGI1ConvTest, MefExportVFlip_Type3_Lightmap_DoesNotFlipV) {
-    // Type 3 (lightmap) models store V in OpenGL convention (same as
-    // Type 1 bone), so the OBJ export must pass V through unchanged.
-    // This is the case that 03642a7 MISSED (its renderLayout substring
-    // check did not catch Type 3) and was the actual source of the
-    // upside-down lightmap textures in the GUI 3D viewer.
+    // Type 3 (lightmap) models: V is preserved verbatim in the OBJ
+    // export (the global "V is never flipped" rule).
     std::string f = FindCorpusMefOfModelType(3, "404_01_1\\.mef$");
     if (f.empty()) GTEST_SKIP() << "no Type 3 (lightmap) MEF in corpus";
     TempDir tmp;
@@ -398,12 +381,9 @@ TEST_F(IGI1ConvTest, MefExportVFlip_AllTypesRespectRule) {
 
     for (int mt : {0, 1, 3}) {
         for (const auto& s : byType[mt]) {
-            // Rule: flip V ONLY for modelType 0 (rigid); keep V
-            // as-is for modelType 1 (bone, matches the
-            // build-rigid output and is required for face
-            // textures to be right-side-up) and modelType 3
-            // (lightmap, already in OpenGL orientation).
-            float expected = (mt == 0) ? (1.0f - s.rawV) : s.rawV;
+            // Rule (final): V is NEVER flipped.  OBJ V must equal
+            // raw MEF V for every model type.
+            float expected = s.rawV;
             EXPECT_NEAR(s.objV, expected, 1e-4f)
                 << "model_type=" << mt << " MEF=" << s.mef
                 << " rawV=" << s.rawV << " objV=" << s.objV
