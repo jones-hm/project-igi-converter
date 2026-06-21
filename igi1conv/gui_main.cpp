@@ -428,11 +428,14 @@ public:
         connect(animTimer, &QTimer::timeout, this, [this]() {
             if (isIffAnimation && currentIff.valid && !currentIff.clips.empty()) {
                 const auto& clip = currentIff.clips[currentClipIndex];
-                animTime += clip.duration / 1000.0f; // advance in real time (duration is in ms)
-                if (animTime >= clip.duration) animTime = 0.0f;
+                animTime += 16.0f; // timer ticks every 16ms
+                if (animTime >= clip.duration) {
+                    animTime = 0.0f;
+                    currentClipIndex = (currentClipIndex + 1) % currentIff.clips.size();
+                }
                 updateIffSkeleton();
                 update();
-                if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+                if (onIffTimeChanged) onIffTimeChanged(animTime, currentIff.clips[currentClipIndex].duration, currentClipIndex, (int)currentIff.clips.size());
             }
         });
         
@@ -3023,6 +3026,15 @@ private:
                         QMessageBox::critical(this, "Error", "Failed to convert IFF files:\n" + proc.readAllStandardError());
                     }
                 });
+
+                menu.addAction("Export Animation as GIF...", [this, path]() {
+                    QMessageBox::information(this, "Coming Soon", "GIF export is currently being integrated and will be available shortly.");
+                });
+
+                menu.addAction("Export Animation as Video (.mp4)...", [this, path]() {
+                    QMessageBox::information(this, "Coming Soon", "MP4 export is currently being integrated and will be available shortly.");
+                });
+
             } else if (ext == "bef") {
                 menu.addAction("Convert BEF -> IFF (Create)", [this, path]() {
                     QString dir = QFileInfo(path).absolutePath();
