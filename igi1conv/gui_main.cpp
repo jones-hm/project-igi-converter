@@ -249,6 +249,61 @@ public:
     QTimer* animTimer = nullptr;
     float animTime = 0.0f;
     int currentClipIndex = 0;
+    bool iffPlaying = false;
+
+    // Callback so MainWindow media bar can react to time changes
+    std::function<void(float time, float duration, int clip, int clipCount)> onIffTimeChanged;
+
+    // ── Public animation control API ─────────────────────────────────────────
+    void iffPlay() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        iffPlaying = true;
+        animTimer->start(16);
+    }
+    void iffPause() {
+        iffPlaying = false;
+        animTimer->stop();
+    }
+    void iffTogglePlayPause() {
+        if (iffPlaying) iffPause(); else iffPlay();
+    }
+    void iffSeekTo(float t) {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::max(0.0f, std::min(t, clip.duration));
+        updateIffSkeleton();
+        update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffStepForward() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::min(animTime + (clip.duration / 30.0f), clip.duration);
+        updateIffSkeleton(); update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffStepBackward() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::max(0.0f, animTime - (clip.duration / 30.0f));
+        updateIffSkeleton(); update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffSetClip(int idx) {
+        if (!isIffAnimation || idx < 0 || idx >= (int)currentIff.clips.size()) return;
+        currentClipIndex = idx;
+        animTime = 0.0f;
+        updateIffSkeleton(); update();
+        const auto& clip = currentIff.clips[currentClipIndex];
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    float iffGetDuration() const {
+        if (!isIffAnimation || currentIff.clips.empty()) return 1.0f;
+        return currentIff.clips[currentClipIndex].duration;
+    }
+    float iffGetTime() const { return animTime; }
+    int iffGetClipCount() const { return (int)currentIff.clips.size(); }
+    int iffGetClipIndex() const { return currentClipIndex; }
 
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
@@ -261,10 +316,11 @@ public:
         connect(animTimer, &QTimer::timeout, this, [this]() {
             if (isIffAnimation && currentIff.valid && !currentIff.clips.empty()) {
                 const auto& clip = currentIff.clips[currentClipIndex];
-                animTime += 1.0f / 30.0f; // 30 FPS playback speed approximately
-                if (animTime > clip.duration) animTime = 0.0f;
+                animTime += clip.duration / 1000.0f; // advance in real time (duration is in ms)
+                if (animTime >= clip.duration) animTime = 0.0f;
                 updateIffSkeleton();
                 update();
+                if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
             }
         });
         
@@ -483,7 +539,9 @@ public:
                 }
                 
                 if (!currentIff.clips.empty()) {
+                    iffPlaying = true;
                     animTimer->start(16); // ~60fps
+                    if (onIffTimeChanged) onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
                 }
             }
         } else if (ext == "obj") {
@@ -2453,6 +2511,131 @@ public:
         rightLayout->addWidget(imageEditor, 3);
         rightLayout->addWidget(modelViewer, 3);
 
+        // ── IFF Media Player Bar ──────────────────────────────────────────────
+        iffMediaBar = new QWidget();
+        iffMediaBar->setObjectName("iffMediaBar");
+        iffMediaBar->setStyleSheet(
+            "QWidget#iffMediaBar { background:#1a1a2e; border-top:1px solid #444; padding:4px; }"
+            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:4px 10px; font-size:13px; min-width:30px; }"
+            "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
+            "QPushButton:pressed { background:#1a1a4a; }"
+            "QPushButton#playBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:15px; }"
+            "QPushButton#playBtn:hover { background:#2a6a2a; }"
+            "QSlider::groove:horizontal { background:#333; height:6px; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#88f; width:14px; height:14px; margin:-4px 0;"
+            "  border-radius:7px; border:1px solid #66c; }"
+            "QSlider::sub-page:horizontal { background:#556; border-radius:3px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:11px; min-width:90px; }"
+            "QComboBox { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:2px 6px; }"
+        );
+        QVBoxLayout* mediaVLayout = new QVBoxLayout(iffMediaBar);
+        mediaVLayout->setContentsMargins(6, 4, 6, 4);
+        mediaVLayout->setSpacing(4);
+
+        // Top row: clip selector + time label
+        QHBoxLayout* mediaTopRow = new QHBoxLayout();
+        mediaTopRow->addWidget(new QLabel("Clip:"));
+        iffClipCombo = new QComboBox();
+        iffClipCombo->setMinimumWidth(120);
+        mediaTopRow->addWidget(iffClipCombo);
+        mediaTopRow->addStretch();
+        iffTimeLabel = new QLabel("0.000 / 0.000 s");
+        mediaTopRow->addWidget(iffTimeLabel);
+        mediaVLayout->addLayout(mediaTopRow);
+
+        // Scrubber
+        iffScrubber = new QSlider(Qt::Horizontal);
+        iffScrubber->setRange(0, 10000);
+        iffScrubber->setValue(0);
+        mediaVLayout->addWidget(iffScrubber);
+
+        // Bottom row: transport buttons
+        QHBoxLayout* mediaBtnRow = new QHBoxLayout();
+        mediaBtnRow->setSpacing(6);
+        iffBtnPrev = new QPushButton("\u23ee"); iffBtnPrev->setToolTip("Previous clip");
+        iffBtnStepBack = new QPushButton("\u23ea"); iffBtnStepBack->setToolTip("Step backward one frame");
+        iffBtnPlay = new QPushButton("\u25b6"); iffBtnPlay->setObjectName("playBtn"); iffBtnPlay->setToolTip("Play / Pause");
+        iffBtnStepFwd = new QPushButton("\u23e9"); iffBtnStepFwd->setToolTip("Step forward one frame");
+        iffBtnNext = new QPushButton("\u23ed"); iffBtnNext->setToolTip("Next clip");
+        mediaBtnRow->addStretch();
+        mediaBtnRow->addWidget(iffBtnPrev);
+        mediaBtnRow->addWidget(iffBtnStepBack);
+        mediaBtnRow->addWidget(iffBtnPlay);
+        mediaBtnRow->addWidget(iffBtnStepFwd);
+        mediaBtnRow->addWidget(iffBtnNext);
+        mediaBtnRow->addStretch();
+        mediaVLayout->addLayout(mediaBtnRow);
+
+        iffMediaBar->hide();
+        rightLayout->addWidget(iffMediaBar);
+
+        // Wire media bar buttons
+        connect(iffBtnPlay, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffTogglePlayPause();
+            iffBtnPlay->setText(modelViewer->iffPlaying ? "\u23f8" : "\u25b6");
+        });
+        connect(iffBtnStepBack, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+            modelViewer->iffStepBackward();
+        });
+        connect(iffBtnStepFwd, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+            modelViewer->iffStepForward();
+        });
+        connect(iffBtnPrev, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffSetClip(modelViewer->iffGetClipIndex() - 1);
+        });
+        connect(iffBtnNext, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffSetClip(modelViewer->iffGetClipIndex() + 1);
+        });
+        connect(iffClipCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+            modelViewer->iffSetClip(idx);
+        });
+        connect(iffScrubber, &QSlider::sliderPressed, this, [this]() {
+            iffScrubbing = true;
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+        });
+        connect(iffScrubber, &QSlider::sliderReleased, this, [this]() {
+            iffScrubbing = false;
+        });
+        connect(iffScrubber, &QSlider::valueChanged, this, [this](int val) {
+            if (!iffScrubbing) return;
+            float t = (val / 10000.0f) * modelViewer->iffGetDuration();
+            modelViewer->iffSeekTo(t);
+        });
+
+        // Wire ModelViewer callback -> update bar UI
+        modelViewer->onIffTimeChanged = [this](float time, float duration, int clip, int clipCount) {
+            if (iffScrubbing) return;
+            if (iffScrubber) {
+                iffScrubber->blockSignals(true);
+                iffScrubber->setValue(duration > 0 ? (int)((time / duration) * 10000) : 0);
+                iffScrubber->blockSignals(false);
+            }
+            if (iffTimeLabel) {
+                // Duration is in milliseconds in the IFF format
+                iffTimeLabel->setText(QString("%1 / %2 ms")
+                    .arg((int)time).arg((int)duration));
+            }
+            if (iffClipCombo && iffClipCombo->count() != clipCount) {
+                iffClipCombo->blockSignals(true);
+                iffClipCombo->clear();
+                for (int i = 0; i < clipCount; i++)
+                    iffClipCombo->addItem(QString("Clip %1").arg(i + 1));
+                iffClipCombo->blockSignals(false);
+            }
+            if (iffClipCombo && iffClipCombo->currentIndex() != clip) {
+                iffClipCombo->blockSignals(true);
+                iffClipCombo->setCurrentIndex(clip);
+                iffClipCombo->blockSignals(false);
+            }
+        };
+
         // Debug Output
         QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
         QVBoxLayout* debugLayout = new QVBoxLayout(debugGroup);
@@ -2575,6 +2758,16 @@ private:
     CodeEditor* viewerEdit;
     ImageEditor* imageEditor;
     ModelViewer* modelViewer;
+    QWidget* iffMediaBar = nullptr;
+    QPushButton* iffBtnPrev = nullptr;
+    QPushButton* iffBtnStepBack = nullptr;
+    QPushButton* iffBtnPlay = nullptr;
+    QPushButton* iffBtnStepFwd = nullptr;
+    QPushButton* iffBtnNext = nullptr;
+    QSlider* iffScrubber = nullptr;
+    QLabel* iffTimeLabel = nullptr;
+    QComboBox* iffClipCombo = nullptr;
+    bool iffScrubbing = false;
     QTextEdit* consoleEdit;
     QString currentFile;
     QString currentExt;
@@ -2590,6 +2783,12 @@ private:
         viewerEdit->hide();
         imageEditor->hide();
         modelViewer->hide();
+        if (iffMediaBar) iffMediaBar->hide();
+        // Stop animation and reset play button
+        if (modelViewer) {
+            modelViewer->iffPause();
+            if (iffBtnPlay) iffBtnPlay->setText("\u25b6");
+        }
     }
 
     void showContextMenu(const QPoint& pos) {
@@ -3076,6 +3275,16 @@ private:
         } else if (mode == 4 || mode == 5) { // 3D or Video
             modelViewer->loadModel(path);
             modelViewer->show();
+            // Show media bar only for .iff files in Video mode
+            bool isIffVideo = (mode == 5 && QFileInfo(path).suffix().toLower() == "iff");
+            if (iffMediaBar) {
+                if (isIffVideo) {
+                    iffMediaBar->show();
+                    if (iffBtnPlay) iffBtnPlay->setText("\u23f8"); // show pause since it auto-plays
+                } else {
+                    iffMediaBar->hide();
+                }
+            }
         }
     }
 
