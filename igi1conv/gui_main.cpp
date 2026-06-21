@@ -105,10 +105,10 @@ static QImage loadImageSafe(const QString& path) {
 //
 // Rule (must match MefVToObjV()):
 //   modelType 0 (rigid)    -> flip V   (DirectX -> OpenGL)
-//   modelType 1 (bone)     -> flip V   (face textures would be upside-down otherwise)
+//   modelType 1 (bone)     -> keep V   (face textures would be upside-down otherwise)
 //   modelType 3 (lightmap) -> keep V   (already in OpenGL orientation)
 static inline float guiMefVToObjV(float v, uint32_t modelType) {
-    return (modelType == 3) ? v : (1.0f - v);
+    return (modelType == 0) ? (1.0f - v) : v;
 }
 
 static QString formatJson(const QJsonObject& obj, int indent = 0) {
