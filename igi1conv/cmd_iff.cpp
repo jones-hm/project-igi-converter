@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <cstdlib>
 #include "../source/parsers/iff_parser.h"
+#include "../source/parsers/iff_to_bef.h"
 
 namespace fs = std::filesystem;
 
@@ -94,22 +95,33 @@ int cmd_iff(int argc, char** argv) {
         }
         std::string src = argv[2];
         std::string dst = argv[3];
-        std::string tools = findDconvTools();
 
+        if (command == "convert" || command == "batch") {
+            // Pure C++ converter
+            if (fs::is_regular_file(src)) {
+                ConvertIffToBef(src, dst);
+            } else if (fs::is_directory(src)) {
+                int count = 0;
+                for (const auto& entry : fs::directory_iterator(src)) {
+                    if (entry.is_regular_file() && 
+                       (entry.path().extension() == ".iff" || entry.path().extension() == ".IFF")) {
+                        ConvertIffToBef(entry.path().string(), dst);
+                        count++;
+                    }
+                }
+                std::cout << "\n Converted: " << count << "\n";
+            } else {
+                std::cerr << "[ERROR] Source path not found: " << src << "\n";
+                return 1;
+            }
+            return 0;
+        }
+
+        std::string tools = findDconvTools();
         if (command == "decompile")
             return runPythonDconv(tools, "IGI1_decompile", src, dst);
-        if (command == "convert")
-            return runPythonDconv(tools, "IGI1_convert", src, dst);
         if (command == "create")
             return runPythonDconv(tools, "IGI1_create", src, dst);
-        if (command == "batch") {
-            int r = 0;
-            std::cout << "[INFO] === Batch: decompile ===\n";
-            r |= runPythonDconv(tools, "IGI1_decompile", src, dst + "/Decompiled");
-            std::cout << "[INFO] === Batch: convert ===\n";
-            r |= runPythonDconv(tools, "IGI1_convert",   src, dst + "/Converted");
-            return r;
-        }
     }
 
     std::cerr << "Unknown iff command: " << command << "\n";
