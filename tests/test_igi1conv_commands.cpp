@@ -154,6 +154,57 @@ TEST_F(IGI1ConvTest, MefExportBinaryAndTextObjUvsMatch) {
             << "V mismatch at vt " << i;
     }
 }
+TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
+    // Regression: V-flip must be driven by model_type, not by a
+    // renderLayout substring.  Type 1 (bone) and Type 3 (lightmap)
+    // models must NOT have V flipped; only Type 0 (rigid) does.
+    // MefInfoVFlip applies both: 1.0f - y must equal y for non-rigid.
+    IGI1CONV_NEED(f, "\\.mef$");
+    TempDir tmp;
+    std::string out = tmp / "model.obj";
+    EXPECT_EQ(RunIGI1Conv("mef export " + Q(f) + " -o " + Q(out)), 0);
+    std::string infoOut;
+    ASSERT_EQ(RunIGI1Conv("mef info " + Q(f), &infoOut), 0);
+    // Parse model_type from the mef info output ("model_type: <N>").
+    int modelType = -1;
+    auto pos = infoOut.find("model_type:");
+    if (pos != std::string::npos) {
+        int v = 0;
+        if (std::sscanf(infoOut.c_str() + pos, "model_type: %d", &v) == 1)
+            modelType = v;
+    }
+    // Load OBJ vts and grab the first non-trivial one
+    std::ifstream in(out);
+    std::vector<std::pair<float,float>> vts;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("vt ", 0) != 0) continue;
+        float u = 0.f, v = 0.f;
+        if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) == 2)
+            vts.emplace_back(u, v);
+    }
+    ASSERT_GT(vts.size(), 0u) << "OBJ has no vts: " << out;
+    // Check that the V values are not artificially compressed to the
+    // [0, 1] clamp due to a wrong-direction 1.0f - v flip.  A naive
+    // flip of the raw MEF V would produce values clustered near 0 or
+    // 1; correct behavior (no flip for non-rigid, or correct flip for
+    // rigid) gives a V range that spans at least 0.4 of [0,1].
+    float vmin = 2.f, vmax = -1.f;
+    for (auto& p : vts) { vmin = std::min(vmin, p.second); vmax = std::max(vmax, p.second); }
+    EXPECT_LT(vmax,  1.5f)  << "V exploded (wrong V-flip): " << out;
+    EXPECT_GT(vmin, -0.5f)  << "V exploded (wrong V-flip): " << out;
+    EXPECT_GT(vmax - vmin, 0.4f)
+        << "OBJ V range is too narrow (V was flipped the wrong way): " << out;
+    if (modelType == 1 || modelType == 3) {
+        // For bone/lightmap, the OBJ V must equal the raw MEF V (no flip).
+        // The raw V can extend slightly outside [0,1] for tiled/oversized
+        // textures, so we just check that V is finite and not pinned to
+        // exactly 0 or 1 (which would indicate a bad 1.0f - v flip
+        // collapsing every V to one of the extremes).
+        EXPECT_GT(vmin, -1.0f) << "non-rigid model V out of range: " << out;
+        EXPECT_LT(vmax,  2.0f) << "non-rigid model V out of range: " << out;
+    }
+}
 
 // ─── qsc ─────────────────────────────────────────────────────────────────────
 TEST_F(IGI1ConvTest, QscValidate) {

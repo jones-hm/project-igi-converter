@@ -27,17 +27,35 @@ std::vector<int> CollectMaterialSlots(const ParsedGeometry &geometry) {
 
 // Convert a raw MEF V coordinate to the OBJ/OpenGL convention.
 //
-// MEF stores UVs in DirectX convention (V=0 at top, V=1 at bottom).
-// OBJ / OpenGL use the opposite (V=0 at bottom, V=1 at top), so we
-// must flip V when exporting to OBJ.  However, Type 1 (bone) models
-// were found to already store V in OpenGL orientation in the wild
-// (face textures became upside-down after a naive flip), so for
-// those we leave V untouched.  The isBoneModel flag selects between
-// the two conventions.
+// MEF UV conventions observed in the wild:
+//   * modelType 0 (rigid)  - V stored in DirectX (V=0 at top of TEX)
+//   * modelType 1 (bone)   - V stored in OpenGL  (V=0 at bottom)
+//   * modelType 3 (lightmap) - V stored in OpenGL (V=0 at bottom)
 //
-// See commit 03642a7 ("Do not flip V coordinate for bone models
-// to fix distorted upside-down face textures") for the original
-// bone-model fix that only covered the binary MEF -> OBJ path.
+// OBJ / OpenGL viewers sample with V=0 at the bottom of the texture,
+// so we flip V for modelType 0 (DirectX -> OpenGL) and leave it
+// alone for modelType 1 / 3.
+//
+// Historical context:
+//   - Originally (commit f17921a) ALL MEFs had V flipped for OBJ.
+//   - Commit 03642a7 added an isBoneModel check to stop flipping V on
+//     Type 1 bone models (face textures were upside-down).
+//   - This function extends that fix to also cover Type 3 lightmap
+//     models, which were missed by the original 03642a7 check
+//     (it only inspected renderLayout == "type1 ...", so Type 3 was
+//     still being flipped and showed up upside-down in the GUI
+//     viewer and any third-party OBJ viewer).
+float MefVToObjV(float v, uint32_t modelType) {
+  // Flip V only for modelType 0 (rigid).  Type 1 (bone) and Type 3
+  // (lightmap) already store V in OpenGL orientation.
+  return (modelType == 0) ? (1.0f - v) : v;
+}
+
+// Backwards-compat overload for callers that pass a renderLayout
+// string instead of the explicit modelType.  Treats any layout
+// containing "type1" as a bone model (Type 1) and otherwise assumes
+// rigid (Type 0).  Note: this does NOT special-case Type 3 lightmap
+// models, so prefer the modelType overload when it is available.
 float MefVToObjV(float v, bool isBoneModel) {
   return isBoneModel ? v : (1.0f - v);
 }
@@ -56,9 +74,8 @@ void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
   for (const auto &v : geometry.vertices)
     f << "v " << v.pos.x << " " << v.pos.y << " " << v.pos.z << "\n";
 
-  bool isBoneModel = (geometry.renderLayout.find("type1") != std::string::npos);
   for (const auto &v : geometry.vertices) {
-    f << "vt " << v.uv.x << " " << MefVToObjV(v.uv.y, isBoneModel) << "\n";
+    f << "vt " << v.uv.x << " " << MefVToObjV(v.uv.y, geometry.modelType) << "\n";
   }
 
   f << "\no model_mesh\n";
@@ -549,7 +566,9 @@ bool ExportTextMefToObj(const std::vector<MEFObject>& objects,
     // OBJ needs per-face UV entries (3 vts per face, indexed from the
     // face's vertex indices).  We also flip V via MefVToObjV for the
     // same DirectX->OpenGL reason as the binary MEF -> OBJ path.
-    const bool isBoneModel = (obj.model_type == 1);
+    // NOTE: model_type 1 (bone) and 3 (lightmap) keep V as-is; only
+    // model_type 0 (rigid) gets V flipped.
+    const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
     auto vtForVert = [&](int vi) {
       // text MEF UV index is the same as vertex index (UV(0, ...) belongs
       // to Vertex(0, ...), etc.)
@@ -557,7 +576,7 @@ bool ExportTextMefToObj(const std::vector<MEFObject>& objects,
           obj.uvs[vi].size() >= 2) {
         return std::pair<float, float>{
             obj.uvs[vi][0],
-            MefVToObjV(obj.uvs[vi][1], isBoneModel)};
+            MefVToObjV(obj.uvs[vi][1], modelType)};
       }
       return std::pair<float, float>{0.0f, 0.0f};
     };
