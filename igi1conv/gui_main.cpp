@@ -2019,6 +2019,7 @@ public:
         viewMenu->addAction("Hex", [this]() { viewModeCombo->setCurrentIndex(2); });
         viewMenu->addAction("Image", [this]() { viewModeCombo->setCurrentIndex(3); });
         viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addAction("Video", [this]() { viewModeCombo->setCurrentIndex(5); });
         viewMenu->addSeparator();
         auto applyMenuTheme = [iniPath](const QString& name) {
             QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
@@ -2393,7 +2394,7 @@ public:
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
-        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D"});
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
@@ -2904,8 +2905,10 @@ private:
                 } else {
                     mode = 1; // Text
                 }
-            } else if (currentExt == "obj" || currentExt == "iff") {
+            } else if (currentExt == "obj") {
                 mode = 4; // 3D
+            } else if (currentExt == "iff") {
+                mode = 5; // Video
             } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat" || currentExt == "qvm") {
                 if (currentExt == "dat" && info.fileName().toLower().contains("graph")) {
                     mode = 4; // 3D
@@ -3011,7 +3014,7 @@ private:
                 }
             }
             imageEditor->show();
-        } else if (mode == 4) { // 3D
+        } else if (mode == 4 || mode == 5) { // 3D or Video
             modelViewer->loadModel(path);
             modelViewer->show();
         }
