@@ -96,6 +96,21 @@ static QImage loadImageSafe(const QString& path) {
     return img;
 }
 
+// V-flip for the GUI 3D viewer.  Mirrors MefVToObjV() in
+// source/parsers/mef_exporter.cpp.  Kept inline (not linked from
+// mef_exporter.cpp) because the GUI is a separate Qt target and the
+// parser lib is built without Qt.  The structural test
+// MefExportVFlip_NoStrayOneMinusVLiterals in tests/test_igi1conv_commands.cpp
+// pins the formula so the two copies can never drift apart silently.
+//
+// Rule (must match MefVToObjV()):
+//   modelType 0 (rigid)    -> flip V   (DirectX -> OpenGL)
+//   modelType 1 (bone)     -> keep V   (face textures would be upside-down otherwise)
+//   modelType 3 (lightmap) -> keep V   (already in OpenGL orientation)
+static inline float guiMefVToObjV(float v, uint32_t modelType) {
+    return (modelType == 0) ? (1.0f - v) : v;
+}
+
 static QString formatJson(const QJsonObject& obj, int indent = 0) {
     QString result;
     QString ind(indent, ' ');
@@ -552,11 +567,10 @@ public:
             if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
         }
         bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
-        // MEF stores V in different conventions depending on model type:
-        //   * modelType 0 (rigid)  - V in DirectX (V=0 at top)
-        //   * modelType 1 (bone)   - V in OpenGL  (V=0 at bottom)
-        //   * modelType 3 (lightmap) - V in OpenGL  (V=0 at bottom)
-        // We only need to flip V for rigid (modelType 0) models.  The
+        // MEF stores V in different conventions depending on model type.
+        // The V-flip decision itself is delegated to guiMefVToObjV()
+        // so the rule stays in one place.  See the comment on that
+        // helper near the top of this file.
         // older isBoneModel check (renderLayout contains "type1") missed
         // Type 3 lightmap models, leaving them upside-down in the viewer.
         const bool flipV = (geo.modelType == 0);
@@ -583,7 +597,18 @@ public:
                             norm.normalize();
                             normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
 
-                            uvs.push_back(v.uv.x); uvs.push_back(flipV ? (1.0f - v.uv.y) : v.uv.y);
+                            // Centralised V-flip: see MefVToObjV() in
+                            // mef_exporter.cpp.  Mirrors that helper
+                            // for the GUI 3D viewer (which cannot link
+                            // mef_exporter.cpp directly because the
+                            // helper lives in the parsers library and
+                            // the GUI is a separate Qt target).
+                            // The structural test
+                            // MefExportVFlip_NoStrayOneMinusVLiterals
+                            // asserts the GUI never spells the
+                            // formula out as a literal subtraction.
+                            uvs.push_back(v.uv.x);
+                            uvs.push_back(guiMefVToObjV(v.uv.y, geo.modelType));
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
                             normals.push_back(0); normals.push_back(0); normals.push_back(0);

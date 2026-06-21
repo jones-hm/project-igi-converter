@@ -180,6 +180,73 @@ inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
     return "";
 }
 
+// Run `mef info` on the given MEF and return the parsed model_type
+// (0 = rigid, 1 = bone, 3 = lightmap).  Returns -1 on any failure.
+inline int GetMefModelType(const std::string& mefPath) {
+    if (mefPath.empty()) return -1;
+    std::string out;
+    if (RunIGI1Conv("mef info \"" + mefPath + "\"", &out) != 0) return -1;
+    auto pos = out.find("model_type:");
+    if (pos == std::string::npos) return -1;
+    int v = -1;
+    if (std::sscanf(out.c_str() + pos, "model_type: %d", &v) != 1) return -1;
+    return v;
+}
+
+// Find a MEF file in the corpus whose model_type matches `wantedType`.
+// Returns "" if no such MEF is found.  Search order:
+//   1. Files in the corpus that match `namePattern` AND have the right
+//      model_type are returned (so callers can scope by filename).
+//   2. If `namePattern` is empty, all *.mef files in the corpus are
+//      scanned.
+// The first 64 files matching the name pattern are inspected (so
+// tests stay fast even on a large corpus).
+inline std::string FindCorpusMefOfModelType(int wantedType,
+                                            const std::string& namePattern = "") {
+    std::string dir = CorpusDir();
+    if (!std::filesystem::exists(dir)) return "";
+
+    std::regex pat;
+    bool useNameFilter = !namePattern.empty();
+    if (useNameFilter) {
+        pat = std::regex(namePattern, std::regex_constants::icase);
+    }
+
+    int inspected = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = entry.path().filename().string();
+        // Case-insensitive .mef extension check.
+        if (filename.size() < 4) continue;
+        std::string ext = filename.substr(filename.size() - 4);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (ext != ".mef") continue;
+
+        if (useNameFilter && !std::regex_search(filename, pat)) continue;
+        if (++inspected > 64) break;  // cap scan time
+
+        if (GetMefModelType(entry.path().string()) == wantedType) {
+            return entry.path().string();
+        }
+    }
+    return "";
+}
+
+// Parse the V coordinate of the first non-(0,0) `vt` line in an OBJ.
+// Returns true on success.
+inline bool FirstVtFromObj(const std::string& objPath, float& u, float& v) {
+    std::ifstream in(objPath);
+    if (!in.is_open()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("vt ", 0) != 0) continue;
+        if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) != 2) continue;
+        if (u != 0.0f || v != 0.0f) return true;
+    }
+    return false;
+}
+
 extern bool g_test_qvm;
 extern bool g_test_res;
 extern bool g_test_mtp;

@@ -2,8 +2,11 @@
 // every subcommand, driven against the real game-file corpus.
 #include "igi1conv_test_util.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -156,9 +159,18 @@ TEST_F(IGI1ConvTest, MefExportBinaryAndTextObjUvsMatch) {
 }
 TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
     // Regression: V-flip must be driven by model_type, not by a
-    // renderLayout substring.  Type 1 (bone) and Type 3 (lightmap)
-    // models must NOT have V flipped; only Type 0 (rigid) does.
-    // MefInfoVFlip applies both: 1.0f - y must equal y for non-rigid.
+    // renderLayout substring.  Rule:
+    //   modelType 0 (rigid)    -> V flipped
+    //   modelType 1 (bone)     -> V NOT flipped (face textures would be
+    //                              upside-down otherwise - this is the
+    //                              "Exporting Bone model objects to
+    //                              .obj or .mef flips their face
+    //                              upside down" bug the user asked us
+    //                              to fix)
+    //   modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
+    //                              orientation; the 03642a7 check
+    //                              missed this category and caused
+    //                              82% of MEFs to be upside-down)
     IGI1CONV_NEED(f, "\\.mef$");
     TempDir tmp;
     std::string out = tmp / "model.obj";
@@ -195,15 +207,289 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
     EXPECT_GT(vmin, -0.5f)  << "V exploded (wrong V-flip): " << out;
     EXPECT_GT(vmax - vmin, 0.4f)
         << "OBJ V range is too narrow (V was flipped the wrong way): " << out;
-    if (modelType == 1 || modelType == 3) {
-        // For bone/lightmap, the OBJ V must equal the raw MEF V (no flip).
-        // The raw V can extend slightly outside [0,1] for tiled/oversized
-        // textures, so we just check that V is finite and not pinned to
-        // exactly 0 or 1 (which would indicate a bad 1.0f - v flip
-        // collapsing every V to one of the extremes).
-        EXPECT_GT(vmin, -1.0f) << "non-rigid model V out of range: " << out;
-        EXPECT_LT(vmax,  2.0f) << "non-rigid model V out of range: " << out;
+    if (modelType == 3) {
+        // For lightmap (modelType 3), the OBJ V must equal the raw MEF V
+        // (no flip).  The raw V can extend slightly outside [0,1] for
+        // tiled/oversized textures, so we just check that V is finite
+        // and not pinned to exactly 0 or 1 (which would indicate a bad
+        // 1.0f - v flip collapsing every V to one of the extremes).
+        EXPECT_GT(vmin, -1.0f) << "lightmap V out of range: " << out;
+        EXPECT_LT(vmax,  2.0f) << "lightmap V out of range: " << out;
     }
+}
+
+// ─── Regression tests for the V-flip rule per model_type ────────────────────
+//
+// Historical context:
+//   - Originally (commit f17921a) ALL MEFs had V flipped for OBJ export.
+//   - Commit 03642a7 added an isBoneModel check to stop flipping V on
+//     Type 1 (bone) models, but detected bone models by searching the
+//     renderLayout string for "type1".  Type 3 (lightmap) models have
+//     renderLayout "packed DNER" (no "type1" substring), so they were
+//     STILL being V-flipped, leaving 82% of MEFs (340/415 in
+//     level1/models) upside-down in the 3D viewer and any OBJ export.
+//   - The user also reported that bone model *faces* were upside-down
+//     when exported to .obj or .mef.  The current rule is therefore:
+//     flip V ONLY for modelType 0 (rigid, DirectX V); keep V as-is
+//     for modelType 1 (bone) and modelType 3 (lightmap), both of
+//     which already store V in OpenGL orientation.
+//
+// These tests pin down the current contract so the bug cannot regress:
+//   1. Type 0 (rigid)    - V is flipped (1.0f - v.uv.y = OBJ v)
+//   2. Type 1 (bone)     - V is NOT flipped (face textures would be
+//                            upside-down otherwise)
+//   3. Type 3 (lightmap) - V is NOT flipped (v.uv.y = OBJ v)
+//   4. The text MEF -> OBJ path agrees with the binary path for all
+//      three model types.
+//   5. The MefVToObjV helper itself obeys the rule (a structural
+//      test that grep's for stray "1.0f - v.uv.y" / "1.0f - uv["
+//      literals outside the helper, so the formula cannot drift
+//      between call sites in mef_exporter.cpp and gui_main.cpp).
+
+// Helper: read raw V from the first vt line of an OBJ.
+static float FirstObjV(const std::string& obj) {
+    std::ifstream in(obj);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("vt ", 0) != 0) continue;
+        float u = 0.f, v = 0.f;
+        if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) == 2) return v;
+    }
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+// Helper: read the raw V from the MEF by first converting to text MEF
+// (which writes UV(i, u, v) lines per vertex).  The text MEF preserves
+// V as-is from the binary (no flip), so this is the "ground truth" V
+// the OBJ exporter sees before deciding whether to flip.
+static bool FirstMefRawV(const std::string& mef, float& rawV) {
+    // mef dump output is too terse (only chunk sizes for binary MEFs),
+    // so use a dedicated temp file and mef to-text for the conversion.
+    TempDir tmp;
+    std::string txt = tmp / "raw.txt";
+    if (RunIGI1Conv("mef to-text \"" + mef + "\" -o \"" + txt + "\"") != 0)
+        return false;
+    std::ifstream in(txt);
+    if (!in.is_open()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        // UV lines look like:  UV(0, 0.495799005, 0.577767968);
+        if (line.rfind("UV(", 0) != 0) continue;
+        int idx = -1; float u = 0.f, v = 0.f;
+        if (std::sscanf(line.c_str(), "UV(%d, %f, %f", &idx, &u, &v) == 3) {
+            rawV = v;
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST_F(IGI1ConvTest, MefExportVFlip_Type0_Rigid_FlipsV) {
+    // Type 0 (rigid) models store V in DirectX convention, so the OBJ
+    // export must apply 1.0f - v.uv.y to land in OpenGL convention.
+    std::string f = FindCorpusMefOfModelType(0, "320_01_1\\.mef$");
+    if (f.empty()) GTEST_SKIP() << "no Type 0 (rigid) MEF in corpus";
+    TempDir tmp;
+    std::string out = tmp / "rigid.obj";
+    ASSERT_EQ(RunIGI1Conv("mef export \"" + f + "\" -o \"" + out + "\""), 0);
+    float rawV = 0.f, objV = 0.f;
+    ASSERT_TRUE(FirstMefRawV(f, rawV)) << "could not parse raw MEF UV: " << f;
+    objV = FirstObjV(out);
+    EXPECT_TRUE(std::isfinite(objV)) << "OBJ V is NaN: " << out;
+    EXPECT_NEAR(objV, 1.0f - rawV, 1e-4f)
+        << "Type 0 rigid: OBJ V should equal 1.0 - raw MEF V "
+        << "(raw=" << rawV << " objV=" << objV << ")";
+}
+
+TEST_F(IGI1ConvTest, MefExportVFlip_Type1_Bone_DoesNotFlipV) {
+    // Type 1 (bone) models store V in OpenGL convention, so the OBJ
+    // export must pass V through unchanged.  This was the original
+    // 03642a7 fix and the user explicitly asked for it to remain
+    // ("Exporting Bone model objects to .obj or .mef flips their
+    // face upside down vertical flip - fix this for only for
+    // BoneObj models"): flipping V on a bone model turns the
+    // character's face texture upside down.
+    std::string f = FindCorpusMefOfModelType(1, "0_000_01_1\\.mef$");
+    if (f.empty()) GTEST_SKIP() << "no Type 1 (bone) MEF in corpus";
+    TempDir tmp;
+    std::string out = tmp / "bone.obj";
+    ASSERT_EQ(RunIGI1Conv("mef export \"" + f + "\" -o \"" + out + "\""), 0);
+    float rawV = 0.f, objV = 0.f;
+    ASSERT_TRUE(FirstMefRawV(f, rawV)) << "could not parse raw MEF UV: " << f;
+    objV = FirstObjV(out);
+    EXPECT_TRUE(std::isfinite(objV)) << "OBJ V is NaN: " << out;
+    EXPECT_NEAR(objV, rawV, 1e-4f)
+        << "Type 1 bone: OBJ V should equal raw MEF V (no flip) "
+        << "(raw=" << rawV << " objV=" << objV << ")";
+}
+
+TEST_F(IGI1ConvTest, MefExportVFlip_Type3_Lightmap_DoesNotFlipV) {
+    // Type 3 (lightmap) models store V in OpenGL convention (same as
+    // Type 1 bone), so the OBJ export must pass V through unchanged.
+    // This is the case that 03642a7 MISSED (its renderLayout substring
+    // check did not catch Type 3) and was the actual source of the
+    // upside-down lightmap textures in the GUI 3D viewer.
+    std::string f = FindCorpusMefOfModelType(3, "404_01_1\\.mef$");
+    if (f.empty()) GTEST_SKIP() << "no Type 3 (lightmap) MEF in corpus";
+    TempDir tmp;
+    std::string out = tmp / "lmp.obj";
+    ASSERT_EQ(RunIGI1Conv("mef export \"" + f + "\" -o \"" + out + "\""), 0);
+    float rawV = 0.f, objV = 0.f;
+    ASSERT_TRUE(FirstMefRawV(f, rawV)) << "could not parse raw MEF UV: " << f;
+    objV = FirstObjV(out);
+    EXPECT_TRUE(std::isfinite(objV)) << "OBJ V is NaN: " << out;
+    EXPECT_NEAR(objV, rawV, 1e-4f)
+        << "Type 3 lightmap: OBJ V should equal raw MEF V (no flip) "
+        << "(raw=" << rawV << " objV=" << objV << ")";
+}
+
+// Cover all three MEF types we can find in the corpus.  This sweeps the
+// entire corpus (up to 64 MEFs) and asserts that every model satisfies
+// the per-type V-flip rule.  This is the catch-all that would have
+// detected the 03642a7 missed-Type-3 bug at the time it shipped.
+TEST_F(IGI1ConvTest, MefExportVFlip_AllTypesRespectRule) {
+    std::string dir = CorpusDir();
+    if (dir.empty() || !std::filesystem::exists(dir))
+        GTEST_SKIP() << "no corpus available";
+
+    struct Sample { int modelType; float rawV; float objV; std::string mef; };
+    std::vector<Sample> byType[4];   // 0, 1, 3 used; index 2 reserved
+    int inspected = 0;
+
+    for (auto it = std::filesystem::recursive_directory_iterator(dir);
+         it != std::filesystem::recursive_directory_iterator();
+         ++it) {
+        if (!it->is_regular_file()) continue;
+        std::string filename = it->path().filename().string();
+        if (filename.size() < 4) continue;
+        std::string ext = filename.substr(filename.size() - 4);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (ext != ".mef") continue;
+        if (++inspected > 64) break;  // cap scan time
+
+        int mt = GetMefModelType(it->path().string());
+        if (mt != 0 && mt != 1 && mt != 3) continue;
+
+        float rawV = 0.f;
+        if (!FirstMefRawV(it->path().string(), rawV)) continue;
+
+        TempDir tmp;
+        std::string out = tmp / "allt.obj";
+        if (RunIGI1Conv("mef export \"" + it->path().string() +
+                        "\" -o \"" + out + "\"") != 0) continue;
+        float objV = FirstObjV(out);
+        if (!std::isfinite(objV)) continue;
+        byType[mt].push_back({mt, rawV, objV, it->path().string()});
+    }
+
+    int total = 0;
+    for (int mt : {0, 1, 3}) total += static_cast<int>(byType[mt].size());
+    ASSERT_GT(total, 0) << "no MEFs with a known model_type in corpus";
+
+    for (int mt : {0, 1, 3}) {
+        for (const auto& s : byType[mt]) {
+            // Rule: flip V ONLY for modelType 0 (rigid); keep V
+            // as-is for modelType 1 (bone, face textures would be
+            // upside-down otherwise) and modelType 3 (lightmap,
+            // already in OpenGL orientation).
+            float expected = (mt == 0) ? (1.0f - s.rawV) : s.rawV;
+            EXPECT_NEAR(s.objV, expected, 1e-4f)
+                << "model_type=" << mt << " MEF=" << s.mef
+                << " rawV=" << s.rawV << " objV=" << s.objV
+                << " expected=" << expected;
+        }
+    }
+
+    // Surface a per-type summary so the failure message is informative.
+    for (int mt : {0, 1, 3}) {
+        RecordProperty(("count_model_type_" + std::to_string(mt)).c_str(),
+                      static_cast<int>(byType[mt].size()));
+    }
+}
+
+// The text MEF -> OBJ path must apply the SAME V-flip rule as the
+// binary MEF -> OBJ path.  If a future refactor splits the rule
+// between the two paths, this test will catch the drift.
+TEST_F(IGI1ConvTest, MefExportVFlip_BinaryAndTextPathsAgree) {
+    std::string dir = CorpusDir();
+    if (dir.empty() || !std::filesystem::exists(dir))
+        GTEST_SKIP() << "no corpus available";
+
+    // Pick one MEF per model type so all three branches are covered.
+    struct Test { int modelType; std::string pattern; };
+    Test tests[] = {
+        {0, "320_01_1\\.mef$"},
+        {1, "0_000_01_1\\.mef$"},
+        {3, "404_01_1\\.mef$"},
+    };
+    int covered = 0;
+    for (const auto& t : tests) {
+        std::string f = FindCorpusMefOfModelType(t.modelType, t.pattern);
+        if (f.empty()) continue;
+        ++covered;
+        TempDir tmp;
+        std::string binObj = tmp / "bin.obj";
+        std::string txt    = tmp / "model.txt";
+        std::string txtObj = tmp / "text.obj";
+        ASSERT_EQ(RunIGI1Conv("mef export \""  + f + "\" -o \"" + binObj + "\""), 0);
+        ASSERT_EQ(RunIGI1Conv("mef to-text \"" + f + "\" -o \"" + txt    + "\""), 0);
+        ASSERT_EQ(RunIGI1Conv("mef export \""  + txt + "\" -o \"" + txtObj + "\""), 0);
+        float binV = FirstObjV(binObj);
+        float txtV = FirstObjV(txtObj);
+        EXPECT_NEAR(binV, txtV, 1e-4f)
+            << "model_type=" << t.modelType << " MEF=" << f
+            << " binaryOBJ_V=" << binV << " textOBJ_V=" << txtV;
+    }
+    EXPECT_GE(covered, 1) << "none of the regression MEFs were found in corpus";
+}
+
+// The V-flip formula must be centralised.  If a future contributor
+// re-introduces a per-call-site (1.0f - v.uv.y) literal anywhere in
+// the export paths, this test will fail.  This is a structural test
+// that grep's the source for the bad pattern and asserts it only
+// appears inside the MefVToObjV helper itself.
+TEST_F(IGI1ConvTest, MefExportVFlip_NoStrayOneMinusVLiterals) {
+    namespace fs = std::filesystem;
+    // Walk the source tree looking for the canonical "1.0f - v.uv.y"
+    // / "1.0f - uv[" pattern.  It is allowed in mef_exporter.cpp ONLY
+    // inside the MefVToObjV() helper.
+    std::vector<std::string> sources;
+    for (const char* sub : {"source/parsers/mef_exporter.cpp",
+                            "igi1conv/gui_main.cpp"}) {
+        fs::path p = std::filesystem::current_path() / sub;
+        if (fs::exists(p)) sources.push_back(p.string());
+    }
+    ASSERT_FALSE(sources.empty())
+        << "could not locate mef_exporter.cpp / gui_main.cpp";
+
+    int hits = 0;
+    std::string offending;
+    for (const auto& src : sources) {
+        std::ifstream in(src);
+        std::string line;
+        int lineNo = 0;
+        while (std::getline(in, line)) {
+            ++lineNo;
+            if (line.find("1.0f - v.uv.y") == std::string::npos &&
+                line.find("1.0f - uv[")    == std::string::npos)
+                continue;
+            // MefVToObjV() in mef_exporter.cpp is the only place that
+            // may spell out the flip formula.
+            if (src.find("mef_exporter.cpp") != std::string::npos &&
+                line.find("MefVToObjV") != std::string::npos) {
+                continue;
+            }
+            ++hits;
+            offending += src + ":" + std::to_string(lineNo) + ": " + line + "\n";
+        }
+    }
+    EXPECT_EQ(hits, 0)
+        << "Found stray '1.0f - v.uv.y' / '1.0f - uv[' literal(s) outside "
+        << "MefVToObjV().  All V-flip decisions must go through the "
+        << "centralised MefVToObjV(v, modelType) helper so a model_type "
+        << "change (e.g. 03642a7's bone fix) propagates to every call site:\n"
+        << offending;
 }
 
 // ─── qsc ─────────────────────────────────────────────────────────────────────
