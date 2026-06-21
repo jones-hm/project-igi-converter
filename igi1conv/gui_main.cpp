@@ -3024,13 +3024,13 @@ private:
         // Single item context menu
         if (isDir) {
             QDir d(path);
-            if (!d.entryList({"*.iff", "*.IFF", "*.bff", "*.BFF"}, QDir::Files).isEmpty()) {
-                menu.addAction("Batch Convert IFF/BFF -> BEF", [this, path]() {
+            if (!d.entryList({"*.iff", "*.IFF"}, QDir::Files).isEmpty()) {
+                menu.addAction("Batch Convert IFF -> BEF", [this, path]() {
                     QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
                     if (outDir.isEmpty()) return;
                     QProcess proc;
                     proc.setProgram(qApp->applicationFilePath());
-                    proc.setArguments({"iff", "batch", path, outDir});
+                    proc.setArguments({"iff", "convert", path, outDir});
                     proc.start();
                     proc.waitForFinished(-1);
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
@@ -3039,6 +3039,64 @@ private:
                     } else {
                         logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
                         QMessageBox::critical(this, "Error", "Failed to batch convert IFF files:\n" + proc.readAllStandardError());
+                    }
+                });
+
+                menu.addAction("Decompile IFF -> text + per-anim IFFs", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "decompile", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Decompiled IFF into " + outDir);
+                        QMessageBox::information(this, "Success", "Decompiled IFF to text + per-anim IFFs.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF decompile failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to decompile IFF:\n" + err);
+                    }
+                });
+                menu.addSeparator();
+            }
+            // If the folder contains a batch of .BEF scripts, offer to pack them
+            // back into a single IFF (the inverse of convert).
+            if (!d.entryList({"*.bef", "*.BEF"}, QDir::Files).isEmpty()) {
+                menu.addAction("Create IFF from .BEF scripts", [this, path]() {
+                    QString outIff = QFileDialog::getSaveFileName(this, "Save IFF",
+                        QFileInfo(path).absoluteFilePath() + ".iff", "IFF Skeletal Animation (*.iff)");
+                    if (outIff.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "create", path, outIff});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Wrote IFF " + outIff);
+                        QMessageBox::information(this, "Success", "Created IFF file.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF create failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to create IFF:\n" + err);
+                    }
+                });
+                menu.addAction("Generate Anims.qsc for .BEF scripts", [this, path]() {
+                    QString outQsc = QFileDialog::getSaveFileName(this, "Save Anims.qsc",
+                        QFileInfo(path).absoluteFilePath() + "/Anims.qsc", "QScript (*.qsc)");
+                    if (outQsc.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "emit-qsc", path, outQsc});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Wrote " + outQsc);
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] emit-qsc failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to write Anims.qsc:\n" + err);
                     }
                 });
                 menu.addSeparator();
@@ -3093,13 +3151,13 @@ private:
                     QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
                     QDir().mkpath(tempDir + "/Input");
                     QFile::copy(path, tempDir + "/Input/" + QFileInfo(path).fileName());
-                    
+
                     QProcess proc;
                     proc.setProgram(qApp->applicationFilePath());
                     proc.setArguments({"iff", "convert", tempDir + "/Input", tempDir + "/Converted"});
                     proc.start();
                     proc.waitForFinished(-1);
-                    
+
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
                         QStringList filters; filters << "*.BEF" << "*.bef";
                         QDir out(tempDir + "/Converted");
@@ -3115,10 +3173,47 @@ private:
                     QDir(tempDir).removeRecursively();
                 });
 
+                menu.addAction("Decompile to text + per-anim IFFs", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", QFileInfo(path).absolutePath());
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "decompile", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Decompiled " + path + " into " + outDir);
+                        QMessageBox::information(this, "Success", "Decompiled IFF file to text + per-anim IFFs.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF decompile failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to decompile IFF:\n" + err);
+                    }
+                });
+
                 menu.addAction("Export Animation as GIF...", [this, path]() {
                     QString outPath = QFileDialog::getSaveFileName(this, "Export GIF", QFileInfo(path).absolutePath() + "/" + QFileInfo(path).completeBaseName() + ".gif", "GIF Image (*.gif)");
                     if (!outPath.isEmpty()) {
-                        modelViewer->exportGif(outPath);
+                        // Spawn the CLI's native headless renderer so the GUI's
+                        // OpenGL viewport doesn't have to be visible.  This is
+                        // the same code path as `igi1conv iff export-gif`.
+                        int w = modelViewer->width()  > 0 ? modelViewer->width()  : 640;
+                        int h = modelViewer->height() > 0 ? modelViewer->height() : 480;
+                        QProcess proc;
+                        proc.setProgram(qApp->applicationFilePath());
+                        proc.setArguments({"iff", "export-gif", path, outPath,
+                                          QString::number(w), QString::number(h), "15"});
+                        proc.start();
+                        proc.waitForFinished(-1);
+                        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                            logMessage("[SUCCESS] GIF written to " + outPath);
+                            QMessageBox::information(this, "Success",
+                                "GIF written successfully to:\n" + outPath);
+                        } else {
+                            QString err = proc.readAllStandardError();
+                            logMessage("[ERROR] GIF export failed:\n" + err);
+                            QMessageBox::critical(this, "Error", "GIF export failed:\n" + err);
+                        }
                     }
                 });
             }

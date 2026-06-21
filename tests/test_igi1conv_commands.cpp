@@ -1,6 +1,7 @@
 // test_igi1conv_commands.cpp — one or more tests for every igi1conv command and
 // every subcommand, driven against the real game-file corpus.
 #include "igi1conv_test_util.h"
+#include <algorithm>
 
 using namespace igi1conv_test;
 
@@ -214,3 +215,69 @@ TEST_F(IGI1ConvTest, TerrainExportCtr) {
     EXPECT_EQ(RunIGI1Conv("terrain export-ctr " + Q(f) + " -o " + Q(out)), 0);
     EXPECT_TRUE(NonEmptyFile(out));
 }
+
+// ─── iff ─────────────────────────────────────────────────────────────────
+TEST_F(IGI1ConvTest, IffInfo) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    EXPECT_EQ(RunIGI1Conv("iff info " + Q(f)), 0);
+}
+TEST_F(IGI1ConvTest, IffConvert) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string outDir = tmp / "iff_convert";
+    EXPECT_EQ(RunIGI1Conv("iff convert " + Q(f) + " " + Q(outDir)), 0);
+    // At least one .BEF should appear (one per animation in the file).
+    bool any = false;
+    for (auto& e : std::filesystem::directory_iterator(outDir)) {
+        if (e.is_regular_file()) {
+            std::string ext = e.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".bef") { any = true; break; }
+        }
+    }
+    EXPECT_TRUE(any) << "no .BEF files in " << outDir;
+}
+TEST_F(IGI1ConvTest, IffRebuild) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string out = tmp / "iff_rebuild.iff";
+    EXPECT_EQ(RunIGI1Conv("iff rebuild " + Q(f) + " " + Q(out)), 0);
+    EXPECT_TRUE(NonEmptyFile(out));
+    // The rebuilt IFF must parse with iff info without error.
+    EXPECT_EQ(RunIGI1Conv("iff info " + Q(out)), 0);
+}
+TEST_F(IGI1ConvTest, IffDecompile) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string outDir = tmp / "iff_decomp";
+    EXPECT_EQ(RunIGI1Conv("iff decompile " + Q(f) + " " + Q(outDir)), 0);
+    EXPECT_TRUE(std::filesystem::is_directory(outDir));
+    // We expect a <basename>.IFF text file at the top of outDir.
+    std::string base = std::filesystem::path(f).stem().string();
+    EXPECT_TRUE(NonEmptyFile(outDir + "\\" + base + ".IFF"));
+}
+TEST_F(IGI1ConvTest, IffCreateFromBefs) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string bDir   = tmp / "befs";
+    std::string outIff = tmp / "from_befs.iff";
+    ASSERT_EQ(RunIGI1Conv("iff convert " + Q(f) + " " + Q(bDir)), 0);
+    EXPECT_EQ(RunIGI1Conv("iff create " + Q(bDir) + " " + Q(outIff)), 0);
+    EXPECT_TRUE(NonEmptyFile(outIff));
+    EXPECT_EQ(RunIGI1Conv("iff info " + Q(outIff)), 0);
+}
+TEST_F(IGI1ConvTest, IffExportGif) {
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string out = tmp / "anim.gif";
+    // Use a small canvas to keep the test fast; fps deliberately low
+    // to minimise frame count.
+    EXPECT_EQ(RunIGI1Conv("iff export-gif " + Q(f) + " " + Q(out) + " 160 120 8"), 0);
+    EXPECT_TRUE(NonEmptyFile(out));
+    // GIF89a magic.
+    std::ifstream g(out, std::ios::binary);
+    char magic[6] = {0};
+    g.read(magic, 6);
+    EXPECT_EQ(std::string(magic, 6), std::string("GIF89a"));
+}
+
