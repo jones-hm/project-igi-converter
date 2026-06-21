@@ -2,9 +2,12 @@
 //
 // The suite spawns the freshly built igi1conv.exe (next to igi1conv_tests.exe) and
 // drives it against a corpus of real IGI game files.  The corpus directory is
-// taken from the IGI_GAME_PATH environment variable, defaulting to
-// D:\IGI1\full_test.  Tests that need a file which is absent are SKIPPED (not
-// failed) so the suite stays green on machines without the corpus.
+// provided at runtime via:
+//   - the command-line flag  --game-path=PATH  (parsed by the test main)
+//   - or the IGI_GAME_PATH environment variable
+// If neither is set, FindCorpusFileByRegex() returns "" and any test that
+// calls IGI1CONV_NEED() will GTEST_SKIP() so the suite stays green on
+// machines without a corpus.  NO path is hard-coded here.
 #pragma once
 
 #include <gtest/gtest.h>
@@ -23,6 +26,13 @@
 
 namespace igi1conv_test {
 
+// Set at runtime by the test main when --game-path=PATH is passed, or
+// pulled from the IGI_GAME_PATH env var as a fallback.  Never defaults
+// to a hard-coded path - tests must opt in to a corpus.
+extern std::string g_game_path;
+
+inline void SetGamePath(const std::string& p) { g_game_path = p; }
+
 // Directory of the running test executable (igi1conv.exe lives alongside it).
 inline std::string ExeDir() {
     char buf[MAX_PATH] = {};
@@ -35,16 +45,22 @@ inline std::string IGI1ConvExe() {
     return ExeDir() + "\\igi1conv.exe";
 }
 
-// Root of the test corpus (env override, else the canonical full_test dir).
-inline std::string CorpusDir() {
-    char* env = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
-        std::string v(env);
-        free(env);
-        if (!v.empty()) return v;
-    }
-    return "D:\\IGI1\\full_test";
+// Root of the test corpus.  Returns "" if no path was provided - in
+// that case tests that call IGI1CONV_NEED() will GTEST_SKIP().
+inline const std::string& CorpusDir() {
+    // Lazy: pull env var on first call (before the g_game_path override
+    // is set, e.g. when IGI1CONV_NEED is evaluated in a static init).
+    static const std::string s_envPath = []() -> std::string {
+        char* env = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
+            std::string v(env);
+            free(env);
+            return v;
+        }
+        return std::string();
+    }();
+    return g_game_path.empty() ? s_envPath : g_game_path;
 }
 
 inline std::string Corpus(const std::string& rel) {
@@ -162,6 +178,73 @@ inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
         }
     }
     return "";
+}
+
+// Run `mef info` on the given MEF and return the parsed model_type
+// (0 = rigid, 1 = bone, 3 = lightmap).  Returns -1 on any failure.
+inline int GetMefModelType(const std::string& mefPath) {
+    if (mefPath.empty()) return -1;
+    std::string out;
+    if (RunIGI1Conv("mef info \"" + mefPath + "\"", &out) != 0) return -1;
+    auto pos = out.find("model_type:");
+    if (pos == std::string::npos) return -1;
+    int v = -1;
+    if (std::sscanf(out.c_str() + pos, "model_type: %d", &v) != 1) return -1;
+    return v;
+}
+
+// Find a MEF file in the corpus whose model_type matches `wantedType`.
+// Returns "" if no such MEF is found.  Search order:
+//   1. Files in the corpus that match `namePattern` AND have the right
+//      model_type are returned (so callers can scope by filename).
+//   2. If `namePattern` is empty, all *.mef files in the corpus are
+//      scanned.
+// The first 64 files matching the name pattern are inspected (so
+// tests stay fast even on a large corpus).
+inline std::string FindCorpusMefOfModelType(int wantedType,
+                                            const std::string& namePattern = "") {
+    std::string dir = CorpusDir();
+    if (!std::filesystem::exists(dir)) return "";
+
+    std::regex pat;
+    bool useNameFilter = !namePattern.empty();
+    if (useNameFilter) {
+        pat = std::regex(namePattern, std::regex_constants::icase);
+    }
+
+    int inspected = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = entry.path().filename().string();
+        // Case-insensitive .mef extension check.
+        if (filename.size() < 4) continue;
+        std::string ext = filename.substr(filename.size() - 4);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (ext != ".mef") continue;
+
+        if (useNameFilter && !std::regex_search(filename, pat)) continue;
+        if (++inspected > 64) break;  // cap scan time
+
+        if (GetMefModelType(entry.path().string()) == wantedType) {
+            return entry.path().string();
+        }
+    }
+    return "";
+}
+
+// Parse the V coordinate of the first non-(0,0) `vt` line in an OBJ.
+// Returns true on success.
+inline bool FirstVtFromObj(const std::string& objPath, float& u, float& v) {
+    std::ifstream in(objPath);
+    if (!in.is_open()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("vt ", 0) != 0) continue;
+        if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) != 2) continue;
+        if (u != 0.0f || v != 0.0f) return true;
+    }
+    return false;
 }
 
 extern bool g_test_qvm;

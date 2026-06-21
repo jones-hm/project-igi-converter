@@ -10,6 +10,7 @@
 #include "cmd_dat.h"
 #include "cmd_fnt.h"
 #include "cmd_test.h"
+#include "cmd_iff.h"
 //   0 = success
 //   1 = bad args
 //   2 = file not found
@@ -17,13 +18,13 @@
 //   4 = write error
 
 #ifndef IGI1CONV_VERSION
-#define IGI1CONV_VERSION "1.6.0"
+#define IGI1CONV_VERSION "1.9.1"
 #endif
 
 static void print_help()
 {
     std::cout <<
-        "igi1conv v" IGI1CONV_VERSION " \xe2\x80\x94 IGI Game Asset Converter\n"
+        "igi1conv v" IGI1CONV_VERSION " \xe2\x80\x94 IGI Game Converter\n"
         "\n"
         "Usage: igi1conv <command> [options]\n"
         "\n"
@@ -38,6 +39,7 @@ static void print_help()
         "  graph    AI navigation graph (export to JSON, info)\n"
         "  dat      DAT model-texture data (info, export, to-mtp)\n"
         "  fnt      FNT font file (info, export PNG)\n"
+        "  iff      IFF skeletal animation format (info, test, decompile, convert, create, rebuild, emit-qsc, export-gif)\n"
         "  test     Run advanced test suite on game directory\n"
         "\n"
         "Run 'igi1conv <command> --help' for command-specific help.\n";
@@ -83,6 +85,7 @@ int main(int argc, char** argv)
 
     if (cmd == "tex")     return cmd_tex(sub_argc, sub_argv);
     if (cmd == "mef")     return cmd_mef(sub_argc, sub_argv);
+    if (cmd == "mex")     return cmd_mef(sub_argc, sub_argv);
     if (cmd == "qsc")     return cmd_qsc(sub_argc, sub_argv);
     if (cmd == "qvm")     return cmd_qvm(sub_argc, sub_argv);
     if (cmd == "res")     return cmd_res(sub_argc, sub_argv);
@@ -91,6 +94,7 @@ int main(int argc, char** argv)
     if (cmd == "graph")   return cmd_graph(sub_argc, sub_argv);
     if (cmd == "dat")     return cmd_dat(sub_argc, sub_argv);
     if (cmd == "fnt")     return cmd_fnt(sub_argc, sub_argv);
+    if (cmd == "iff")     return cmd_iff(sub_argc, sub_argv);
     if (cmd == "test")    return cmd_test(sub_argc, sub_argv);
 
     std::cerr << "igi1conv: unknown command '" << cmd << "'\n";

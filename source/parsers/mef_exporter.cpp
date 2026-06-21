@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <set>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -24,6 +25,39 @@ std::vector<int> CollectMaterialSlots(const ParsedGeometry &geometry) {
   return ordered;
 }
 
+// Convert a raw MEF V coordinate to the OBJ/OpenGL convention.
+//
+// The user has settled on: V is NEVER flipped.  Both the source
+// MEF (as used by the IGI engine and the GUI 3D viewer) and the
+// exported OBJ / new MEF must carry the same V values.  The
+// original 015_01_1.mef renders fine, and its exported .obj
+// must render identically - so the OBJ must preserve V as-is.
+//
+// This rule is the identity for every model type:
+//   modelType 0 (rigid)    -> V preserved
+//   modelType 1 (bone)     -> V preserved
+//   modelType 3 (lightmap) -> V preserved
+//
+// Historical context:
+//   - Originally (commit f17921a) ALL MEFs had V flipped for OBJ.
+//   - Commit 03642a7 added an isBoneModel check to stop flipping V
+//     on Type 1 bone models (face textures were upside-down).
+//   - The Type 3 lightmap category was missed by 03642a7 because
+//     its renderLayout string is "packed DNER" (no "type1"
+//     substring), so lightmap models were being double-flipped.
+//   - The current rule is the identity for every model type - V
+//     is preserved verbatim.  This matches what `mef build-rigid`
+//     writes and what the IGI engine / GUI viewer expects.
+float MefVToObjV(float v, uint32_t /*modelType*/) {
+  (void)v; return v;
+}
+
+// Backwards-compat overload for callers that pass a renderLayout
+// string instead of the explicit modelType.  Always preserves V.
+float MefVToObjV(float v, bool /*isBoneModel*/) {
+  return v;
+}
+
 // Write the OBJ body to an already-open stream.
 void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
                   const std::string &mtlFilename) {
@@ -38,10 +72,8 @@ void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
   for (const auto &v : geometry.vertices)
     f << "v " << v.pos.x << " " << v.pos.y << " " << v.pos.z << "\n";
 
-  bool isBoneModel = (geometry.renderLayout.find("type1") != std::string::npos);
   for (const auto &v : geometry.vertices) {
-    float v_coord = isBoneModel ? v.uv.y : (1.0f - v.uv.y);
-    f << "vt " << v.uv.x << " " << v_coord << "\n";
+    f << "vt " << v.uv.x << " " << MefVToObjV(v.uv.y, geometry.modelType) << "\n";
   }
 
   f << "\no model_mesh\n";
@@ -90,7 +122,7 @@ void WriteMtlBody(std::ostream &m, const ParsedGeometry &geometry,
 
 namespace MefExporter {
 
-bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath) {
+bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath, const std::string &datPath) {
   // Derive MTL filename (same stem as OBJ)
   auto sepPos = outpath.find_last_of("/\\");
   std::string filename =
@@ -115,6 +147,17 @@ bool ExportToObj(const ParsedGeometry &geometry, const std::string &outpath) {
   // Placeholder texture names (pmtlTextures populated if DAT data was injected)
   std::vector<std::string> texNames(geometry.pmtlTextures.begin(),
                                     geometry.pmtlTextures.end());
+  
+  if (!datPath.empty() && texNames.empty()) {
+    DATFile dat = DAT_Parse(datPath);
+    for (const auto &entry : dat.models) {
+      if (entry.modelName == stem || entry.modelName.find(stem) != std::string::npos) {
+        texNames = entry.textures;
+        for (auto& t : texNames) t += ".tga";
+        break;
+      }
+    }
+  }
   std::ofstream m(mtlPath);
   if (m.is_open()) {
     WriteMtlBody(m, geometry, texNames);
@@ -221,6 +264,44 @@ bool ExportToObjBundle(const ParsedGeometry &geometry,
   return true;
 }
 
+bool ExportMergedToObjBundle(const ParsedGeometry &geometry,
+                              const std::string &modelStem,
+                              const std::string &outDir,
+                              const std::vector<std::string> &texNames,
+                              bool skipObj) {
+  namespace fs = std::filesystem;
+  fs::path bundleDir = fs::path(outDir) / modelStem;
+  std::error_code ec;
+  fs::create_directories(bundleDir, ec);
+  if (ec) {
+    Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot create bundle dir: " + bundleDir.string());
+    return false;
+  }
+
+  if (!skipObj) {
+    std::string objPath = (bundleDir / (modelStem + ".obj")).string();
+    std::ofstream f(objPath);
+    if (!f.is_open()) {
+      Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot open OBJ: " + objPath);
+      return false;
+    }
+    WriteObjBody(f, geometry, modelStem + ".mtl");
+    f.close();
+  }
+
+  std::string mtlPath = (bundleDir / (modelStem + ".mtl")).string();
+  std::ofstream m(mtlPath);
+  if (!m.is_open()) {
+    Logger::Get().Log(LogLevel::ERR, "[MefExporter] Cannot open MTL: " + mtlPath);
+    return false;
+  }
+  WriteMtlBody(m, geometry, texNames);
+  m.close();
+
+  Logger::Get().Log(LogLevel::INFO, "[MefExporter] Merged bundle exported to: " + bundleDir.string());
+  return true;
+}
+
 bool ExportToMefAscii(const ParsedGeometry &geometry,
                       const std::string &outpath) {
   std::ofstream f(outpath);
@@ -230,9 +311,12 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
     return false;
   }
 
-  f << std::fixed << std::setprecision(4);
+  f << std::setprecision(9);
 
   f << "NewObject(\"model_mesh\");\n";
+
+  if (geometry.modelType != 0)
+    f << "ModelType(" << geometry.modelType << ");\n";
 
   // Emit one Material() + MaterialShininess() per TAMC entry.
   // Use white diffuse (1,1,1) so textures render at full brightness.
@@ -279,6 +363,15 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
   for (size_t i = 0; i < numVerts; ++i) {
     const auto &v = geometry.vertices[i];
     f << "UV(" << i << ", " << v.uv.x << ", " << v.uv.y << ");\n";
+  }
+
+  // Bone vertex data (Type 1 skeletal models only)
+  if (geometry.modelType == 1) {
+    for (size_t i = 0; i < numVerts; ++i) {
+      const auto &v = geometry.vertices[i];
+      f << "BoneVertex(" << i << ", " << v.boneIndex
+        << ", " << v.weight << ", " << v.localVertexId << ");\n";
+    }
   }
 
   // Faces: clamp normal indices to valid range
@@ -332,6 +425,214 @@ bool ExportToMefAscii(const ParsedGeometry &geometry,
   Logger::Get().Log(LogLevel::INFO,
                     "[MefExporter] Successfully exported ASCII MEF to: " +
                         outpath);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar: preserves all ILFF chunks verbatim for lossless round-trips.
+// Format: magic "SIDX" + uint32 version=1 + uint32 numChunks
+//         then for each: char fourcc[4] + uint32 dataSize + data (4-byte padded)
+// ---------------------------------------------------------------------------
+
+static void SidecarWriteU32(std::ofstream& f, uint32_t v) {
+    f.write(reinterpret_cast<const char*>(&v), 4);
+}
+
+bool WriteMefSidecar(const std::vector<ParsedGeometry::RawChunk>& chunks,
+                     const std::string& sidecarPath) {
+    std::ofstream f(sidecarPath, std::ios::binary);
+    if (!f.is_open()) {
+        Logger::Get().Log(LogLevel::ERR,
+            "[MefExporter] Cannot write sidecar: " + sidecarPath);
+        return false;
+    }
+
+    auto WriteTag = [](std::ofstream& s, const char* t) { s.write(t, 4); };
+    auto WriteU32 = [](std::ofstream& s, uint32_t v) { s.write(reinterpret_cast<const char*>(&v), 4); };
+
+    uint32_t fileSize = 20;
+    for (const auto& rc : chunks) {
+        uint32_t sz = static_cast<uint32_t>(rc.data.size());
+        uint32_t rem = (4 - (sz % 4)) % 4;
+        fileSize += 16 + sz + rem;
+    }
+
+    WriteTag(f, "ILFF");
+    WriteU32(f, fileSize);
+    WriteU32(f, 4u);
+    WriteU32(f, 0u);
+    WriteTag(f, "OCEM");
+
+    const uint8_t pad4[4] = {0,0,0,0};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const auto& rc = chunks[i];
+        const bool isLast = (i == chunks.size() - 1);
+        uint32_t sz = static_cast<uint32_t>(rc.data.size());
+        uint32_t rem = (4 - (sz % 4)) % 4;
+        uint32_t skip = isLast ? 0u : (16u + sz + rem);
+
+        WriteTag(f, rc.fourcc);
+        WriteU32(f, sz);
+        WriteU32(f, 4u);
+        WriteU32(f, skip);
+        if (sz > 0) f.write(reinterpret_cast<const char*>(rc.data.data()), sz);
+        if (rem > 0) f.write(reinterpret_cast<const char*>(pad4), rem);
+    }
+    
+    Logger::Get().Log(LogLevel::INFO,
+        "[MefExporter] Sidecar written: " + sidecarPath +
+        " (" + std::to_string(chunks.size()) + " chunks)");
+    return true;
+}
+
+std::vector<ParsedGeometry::RawChunk> ReadMefSidecar(const std::string& sidecarPath) {
+    try {
+        ParsedGeometry geo = ParseMefFile(sidecarPath);
+        Logger::Get().Log(LogLevel::INFO,
+            "[MefExporter] Sidecar read: " + sidecarPath +
+            " (" + std::to_string(geo.rawChunks.size()) + " chunks)");
+        return geo.rawChunks;
+    } catch (...) {
+        return {};
+    }
+}
+
+
+bool ExportTextMefToObj(const std::vector<MEFObject>& objects,
+                        const std::string& outpath) {
+  namespace fs = std::filesystem;
+
+  if (objects.empty()) return false;
+
+  // Derive MTL path from OBJ path
+  fs::path objPath(outpath);
+  std::string stem = objPath.stem().string();
+  std::string mtlFilename = stem + ".mtl";
+  fs::path mtlPath = objPath.parent_path() / mtlFilename;
+
+  // --- Write MTL ---
+  std::ofstream m(mtlPath.string());
+  if (!m.is_open()) {
+    Logger::Get().Log(LogLevel::ERR,
+                      "[MefExporter] Failed to open MTL: " + mtlPath.string());
+    return false;
+  }
+  m << "# MEF Text -> MTL Export\n";
+  for (const auto& obj : objects) {
+    for (const auto& mat : obj.materials) {
+      if (mat.has_collision) continue;
+      m << "\nnewmtl " << mat.name << "\n";
+      m << std::fixed << std::setprecision(6);
+      m << "Kd " << mat.diffuse[0] << " " << mat.diffuse[1] << " " << mat.diffuse[2] << "\n";
+      m << "Ka " << mat.ambient[0] << " " << mat.ambient[1] << " " << mat.ambient[2] << "\n";
+      m << "Ks " << mat.specular[0] << " " << mat.specular[1] << " " << mat.specular[2] << "\n";
+      if (!mat.diffuse_tmap.empty())
+        m << "map_Kd " << mat.diffuse_tmap << "\n";
+      if (!mat.opacity_tmap.empty())
+        m << "map_d " << mat.opacity_tmap << "\n";
+      if (!mat.bump_tmap.empty())
+        m << "bump " << mat.bump_tmap << "\n";
+    }
+  }
+  m.close();
+
+  // --- Write OBJ ---
+  std::ofstream f(outpath);
+  if (!f.is_open()) {
+    Logger::Get().Log(LogLevel::ERR,
+                      "[MefExporter] Failed to open OBJ: " + outpath);
+    return false;
+  }
+  f << "# MEF Text -> OBJ Export\n";
+  f << "mtllib " << mtlFilename << "\n\n";
+  f << std::fixed << std::setprecision(6);
+
+  size_t vertOffset = 1;  // OBJ indices are 1-based
+  size_t normOffset = 1;
+  size_t uvOffset   = 1;
+
+  for (const auto& obj : objects) {
+    // Vertices
+    for (const auto& v : obj.vertices)
+      f << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+
+    // Normals
+    for (const auto& n : obj.normals)
+      f << "vn " << n[0] << " " << n[1] << " " << n[2] << "\n";
+
+    // UVs: text MEF stores UVs per-vertex (UV(0, u, v), UV(1, u, v), ...).
+    // OBJ needs per-face UV entries (3 vts per face, indexed from the
+    // face's vertex indices).  We also flip V via MefVToObjV for the
+    // same DirectX->OpenGL reason as the binary MEF -> OBJ path.
+    // NOTE: model_type 1 (bone) and 3 (lightmap) keep V as-is; only
+    // model_type 0 (rigid) gets V flipped.
+    const uint32_t modelType = static_cast<uint32_t>(obj.model_type);
+    auto vtForVert = [&](int vi) {
+      // text MEF UV index is the same as vertex index (UV(0, ...) belongs
+      // to Vertex(0, ...), etc.)
+      if (vi >= 0 && vi < static_cast<int>(obj.uvs.size()) &&
+          obj.uvs[vi].size() >= 2) {
+        return std::pair<float, float>{
+            obj.uvs[vi][0],
+            MefVToObjV(obj.uvs[vi][1], modelType)};
+      }
+      return std::pair<float, float>{0.0f, 0.0f};
+    };
+    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
+      const auto& face = obj.faces[fi];
+      auto uv0 = vtForVert(face.v0);
+      auto uv1 = vtForVert(face.v1);
+      auto uv2 = vtForVert(face.v2);
+      f << "vt " << uv0.first << " " << uv0.second << "\n";
+      f << "vt " << uv1.first << " " << uv1.second << "\n";
+      f << "vt " << uv2.first << " " << uv2.second << "\n";
+    }
+
+    f << "\no " << obj.name << "\n";
+
+    // Find material by index helper
+    auto findMat = [&](int idx) -> const MEFMaterial* {
+      for (const auto& mat : obj.materials)
+        if (mat.index == idx) return &mat;
+      return obj.materials.empty() ? nullptr : &obj.materials[0];
+    };
+
+    int currentMat = -1;
+    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
+      const auto& face = obj.faces[fi];
+      if (face.material_index != currentMat) {
+        currentMat = face.material_index;
+        const auto* mat = findMat(currentMat);
+        if (mat) f << "usemtl " << mat->name << "\n";
+        else f << "usemtl mat_" << currentMat << "\n";
+      }
+      const size_t a  = face.v0 + vertOffset;
+      const size_t b  = face.v1 + vertOffset;
+      const size_t c  = face.v2 + vertOffset;
+      const size_t na = face.n0 + normOffset;
+      const size_t nb = face.n1 + normOffset;
+      const size_t nc = face.n2 + normOffset;
+      const size_t ta = fi * 3 + uvOffset;
+      const size_t tb = fi * 3 + uvOffset + 1;
+      const size_t tc = fi * 3 + uvOffset + 2;
+      if (!obj.normals.empty())
+        f << "f " << a << "/" << ta << "/" << na
+          << " " << b << "/" << tb << "/" << nb
+          << " " << c << "/" << tc << "/" << nc << "\n";
+      else
+        f << "f " << a << "/" << ta
+          << " " << b << "/" << tb
+          << " " << c << "/" << tc << "\n";
+    }
+
+    vertOffset += obj.vertices.size();
+    normOffset += obj.normals.size();
+    uvOffset   += obj.faces.size() * 3;
+  }
+  f.close();
+
+  Logger::Get().Log(LogLevel::INFO,
+                    "[MefExporter] Text MEF -> OBJ exported to: " + outpath);
   return true;
 }
 

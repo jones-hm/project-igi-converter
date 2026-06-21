@@ -52,6 +52,20 @@ std::vector<MEFObject> MEFParser::parse_string(const std::string& content) {
                 handle_uv(args);
             } else if (name == "BreakScript") {
                 handle_breakscript(args);
+            } else if (name == "ModelType") {
+                handle_modeltype(args);
+            } else if (name == "BoneVertex") {
+                handle_bonevertex(args);
+            } else if (name == "Attachment") {
+                handle_attachment(args);
+            } else if (name == "DiffuseTMap") {
+                handle_diffusetmap(args);
+            } else if (name == "OpacityTMap") {
+                handle_opacitytmap(args);
+            } else if (name == "BumpTMap") {
+                handle_bumptmap(args);
+            } else if (name == "ReflectionTMap") {
+                handle_reflectiontmap(args);
             } else {
                 // Unknown command, ignore
             }
@@ -293,4 +307,85 @@ void MEFParser::handle_uv(const std::vector<std::string>& args) {
 void MEFParser::handle_breakscript(const std::vector<std::string>& args) {
     // BreakScript is a separator; no action needed in Python other than pass, but if we wanted to push the current object we could.
     // The python code just does `pass`
+}
+
+void MEFParser::handle_modeltype(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.empty()) return;
+    try { m_current_object.model_type = std::stoi(args[0]); } catch (...) {}
+}
+
+void MEFParser::handle_bonevertex(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.size() < 4) return;
+    MEFBoneVertex bv;
+    try { bv.index         = std::stoi(args[0]); } catch (...) {}
+    try { bv.bone_index    = static_cast<uint16_t>(std::stoi(args[1])); } catch (...) {}
+    try { bv.weight        = std::stof(args[2]); } catch (...) {}
+    try { bv.local_vert_id = static_cast<uint16_t>(std::stoi(args[3])); } catch (...) {}
+    m_current_object.bone_vertices.push_back(bv);
+}
+
+void MEFParser::handle_attachment(const std::vector<std::string>& args) {
+    if (!m_has_current_object || args.size() < 14) return;
+    MefAttachment a;
+    std::memset(&a, 0, sizeof(a));
+    
+    std::string name = args[0];
+    if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+        name = name.substr(1, name.size() - 2);
+    }
+    std::strncpy(a.name, name.c_str(), 15);
+    
+    auto floats = parse_floats(std::vector<std::string>(args.begin() + 1, args.begin() + 13));
+    if (floats.size() == 12) {
+        a.px = floats[0]; a.py = floats[1]; a.pz = floats[2];
+        a.r00 = floats[3]; a.r01 = floats[4]; a.r02 = floats[5];
+        a.r03 = floats[6]; a.r04 = floats[7]; a.r05 = floats[8];
+        a.r06 = floats[9]; a.r07 = floats[10]; a.r08 = floats[11];
+    }
+    
+    try { a.boneId = std::stoi(args[13]); } catch (...) { a.boneId = -1; }
+    m_current_object.attachments.push_back(a);
+}
+
+// Helper: extract texture path from DiffuseTMap/etc. args
+// Args: matIndex, "path", mode, flags  (path may be bare or quoted)
+static std::string ExtractTmapPath(const std::vector<std::string>& args) {
+    if (args.size() < 2) return {};
+    std::string path = args[1];
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
+        path = path.substr(1, path.size() - 2);
+    return path;
+}
+
+static MEFMaterial* FindMaterial(MEFObject& obj, const std::vector<std::string>& args) {
+    if (args.empty() || obj.materials.empty()) return nullptr;
+    int idx = 0;
+    try { idx = std::stoi(args[0]); } catch (...) {}
+    for (auto& mat : obj.materials)
+        if (mat.index == idx) return &mat;
+    return nullptr;
+}
+
+void MEFParser::handle_diffusetmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->diffuse_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_opacitytmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->opacity_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_bumptmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->bump_tmap = ExtractTmapPath(args);
+}
+
+void MEFParser::handle_reflectiontmap(const std::vector<std::string>& args) {
+    if (!m_has_current_object) return;
+    if (auto* mat = FindMaterial(m_current_object, args))
+        mat->reflection_tmap = ExtractTmapPath(args);
 }

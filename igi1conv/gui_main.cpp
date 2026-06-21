@@ -16,6 +16,9 @@
 #include <QMessageBox>
 #include <QSyntaxHighlighter>
 #include <QRegularExpression>
+#include <QTimer>
+#include <QQuaternion>
+#include "../source/parsers/iff_parser.h"
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QFontDatabase>
@@ -29,6 +32,12 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QSettings>
+
+enum LogLevel { LOG_ERROR = 0, LOG_INFO = 1, LOG_DEBUG = 2, LOG_VERBOSE = 3 };
+
+#include <functional>
+static std::function<void(const QString&, LogLevel)> g_logger;
+
 #include <QCloseEvent>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
@@ -57,7 +66,10 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QColorDialog>
+#include <QUuid>
+#include "graph_parser.h"
 #include <QProgressDialog>
+#include "gif.h"
 
 #include <vector>
 #include <fstream>
@@ -84,6 +96,14 @@ static QImage loadImageSafe(const QString& path) {
     return img;
 }
 
+// V-flip is a pure EXPORT-time transformation: see MefVToObjV in
+// source/parsers/mef_exporter.cpp and the MefExportVFlip_*
+// regression tests in tests/test_igi1conv_commands.cpp.  The 3D
+// viewer is contractually required to render V as-is from the
+// MEF (no flip), and that contract is pinned by the
+// MefViewerDoesNotFlipV test.  No viewer-side V-flip helper
+// exists on purpose.
+
 static QString formatJson(const QJsonObject& obj, int indent = 0) {
     QString result;
     QString ind(indent, ' ');
@@ -107,7 +127,221 @@ public:
         int count = 0;
         QString materialName;
         std::shared_ptr<QOpenGLTexture> texture;
+        unsigned int drawMode = 0x0004; // GL_TRIANGLES
+        bool useOverrideColor = false;
+        QVector4D overrideColor = QVector4D(1, 1, 1, 1);
     };
+
+    void updateIffSkeleton() {
+        if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
+
+        const auto& clip  = currentIff.clips[currentClipIndex];
+        const auto& skel  = currentIff.skeleton;
+
+        std::vector<QMatrix4x4> globalTransforms(skel.bone_count);
+
+        vertices.clear(); uvs.clear(); normals.clear();
+        submeshes.clear();
+
+        // ── 1. Compute global bone positions ─────────────────────────────────
+        const float IGI_SCALE = 40.96f; // IGI uses 40.96 units = 1 m
+
+        for (int i = 0; i < skel.bone_count; ++i) {
+            QMatrix4x4 localMat;
+            localMat.setToIdentity();
+
+            // Rest-pose translation (from TLST) — already in IGI units
+            QVector3D trans(0, 0, 0);
+            if (i * 3 + 2 < (int)skel.translations.size())
+                trans = QVector3D(skel.translations[i*3],
+                                  skel.translations[i*3+1],
+                                  skel.translations[i*3+2]);
+
+            // Root bone: apply animated translation if available
+            if (i == 0 && !clip.root_translations.empty()) {
+                IffTranslationKey k1, k2;
+                float t = 0.0f;
+                if (animTime <= clip.root_translations.front().time) {
+                    k1 = k2 = clip.root_translations.front();
+                } else if (animTime >= clip.root_translations.back().time) {
+                    k1 = k2 = clip.root_translations.back();
+                } else {
+                    for (size_t j = 0; j+1 < clip.root_translations.size(); j++) {
+                        if (animTime >= clip.root_translations[j].time &&
+                            animTime <= clip.root_translations[j+1].time) {
+                            k1 = clip.root_translations[j];
+                            k2 = clip.root_translations[j+1];
+                            float dt = k2.time - k1.time;
+                            t = (dt == 0) ? 0.0f : (animTime - k1.time) / dt;
+                            break;
+                        }
+                    }
+                }
+                trans.setX(k1.pos[0] + (k2.pos[0] - k1.pos[0]) * t);
+                trans.setY(k1.pos[1] + (k2.pos[1] - k1.pos[1]) * t);
+                trans.setZ(k1.pos[2] + (k2.pos[2] - k1.pos[2]) * t);
+            }
+
+            // Animated rotation
+            QQuaternion rot;
+            rot.setScalar(1.0f);
+            if (i < (int)clip.bone_rotations.size() && !clip.bone_rotations[i].empty()) {
+                const auto& track = clip.bone_rotations[i];
+                IffRotationKey k1, k2;
+                float t = 0.0f;
+                if (animTime <= track.front().time) {
+                    k1 = k2 = track.front();
+                } else if (animTime >= track.back().time) {
+                    k1 = k2 = track.back();
+                } else {
+                    for (size_t j = 0; j+1 < track.size(); j++) {
+                        if (animTime >= track[j].time && animTime <= track[j+1].time) {
+                            k1 = track[j]; k2 = track[j+1];
+                            float dt = k2.time - k1.time;
+                            t = (dt == 0) ? 0.0f : (animTime - k1.time) / dt;
+                            break;
+                        }
+                    }
+                }
+                QQuaternion q1(k1.rot[3], k1.rot[0], k1.rot[1], k1.rot[2]);
+                QQuaternion q2(k2.rot[3], k2.rot[0], k2.rot[1], k2.rot[2]);
+                rot = QQuaternion::slerp(q1, q2, t);
+            }
+
+            localMat.translate(trans / IGI_SCALE); // normalise to meters
+            localMat.rotate(rot);
+
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i)
+                globalTransforms[i] = globalTransforms[parent] * localMat;
+            else
+                globalTransforms[i] = localMat;
+        }
+
+        // ── 2. Collect bone positions ────────────────────────────────────────
+        QVector<QVector3D> bonePos(skel.bone_count);
+        for (int i = 0; i < skel.bone_count; ++i)
+            bonePos[i] = globalTransforms[i].map(QVector3D(0,0,0));
+
+        // ── 3. Auto-fit camera: find bounding box ────────────────────────────
+        QVector3D bbMin = bonePos.isEmpty() ? QVector3D(-1,-1,-1) : bonePos[0];
+        QVector3D bbMax = bonePos.isEmpty() ? QVector3D( 1, 1, 1) : bonePos[0];
+        for (const auto& p : bonePos) {
+            bbMin.setX(std::min(bbMin.x(), p.x()));
+            bbMin.setY(std::min(bbMin.y(), p.y()));
+            bbMin.setZ(std::min(bbMin.z(), p.z()));
+            bbMax.setX(std::max(bbMax.x(), p.x()));
+            bbMax.setY(std::max(bbMax.y(), p.y()));
+            bbMax.setZ(std::max(bbMax.z(), p.z()));
+        }
+        QVector3D center = (bbMin + bbMax) * 0.5f;
+        float extent = std::max({(bbMax - bbMin).x(),
+                                 (bbMax - bbMin).y(),
+                                 (bbMax - bbMin).z(), 0.01f});
+        // Store for camera — reuse modelCx/y/z and modelScale
+        modelCx = center.x(); modelCy = center.y(); modelCz = center.z();
+        modelScale = extent;
+
+        // Helper: add a vertex in normalised space
+        auto addV = [&](const QVector3D& p, const QVector3D& n) {
+            float nx = (p.x() - center.x()) / extent;
+            float ny = (p.y() - center.y()) / extent;
+            float nz = (p.z() - center.z()) / extent;
+            vertices.push_back(nx); vertices.push_back(ny); vertices.push_back(nz);
+            uvs.push_back(0); uvs.push_back(0);
+            normals.push_back(n.x()); normals.push_back(n.y()); normals.push_back(n.z());
+        };
+
+        // ── 4. Draw bones as LINES ───────────────────────────────────────────
+        int boneLineStart = 0;
+        int boneLineCount = 0;
+        for (int i = 0; i < skel.bone_count; ++i) {
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i) {
+                addV(bonePos[parent], QVector3D(0,1,0));
+                addV(bonePos[i],      QVector3D(0,1,0));
+                boneLineCount += 2;
+            }
+        }
+        if (boneLineCount > 0) {
+            SubMesh sm;
+            sm.startIndex = boneLineStart;
+            sm.count = boneLineCount;
+            sm.drawMode = 0x0001; // GL_LINES
+            sm.useOverrideColor = true;
+            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 1.0f); // orange bones
+            submeshes.push_back(sm);
+        }
+
+        // ── 5. Draw joint DOTS as tiny cubes (8 triangles = 12 verts each) ──
+        // We emulate spheres as small cubes rendered as GL_TRIANGLES
+        int jointStart = vertices.size() / 3;
+        float r = 0.012f; // joint radius in normalised space
+        for (int i = 0; i < skel.bone_count; ++i) {
+            float cx = (bonePos[i].x()-center.x())/extent;
+            float cy = (bonePos[i].y()-center.y())/extent;
+            float cz = (bonePos[i].z()-center.z())/extent;
+            // 6 faces × 2 triangles × 3 verts = 36 verts per joint
+            QVector3D o(cx, cy, cz);
+            QVector3D verts[8] = {
+                o+QVector3D(-r,-r,-r), o+QVector3D(r,-r,-r),
+                o+QVector3D(r, r,-r), o+QVector3D(-r, r,-r),
+                o+QVector3D(-r,-r, r), o+QVector3D(r,-r, r),
+                o+QVector3D(r, r, r), o+QVector3D(-r, r, r)
+            };
+            int fi[36] = {0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1,
+                          1,5,6,1,6,2, 2,6,7,2,7,3, 0,3,7,0,7,4};
+            QVector3D fn[6] = {
+                {0,0,-1},{0,0,1},{0,-1,0},{1,0,0},{0,1,0},{-1,0,0}};
+            for (int f = 0; f < 6; f++) {
+                for (int t = 0; t < 6; t++) {
+                    int vi = fi[f*6+t];
+                    QVector3D p = verts[vi];
+                    vertices.push_back(p.x()); vertices.push_back(p.y()); vertices.push_back(p.z());
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(fn[f].x()); normals.push_back(fn[f].y()); normals.push_back(fn[f].z());
+                }
+            }
+        }
+        if (skel.bone_count > 0) {
+            SubMesh jsm;
+            jsm.startIndex = jointStart;
+            jsm.count = skel.bone_count * 36;
+            jsm.drawMode = 0x0004; // GL_TRIANGLES
+            jsm.useOverrideColor = true;
+            // Root bone white, others cyan
+            jsm.overrideColor = QVector4D(0.3f, 0.9f, 1.0f, 1.0f);
+            submeshes.push_back(jsm);
+        }
+
+        // ── 6. Draw XYZ axis cross at root ───────────────────────────────────
+        {
+            float ax = (bonePos[0].x()-center.x())/extent;
+            float ay = (bonePos[0].y()-center.y())/extent;
+            float az = (bonePos[0].z()-center.z())/extent;
+            float al = 0.08f;
+            int axStart = vertices.size() / 3;
+            // X=red Y=green Z=blue — we'll draw all 3 in one mesh, color orange
+            // X axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
+            vertices<<ax+al<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
+            // Y axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<1<<0;
+            vertices<<ax<<ay+al<<az; uvs<<0<<0; normals<<0<<1<<0;
+            // Z axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<0<<1;
+            vertices<<ax<<ay<<az+al; uvs<<0<<0; normals<<0<<0<<1;
+            SubMesh xsm;
+            xsm.startIndex = axStart;
+            xsm.count = 6;
+            xsm.drawMode = 0x0001; // GL_LINES
+            xsm.useOverrideColor = true;
+            xsm.overrideColor = QVector4D(1.0f, 1.0f, 0.2f, 1.0f); // yellow
+            submeshes.push_back(xsm);
+        }
+
+        iffBuffersDirty = true;
+    }
 
     QTextEdit* infoOverlay;
     QLabel* coordsOverlay;
@@ -122,8 +356,98 @@ public:
     QString currentModelPath;
     QString cacheDir;
 
+    GraphFile currentGraph;
+    int selectedGraphNodeId = -1;
+    bool showGraphNodes = true;
+    bool showGraphLinks = true;
+    float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
+    float graphMaxDim = 1000.0f;
+    float graphNodeScale = 1.0f;
+    
+    // IFF Animation State
+    bool isIffAnimation = false;
+    bool iffBuffersDirty = false;
+    IffFile currentIff;
+    QTimer* animTimer = nullptr;
+    float animTime = 0.0f;
+    int currentClipIndex = 0;
+    bool iffPlaying = false;
+
+    // Callback so MainWindow media bar can react to time changes
+    std::function<void(float time, float duration, int clip, int clipCount)> onIffTimeChanged;
+
+    // ── Public animation control API ─────────────────────────────────────────
+    void iffPlay() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        iffPlaying = true;
+        animTimer->start(16);
+    }
+    void iffPause() {
+        iffPlaying = false;
+        animTimer->stop();
+    }
+    void iffTogglePlayPause() {
+        if (iffPlaying) iffPause(); else iffPlay();
+    }
+    void iffSeekTo(float t) {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::max(0.0f, std::min(t, clip.duration));
+        updateIffSkeleton();
+        update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffStepForward() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::min(animTime + (clip.duration / 30.0f), clip.duration);
+        updateIffSkeleton(); update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffStepBackward() {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        const auto& clip = currentIff.clips[currentClipIndex];
+        animTime = std::max(0.0f, animTime - (clip.duration / 30.0f));
+        updateIffSkeleton(); update();
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    void iffSetClip(int idx) {
+        if (!isIffAnimation || idx < 0 || idx >= (int)currentIff.clips.size()) return;
+        currentClipIndex = idx;
+        animTime = 0.0f;
+        updateIffSkeleton(); update();
+        const auto& clip = currentIff.clips[currentClipIndex];
+        if (onIffTimeChanged) onIffTimeChanged(animTime, clip.duration, currentClipIndex, (int)currentIff.clips.size());
+    }
+    float iffGetDuration() const {
+        if (!isIffAnimation || currentIff.clips.empty()) return 1.0f;
+        return currentIff.clips[currentClipIndex].duration;
+    }
+    float iffGetTime() const { return animTime; }
+    int iffGetClipCount() const { return (int)currentIff.clips.size(); }
+    int iffGetClipIndex() const { return currentClipIndex; }
+
+    QVector3D worldToNormalized(float x, float y, float z) {
+        return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
+    }
+    
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
+        
+        animTimer = new QTimer(this);
+        connect(animTimer, &QTimer::timeout, this, [this]() {
+            if (isIffAnimation && currentIff.valid && !currentIff.clips.empty()) {
+                const auto& clip = currentIff.clips[currentClipIndex];
+                animTime += 16.0f; // timer ticks every 16ms
+                if (animTime >= clip.duration) {
+                    animTime = 0.0f;
+                    currentClipIndex = (currentClipIndex + 1) % currentIff.clips.size();
+                }
+                updateIffSkeleton();
+                update();
+                if (onIffTimeChanged) onIffTimeChanged(animTime, currentIff.clips[currentClipIndex].duration, currentClipIndex, (int)currentIff.clips.size());
+            }
+        });
         
         infoOverlay = new QTextEdit(this);
         infoOverlay->setReadOnly(true);
@@ -200,7 +524,187 @@ public:
             .arg(rotX, 0,'f',0).arg(rotY, 0,'f',0).arg(rotZ, 0,'f',0));
     }
 
+    void loadMefRecursive(const QString& path, const QMatrix4x4& transform, int depth) {
+        if (depth > 20) return;
+        
+        QFileInfo info(path);
+        if (!info.exists()) return;
+        
+        ParsedGeometry geo;
+        try {
+            geo = ParseMefFile(path.toStdString());
+        } catch(...) { return; }
+        
+        std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
+        if (!geo.pmtlTextures.empty()) {
+            for (const auto& tex : geo.pmtlTextures) {
+                loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
+            }
+        } else {
+            int maxSlot = -1;
+            for (const auto& b : geo.renderBlocks) if (b.materialSlot > maxSlot) maxSlot = b.materialSlot;
+            for (int i = 0; i <= maxSlot; ++i) {
+                QString matName = QString("mat_%1.tga").arg(i);
+                auto tex = loadCachedTexture(matName, info);
+                if (!tex) {
+                    QString tempDir = cacheDir + "/bundle/" + info.completeBaseName() + "/";
+                    QFileInfo tempInfo(tempDir + matName);
+                    tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
+                }
+                loadedMaterials.push_back(tex);
+            }
+        }
+
+        bool hasRawPos = false;
+        for (const auto& v : geo.vertices) {
+            if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
+        }
+        bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
+        // MEF stores V in different conventions depending on model type.
+        // The V-flip decision itself is delegated to guiMefVToObjV()
+        // so the rule stays in one place.  See the comment on that
+        // helper near the top of this file.
+        // older isBoneModel check (renderLayout contains "type1") missed
+        // Type 3 lightmap models, leaving them upside-down in the viewer.
+        const bool flipV = (geo.modelType == 0);
+
+        for (const auto& block : geo.renderBlocks) {
+            SubMesh sm;
+            sm.startIndex = vertices.size() / 3;
+            int triCount = 0;
+            for (size_t i = 0; i < block.triangleCount; ++i) {
+                size_t tIdx = block.triangleStart + i;
+                if (tIdx < geo.triangles.size()) {
+                    const auto& tri = geo.triangles[tIdx];
+                    auto addVert = [&](uint32_t idx) {
+                        if (idx < geo.vertices.size()) {
+                            const auto& v = geo.vertices[idx];
+                            // Bone models (type1): use v.pos which has bone world offsets baked in.
+                            // Other XTRV models: use rawPos (raw game units). Collision fallback: v.pos * 40.96f.
+                            glm::vec3 p = (isBoneModel || !hasRawPos) ? (v.pos * 40.96f) : v.rawPos;
+                            QVector4D tp = transform * QVector4D(p.x, p.y, p.z, 1.0f);
+                            vertices.push_back(tp.x() / 40.96f); vertices.push_back(tp.y() / 40.96f); vertices.push_back(tp.z() / 40.96f);
+
+                            QVector4D tn = transform * QVector4D(v.normal.x, v.normal.y, v.normal.z, 0.0f);
+                            QVector3D norm(tn.x(), tn.y(), tn.z());
+                            norm.normalize();
+                            normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
+
+                            // V-flip is an EXPORT-time transformation
+                            // only (see MefVToObjV in
+                            // source/parsers/mef_exporter.cpp and the
+                            // MefExportVFlip_* tests in
+                            // tests/test_igi1conv_commands.cpp).  In
+                            // the live 3D viewer we pass V through
+                            // unchanged so the model is never
+                            // displayed upside down.  Do not route
+                            // this through the guiMefVToObjV helper
+                            // and do NOT call MefVToObjV - the GUI's
+                            // contract is identity.  Pinned by the
+                            // MefViewerDoesNotFlipV regression test.
+                            uvs.push_back(v.uv.x);
+                            uvs.push_back(v.uv.y);
+                        } else {
+                            vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
+                            normals.push_back(0); normals.push_back(0); normals.push_back(0);
+                            uvs.push_back(0); uvs.push_back(0);
+                        }
+                    };
+                    addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
+                    triCount += 3;
+                }
+            }
+            sm.count = triCount;
+            if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
+                sm.texture = loadedMaterials[block.materialSlot];
+            }
+            if (sm.count > 0) submeshes.push_back(sm);
+        }
+
+        for (const auto& atta : geo.mefAttachments) {
+            QMatrix4x4 aMat(
+                atta.r00, atta.r01, atta.r02, atta.px,
+                atta.r03, atta.r04, atta.r05, atta.py,
+                atta.r06, atta.r07, atta.r08, atta.pz,
+                0.0f,     0.0f,     0.0f,     1.0f
+            );
+            QMatrix4x4 childTransform = transform * aMat;
+            
+            QString childName = QString::fromLocal8Bit(atta.name, strnlen(atta.name, 16));
+            QDir dir = info.absoluteDir();
+            QString path1 = dir.filePath(childName + ".mef");
+            QString path2 = dir.filePath(childName + ".MEF");
+            QString path3 = dir.filePath(childName + ".mex");
+            QString path4 = dir.filePath(childName + ".MEX");
+            
+            if (QFileInfo::exists(path1)) loadMefRecursive(path1, childTransform, depth + 1);
+            else if (QFileInfo::exists(path2)) loadMefRecursive(path2, childTransform, depth + 1);
+            else if (QFileInfo::exists(path3)) loadMefRecursive(path3, childTransform, depth + 1);
+            else if (QFileInfo::exists(path4)) loadMefRecursive(path4, childTransform, depth + 1);
+        }
+    }
+
+    void exportGif(const QString& filename) {
+        if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
+
+        float totalDuration = 0;
+        for (const auto& c : currentIff.clips) totalDuration += c.duration;
+        
+        QProgressDialog progress("Exporting GIF...", "Cancel", 0, totalDuration, this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.show();
+
+        int w = this->width();
+        int h = this->height();
+
+        GifWriter writer;
+        GifBegin(&writer, filename.toLocal8Bit().constData(), w, h, 2, 8, true);
+
+        float oldTime = animTime;
+        int oldClip = currentClipIndex;
+        bool oldGrid = showGrid;
+        bool oldWire = showWireframe;
+        showGrid = false;
+        showWireframe = false;
+
+        animTime = 0.0f;
+        currentClipIndex = 0;
+        
+        float currentProgress = 0.0f;
+        for (int i = 0; i < currentIff.clips.size(); ++i) {
+            const auto& clip = currentIff.clips[i];
+            currentClipIndex = i;
+            for (float t = 0.0f; t < clip.duration; t += 16.0f) {
+                if (progress.wasCanceled()) break;
+                animTime = t;
+                updateIffSkeleton();
+                repaint(); // force a synchronous paint
+                QImage frame = grabFramebuffer();
+                frame = frame.convertToFormat(QImage::Format_RGBA8888);
+                GifWriteFrame(&writer, frame.constBits(), w, h, 2, 8, true);
+                
+                currentProgress += 16.0f;
+                progress.setValue((int)currentProgress);
+                QCoreApplication::processEvents();
+            }
+            if (progress.wasCanceled()) break;
+        }
+        
+        GifEnd(&writer);
+        
+        animTime = oldTime;
+        currentClipIndex = oldClip;
+        showGrid = oldGrid;
+        showWireframe = oldWire;
+        updateIffSkeleton();
+        update();
+        QMessageBox::information(this, "Export complete", "GIF exported successfully to\n" + filename);
+    }
+
     void loadModel(const QString& path) {
+        if (animTimer) animTimer->stop();
+        isIffAnimation = false;
+        iffBuffersDirty = false;
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
@@ -212,62 +716,30 @@ public:
         
         updateModelInfo(info.completeBaseName());
         
-        if (ext == "mef") {
-            try {
-                ParsedGeometry geo = ParseMefFile(path.toStdString());
-                std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
-                
-                if (!geo.pmtlTextures.empty()) {
-                    for (const auto& tex : geo.pmtlTextures) {
-                        loadedMaterials.push_back(loadCachedTexture(QString::fromStdString(tex), info));
-                    }
-                } else {
-                    int maxSlot = -1;
-                    for (const auto& b : geo.renderBlocks) if (b.materialSlot > maxSlot) maxSlot = b.materialSlot;
-                    for (int i = 0; i <= maxSlot; ++i) {
-                        QString matName = QString("mat_%1.tga").arg(i);
-                        auto tex = loadCachedTexture(matName, info);
-                        if (!tex) {
-                            QString tempDir = cacheDir + "/bundle/" + info.completeBaseName() + "/";
-                            QFileInfo tempInfo(tempDir + matName);
-                            tex = loadCachedTexture(tempInfo.fileName(), tempInfo);
-                        }
-                        loadedMaterials.push_back(tex);
-                    }
-                }
+        if (ext == "mef" || ext == "mex") {
+            QMatrix4x4 identity;
+            identity.setToIdentity();
+            loadMefRecursive(path, identity, 0);
+        } else if (ext == "dat") {
+            loadGraphData(path);
+        } else if (ext == "iff" || ext == "bff") {
+            currentIff = IFF_Parse(path.toStdString(), [](int level, const std::string& msg) {
+                if (g_logger) g_logger(QString::fromStdString(msg), static_cast<LogLevel>(level));
+            });
+            if (currentIff.valid) {
+                isIffAnimation = true;
+                currentClipIndex = 0;
+                animTime = 0.0f;
 
-                for (const auto& block : geo.renderBlocks) {
-                    SubMesh sm;
-                    sm.startIndex = vertices.size() / 3;
-                    int triCount = 0;
-                    for (size_t i = 0; i < block.triangleCount; ++i) {
-                        size_t tIdx = block.triangleStart + i;
-                        if (tIdx < geo.triangles.size()) {
-                            const auto& tri = geo.triangles[tIdx];
-                            auto addVert = [&](uint32_t idx) {
-                                if (idx < geo.vertices.size()) {
-                                    const auto& v = geo.vertices[idx];
-                                    vertices.push_back(v.pos.x); vertices.push_back(v.pos.y); vertices.push_back(v.pos.z);
-                                    normals.push_back(v.normal.x); normals.push_back(v.normal.y); normals.push_back(v.normal.z);
-                                    bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
-                                    uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
-                                } else {
-                                    vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
-                                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
-                                    uvs.push_back(0); uvs.push_back(0);
-                                }
-                            };
-                            addVert(tri[0]); addVert(tri[1]); addVert(tri[2]);
-                            triCount += 3;
-                        }
-                    }
-                    sm.count = triCount;
-                    if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
-                        sm.texture = loadedMaterials[block.materialSlot];
-                    }
-                    if (sm.count > 0) submeshes.push_back(sm);
+                // Compute first frame immediately so camera has real bounds
+                updateIffSkeleton();
+
+                if (!currentIff.clips.empty()) {
+                    iffPlaying = true;
+                    animTimer->start(16);
+                    if (onIffTimeChanged) onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
                 }
-            } catch (...) {}
+            }
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;
@@ -385,6 +857,7 @@ protected:
         float cx = (minX + maxX)/2.f; float cy = (minY + maxY)/2.f; float cz = (minZ + maxZ)/2.f;
         float maxDim = std::max({maxX - minX, maxY - minY, maxZ - minZ});
         if (maxDim == 0) maxDim = 1.0f;
+        modelCx = cx; modelCy = cy; modelCz = cz; modelScale = maxDim;
         for (int i=0; i<vertices.size(); i+=3) {
             vertices[i] = (vertices[i]-cx)/maxDim;
             vertices[i+1] = (vertices[i+1]-cy)/maxDim;
@@ -404,6 +877,103 @@ protected:
         vbo.bind();
         vbo.allocate(bufferData.data(), bufferData.size() * sizeof(float));
         vbo.release();
+    }
+
+    void loadGraphData(const QString& path) {
+        currentGraph = GRAPH_Parse(path.toStdString());
+        if (!currentGraph.valid) return;
+        statsOverlay->setText(QString("Graph loaded: %1 nodes, %2 edges")
+                              .arg(currentGraph.nodes.size())
+                              .arg(currentGraph.edges.size()));
+
+        if (!currentGraph.nodes.empty()) {
+            float minX = currentGraph.nodes[0].x, maxX = minX;
+            float minY = currentGraph.nodes[0].y, maxY = minY;
+            float minZ = currentGraph.nodes[0].z, maxZ = minZ;
+            for (const auto& node : currentGraph.nodes) {
+                minX = std::min(minX, (float)node.x); maxX = std::max(maxX, (float)node.x);
+                minY = std::min(minY, (float)node.y); maxY = std::max(maxY, (float)node.y);
+                minZ = std::min(minZ, (float)node.z); maxZ = std::max(maxZ, (float)node.z);
+            }
+            graphMaxDim = std::max({maxX - minX, maxY - minY, maxZ - minZ});
+            if (graphMaxDim < 1.0f) graphMaxDim = 1000.0f;
+        } else {
+            graphMaxDim = 1000.0f;
+        }
+
+        generateGraphGeometry();
+    }
+
+    void generateGraphGeometry() {
+        vertices.clear(); uvs.clear(); normals.clear(); submeshes.clear(); textureCache.clear();
+
+        if (showGraphNodes) {
+            for (const auto& node : currentGraph.nodes) {
+                SubMesh sm;
+                sm.startIndex = vertices.size() / 3;
+                sm.drawMode = 0x0004; // GL_TRIANGLES
+                sm.useOverrideColor = true;
+
+                float r = 0.85f, g = 0.12f, b = 0.12f;
+                if (node.id == selectedGraphNodeId) { r=1.0f; g=0.6f; b=0.0f; }
+                else if (node.criteria.find("DOOR") != std::string::npos) { r=1.0f; g=1.0f; b=0.0f; }
+                else if (node.criteria.find("STAIR") != std::string::npos) { r=1.0f; g=0.0f; b=1.0f; }
+                else if (node.criteria.find("VIEW") != std::string::npos) { r=0.0f; g=1.0f; b=1.0f; }
+                sm.overrideColor = QVector4D(r, g, b, 1.0f);
+
+                float baseH = std::max(50.0f, graphMaxDim * 0.015f) * graphNodeScale;
+                float H = baseH * std::max(1.0f, (float)node.radius); 
+                QVector3D c(node.x, node.y, node.z);
+                QVector3D p0(c.x()-H, c.y()-H, c.z());
+                QVector3D p1(c.x()+H, c.y()-H, c.z());
+                QVector3D p2(c.x()+H, c.y()+H, c.z());
+                QVector3D p3(c.x()-H, c.y()+H, c.z());
+                QVector3D p4(c.x()-H, c.y()-H, c.z() + 2*H);
+                QVector3D p5(c.x()+H, c.y()-H, c.z() + 2*H);
+                QVector3D p6(c.x()+H, c.y()+H, c.z() + 2*H);
+                QVector3D p7(c.x()-H, c.y()+H, c.z() + 2*H);
+
+                auto addQuad = [&](const QVector3D& v0, const QVector3D& v1, const QVector3D& v2, const QVector3D& v3, const QVector3D& n) {
+                    vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                    vertices << v1.x() << v1.y() << v1.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 0;
+                    vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                    vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                    vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                    vertices << v3.x() << v3.y() << v3.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 1;
+                };
+
+                addQuad(p4, p5, p6, p7, QVector3D(0, 0, 1)); // Top
+                addQuad(p1, p0, p3, p2, QVector3D(0, 0, -1)); // Bottom
+                addQuad(p0, p1, p5, p4, QVector3D(0, -1, 0)); // Front
+                addQuad(p2, p3, p7, p6, QVector3D(0, 1, 0)); // Back
+                addQuad(p3, p0, p4, p7, QVector3D(-1, 0, 0)); // Left
+                addQuad(p1, p2, p6, p5, QVector3D(1, 0, 0)); // Right
+
+                sm.count = 36;
+                submeshes.push_back(sm);
+            }
+        }
+
+        if (showGraphLinks) {
+            SubMesh lineSm;
+            lineSm.startIndex = vertices.size() / 3;
+            lineSm.drawMode = 0x0001; // GL_LINES
+            lineSm.useOverrideColor = true;
+            lineSm.overrideColor = QVector4D(0.0f, 1.0f, 1.0f, 1.0f); // Cyan
+            
+            for (const auto& edge : currentGraph.edges) {
+                const GraphNode* n1 = GRAPH_FindNode(currentGraph, edge.node1);
+                const GraphNode* n2 = GRAPH_FindNode(currentGraph, edge.node2);
+                if (n1 && n2) {
+                    vertices << n1->x << n1->y << n1->z;
+                    normals << 0 << 1 << 0; uvs << 0 << 0;
+                    vertices << n2->x << n2->y << n2->z;
+                    normals << 0 << 1 << 0; uvs << 0 << 0;
+                    lineSm.count += 2;
+                }
+            }
+            if (lineSm.count > 0) submeshes.push_back(lineSm);
+        }
     }
 
     void updateModelInfo(const QString& baseName) {
@@ -532,13 +1102,17 @@ protected:
             "out vec4 FragColor;\n"
             "uniform sampler2D texture1;\n"
             "uniform bool hasTexture;\n"
+            "uniform bool useOverrideColor;\n"
+            "uniform vec4 overrideColor;\n"
             "void main() {\n"
             "    vec3 norm = normalize(Normal);\n"
-            "    vec3 viewDir = normalize(-FragPos);\n" // Headlight from camera
-            "    float diff = max(dot(norm, viewDir), 0.1);\n"
+            "    vec3 viewDir = vec3(0.0, 0.0, 1.0);\n" // Directional headlight
+            "    float diff = max(abs(dot(norm, viewDir)), 0.1);\n" // Two-sided lighting
             "    float ambient = 0.3;\n"
             "    float lighting = min(diff + ambient, 1.0);\n"
-            "    vec4 baseColor = hasTexture ? texture(texture1, TexCoord) : vec4(0.8, 0.8, 0.8, 1.0);\n"
+            "    vec4 baseColor = vec4(0.8, 0.8, 0.8, 1.0);\n"
+            "    if (hasTexture) baseColor = texture(texture1, TexCoord);\n"
+            "    if (useOverrideColor) baseColor = overrideColor;\n"
             "    FragColor = vec4(lighting * baseColor.rgb, baseColor.a);\n"
             "}\n";
 
@@ -589,6 +1163,11 @@ protected:
             gridVbo.release();
         }
 
+        if (iffBuffersDirty) {
+            setupBuffers();
+            iffBuffersDirty = false;
+        }
+
         vbo.bind();
         program.enableAttributeArray(0);
         program.setAttributeBuffer(0, GL_FLOAT, 0, 3, 8 * sizeof(float));
@@ -618,7 +1197,14 @@ protected:
                 } else {
                     program.setUniformValue("hasTexture", false);
                 }
-                glDrawArrays(GL_TRIANGLES, sm.startIndex, sm.count);
+                
+                if (sm.useOverrideColor) {
+                    program.setUniformValue("useOverrideColor", true);
+                    program.setUniformValue("overrideColor", sm.overrideColor);
+                } else {
+                    program.setUniformValue("useOverrideColor", false);
+                }
+                glDrawArrays(sm.drawMode, sm.startIndex, sm.count);
             }
         }
 
@@ -646,7 +1232,71 @@ protected:
         return angle;
     }
 
-    void mousePressEvent(QMouseEvent *event) override { lastPos = event->pos(); }
+    void mousePressEvent(QMouseEvent *event) override { 
+        lastPos = event->pos(); 
+        if (currentGraph.valid && event->button() == Qt::LeftButton) {
+            QMatrix4x4 projection, view, model;
+            projection.perspective(45.0f, float(width()) / float(height() ? height() : 1), 0.1f, 100.0f);
+            view.translate(transX, transY, -zoom);
+            model.rotate(rotX, 1.0f, 0.0f, 0.0f);
+            model.rotate(rotY, 0.0f, 1.0f, 0.0f);
+            model.rotate(rotZ, 0.0f, 0.0f, 1.0f);
+            
+            QMatrix4x4 mvp = projection * view * model;
+            bool invertible;
+            QMatrix4x4 invMvp = mvp.inverted(&invertible);
+            if (invertible) {
+                float x = (2.0f * event->pos().x()) / width() - 1.0f;
+                float y = 1.0f - (2.0f * event->pos().y()) / height();
+                QVector4D rayStart(x, y, -1.0f, 1.0f);
+                QVector4D rayEnd(x, y, 1.0f, 1.0f);
+                rayStart = invMvp * rayStart; rayStart /= rayStart.w();
+                rayEnd = invMvp * rayEnd; rayEnd /= rayEnd.w();
+                QVector3D rayOrigin = rayStart.toVector3D();
+                QVector3D rayDir = (rayEnd.toVector3D() - rayOrigin).normalized();
+                
+                float minT = std::numeric_limits<float>::max();
+                int closestId = -1;
+                for (const auto& node : currentGraph.nodes) {
+                    float baseH = std::max(50.0f, graphMaxDim * 0.015f) * graphNodeScale;
+                    float H = baseH * std::max(1.0f, (float)node.radius); 
+                    QVector3D center = worldToNormalized(node.x, node.y, node.z + H);
+                    QVector3D oc = rayOrigin - center;
+                    float b = QVector3D::dotProduct(oc, rayDir);
+                    float r = (H * 1.5f) / modelScale;
+                    float c = QVector3D::dotProduct(oc, oc) - r * r;
+                    float h = b * b - c;
+                    if (h > 0.0f) {
+                        float t = -b - sqrt(h);
+                        if (t > 0.0f && t < minT) {
+                            minT = t;
+                            closestId = node.id;
+                        }
+                    }
+                }
+                
+                if (closestId != -1) {
+                    selectedGraphNodeId = closestId;
+                    const GraphNode* n = GRAPH_FindNode(currentGraph, closestId);
+                    if (n) {
+                        int numLinks = 0;
+                        for (auto& e : currentGraph.edges) {
+                            if (e.node1 == n->id || e.node2 == n->id) numLinks++;
+                        }
+                        currentJsonInfo = QString("Node ID: %1\nPos: %2, %3, %4\nRadius: %5\nGamma: %6\nCriteria: %7\nConnected Links: %8")
+                                       .arg(n->id).arg(n->x).arg(n->y).arg(n->z).arg(n->radius).arg(n->gamma)
+                                       .arg(QString::fromStdString(n->criteria)).arg(numLinks);
+                        infoOverlay->setPlainText(QString("=== Node Info ===\n%1").arg(currentJsonInfo));
+                        if (!infoOverlay->isVisible()) infoOverlay->show();
+                    }
+                    generateGraphGeometry();
+                    centerModel();
+                    setupBuffers();
+                    update();
+                }
+            }
+        }
+    }
     void mouseMoveEvent(QMouseEvent *event) override {
         int dx = event->pos().x() - lastPos.x();
         int dy = event->pos().y() - lastPos.y();
@@ -663,7 +1313,56 @@ protected:
         lastPos = event->pos();
         updateCoordsOverlay();
     }
+    void keyPressEvent(QKeyEvent *event) override {
+        if (currentGraph.valid) {
+            if (event->key() == Qt::Key_N) {
+                showGraphNodes = !showGraphNodes;
+                generateGraphGeometry();
+                centerModel();
+                setupBuffers();
+                update();
+                return;
+            }
+            if (event->key() == Qt::Key_L) {
+                showGraphLinks = !showGraphLinks;
+                generateGraphGeometry();
+                centerModel();
+                setupBuffers();
+                update();
+                return;
+            }
+            if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal) {
+                if (event->modifiers() & Qt::ControlModifier) {
+                    graphNodeScale *= 1.2f;
+                    generateGraphGeometry(); centerModel(); setupBuffers(); update();
+                    return;
+                }
+            }
+            if (event->key() == Qt::Key_Minus) {
+                if (event->modifiers() & Qt::ControlModifier) {
+                    graphNodeScale /= 1.2f;
+                    generateGraphGeometry(); centerModel(); setupBuffers(); update();
+                    return;
+                }
+            }
+        }
+        QOpenGLWidget::keyPressEvent(event);
+    }
+
     void wheelEvent(QWheelEvent *event) override {
+        if (currentGraph.valid && ((event->buttons() & Qt::MiddleButton) || (event->modifiers() & Qt::ControlModifier))) {
+            if (event->angleDelta().y() > 0) {
+                graphNodeScale *= 1.1f;
+            } else if (event->angleDelta().y() < 0) {
+                graphNodeScale /= 1.1f;
+            }
+            generateGraphGeometry();
+            centerModel();
+            setupBuffers();
+            update();
+            return;
+        }
+
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
         if (zoom < 0.1f) zoom = 0.1f;
         update();
@@ -1311,7 +2010,10 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("IGI Game Convertor");
+        g_logger = [this](const QString& msg, LogLevel level) {
+            this->logMessage(msg, level);
+        };
+        setWindowTitle("IGI Game Converter");
         QIcon appIcon(":/igi1conv.ico");
         setWindowIcon(appIcon);
         resize(1200, 800);
@@ -1348,13 +2050,20 @@ public:
                         } else if (col == 2) { // Type
                             if (info.isDir()) return "File Folder";
                             QString ext = info.suffix().toLower();
-                            if (ext == "mef") return "Mesh Exported File format";
-                            if (ext == "res") return "resource archive";
-                            if (ext == "spr") return "sprite";
-                            if (ext == "fnt") return "font";
-                            if (ext == "pic") return "picture";
-                            if (ext == "tex") return "texture";
-                            if (ext == "mtp") return "material";
+                            if (ext == "mef") return "MEF Binary Model";
+                            if (ext == "mex") return "MEX Extended Model";
+                            if (ext == "res") return "Resource Archive";
+                            if (ext == "spr") return "Sprite Image";
+                            if (ext == "fnt") return "Font File";
+                            if (ext == "pic") return "Picture Image";
+                            if (ext == "tex") return "Texture Image";
+                            if (ext == "mtp") return "Material Properties";
+                            if (ext == "txt") {
+                                // Distinguish text MEF from generic text
+                                if (info.fileName().contains(".mef.", Qt::CaseInsensitive))
+                                    return "MEF Text Model";
+                                return "Text File";
+                            }
                             return ext.toUpper() + " File";
                         }
                     }
@@ -1385,6 +2094,17 @@ public:
         modelSearchBox->setFixedHeight(24);
         modelSearchBox->setStyleSheet("background:#333;color:#eee;border:1px solid #555;border-radius:3px;padding:2px 6px;font-family:Consolas;font-size:11px;");
         searchToolBar->addWidget(modelSearchBox);
+        
+        QPushButton* btnRefresh = new QPushButton("Refresh");
+        btnRefresh->setStyleSheet("background:#444;color:#eee;border:1px solid #555;border-radius:3px;padding:2px 8px;font-size:11px;");
+        searchToolBar->addWidget(btnRefresh);
+        connect(btnRefresh, &QPushButton::clicked, this, [this]() {
+            if (this->fileModel) {
+                QString currentPath = this->fileModel->rootPath();
+                this->fileModel->setRootPath("");
+                this->fileModel->setRootPath(currentPath);
+            }
+        });
         
         QLabel* modelSearchResult = new QLabel("  Type to search...");
         modelSearchResult->setStyleSheet("color:#888;font-size:11px;font-family:Consolas;min-width:300px;");
@@ -1585,8 +2305,9 @@ public:
         viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
         viewMenu->addAction("Text", [this]() { viewModeCombo->setCurrentIndex(1); });
         viewMenu->addAction("Hex", [this]() { viewModeCombo->setCurrentIndex(2); });
-        viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
-        viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addAction("Image", [this]() { viewModeCombo->setCurrentIndex(3); });
+        viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addAction("Video", [this]() { viewModeCombo->setCurrentIndex(5); });
         viewMenu->addSeparator();
         auto applyMenuTheme = [iniPath](const QString& name) {
             QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
@@ -1675,10 +2396,20 @@ public:
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
         globalCacheDir = settings.value("CacheDir", QDir::tempPath() + "/igi_temp_mef").toString();
+        globalAutoSaveRes = settings.value("AutoSaveRes", false).toBool();
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
         
+        QAction* autoSaveResAction = settingsMenu->addAction("Auto Save on RES");
+        autoSaveResAction->setCheckable(true);
+        autoSaveResAction->setChecked(globalAutoSaveRes);
+        connect(autoSaveResAction, &QAction::toggled, this, [this, iniPath](bool checked) {
+            globalAutoSaveRes = checked;
+            QSettings(iniPath, QSettings::IniFormat).setValue("AutoSaveRes", checked);
+            logMessage(QString("[INFO] Auto Save on RES is now %1").arg(checked ? "ON" : "OFF"));
+        });
+
         QMenu* levelMenu = settingsMenu->addMenu("&Level");
         levelMenu->addAction("Set Level...", this, [this, iniPath]() {
             QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? "D:/Software/IGI-Game" : QFileInfo(globalLevelDatPath).absolutePath());
@@ -1753,6 +2484,42 @@ public:
             }
         });
 
+        auto doClearCache = [this]() {
+            QDir dir(globalCacheDir);
+            if (!dir.exists()) {
+                logMessage("[INFO] Cache folder does not exist: " + globalCacheDir);
+                return;
+            }
+            int files = 0;
+            qint64 bytes = 0;
+            for (const QFileInfo& fi : QDir(globalCacheDir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot))
+                { files++; bytes += fi.size(); }
+            // Walk subdirs too
+            QDirIterator it(globalCacheDir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+            while (it.hasNext()) { it.next(); files++; bytes += it.fileInfo().size(); }
+            for (const QString& entry : dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot)) {
+                QFileInfo fi(globalCacheDir + "/" + entry);
+                if (fi.isDir()) QDir(fi.absoluteFilePath()).removeRecursively();
+                else            QFile::remove(fi.absoluteFilePath());
+            }
+            logMessage(QString("[INFO] Cache cleared: %1 files removed (%2 KB freed) — %3")
+                        .arg(files).arg(bytes / 1024).arg(globalCacheDir));
+        };
+
+        settingsMenu->addAction("Clear Cache", this, doClearCache);
+
+        // Small button in the menu-bar corner for quick cache clearing
+        QPushButton* clearCacheBtn = new QPushButton("\xf0\x9f\x97\x91 Clear Cache", menuBar());
+        clearCacheBtn->setFlat(true);
+        clearCacheBtn->setStyleSheet(
+            "QPushButton{color:#ccc;background:transparent;border:1px solid #555;"
+            "border-radius:3px;padding:2px 8px;font-size:11px;}"
+            "QPushButton:hover{background:#3a3a3a;border-color:#888;}"
+            "QPushButton:pressed{background:#222;}");
+        clearCacheBtn->setToolTip("Clear temporary cache folder");
+        connect(clearCacheBtn, &QPushButton::clicked, this, doClearCache);
+        menuBar()->setCornerWidget(clearCacheBtn, Qt::TopRightCorner);
+
         QMenu* logsMenu = settingsMenu->addMenu("&Logs");
         logsMenu->addAction("Enable Logs", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_ENABLED", true);
@@ -1766,20 +2533,24 @@ public:
         QMenu* logsLevelMenu = logsMenu->addMenu("Logs Level");
         logsLevelMenu->addAction("INFO", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "INFO");
-            logMessage("[INFO] LOGS_LEVEL set to INFO");
+            logMessage("[INFO] LOGS_LEVEL set to INFO", LOG_INFO);
         });
         logsLevelMenu->addAction("DEBUG", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "DEBUG");
-            logMessage("[INFO] LOGS_LEVEL set to DEBUG");
+            logMessage("[INFO] LOGS_LEVEL set to DEBUG", LOG_INFO);
         });
         logsLevelMenu->addAction("ERROR", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "ERROR");
-            logMessage("[INFO] LOGS_LEVEL set to ERROR");
+            logMessage("[INFO] LOGS_LEVEL set to ERROR", LOG_INFO);
+        });
+        logsLevelMenu->addAction("VERBOSE", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "VERBOSE");
+            logMessage("[INFO] LOGS_LEVEL set to VERBOSE", LOG_INFO);
         });
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.6.0\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.9.1\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
@@ -1915,7 +2686,7 @@ public:
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
-        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image View", "3D View"});
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
@@ -1935,6 +2706,131 @@ public:
         rightLayout->addWidget(viewerEdit, 3);
         rightLayout->addWidget(imageEditor, 3);
         rightLayout->addWidget(modelViewer, 3);
+
+        // ── IFF Media Player Bar ──────────────────────────────────────────────
+        iffMediaBar = new QWidget();
+        iffMediaBar->setObjectName("iffMediaBar");
+        iffMediaBar->setStyleSheet(
+            "QWidget#iffMediaBar { background:#1a1a2e; border-top:1px solid #444; padding:4px; }"
+            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:4px 10px; font-size:13px; min-width:30px; }"
+            "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
+            "QPushButton:pressed { background:#1a1a4a; }"
+            "QPushButton#playBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:15px; }"
+            "QPushButton#playBtn:hover { background:#2a6a2a; }"
+            "QSlider::groove:horizontal { background:#333; height:6px; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#88f; width:14px; height:14px; margin:-4px 0;"
+            "  border-radius:7px; border:1px solid #66c; }"
+            "QSlider::sub-page:horizontal { background:#556; border-radius:3px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:11px; min-width:90px; }"
+            "QComboBox { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:2px 6px; }"
+        );
+        QVBoxLayout* mediaVLayout = new QVBoxLayout(iffMediaBar);
+        mediaVLayout->setContentsMargins(6, 4, 6, 4);
+        mediaVLayout->setSpacing(4);
+
+        // Top row: clip selector + time label
+        QHBoxLayout* mediaTopRow = new QHBoxLayout();
+        mediaTopRow->addWidget(new QLabel("Clip:"));
+        iffClipCombo = new QComboBox();
+        iffClipCombo->setMinimumWidth(120);
+        mediaTopRow->addWidget(iffClipCombo);
+        mediaTopRow->addStretch();
+        iffTimeLabel = new QLabel("0.000 / 0.000 s");
+        mediaTopRow->addWidget(iffTimeLabel);
+        mediaVLayout->addLayout(mediaTopRow);
+
+        // Scrubber
+        iffScrubber = new QSlider(Qt::Horizontal);
+        iffScrubber->setRange(0, 10000);
+        iffScrubber->setValue(0);
+        mediaVLayout->addWidget(iffScrubber);
+
+        // Bottom row: transport buttons
+        QHBoxLayout* mediaBtnRow = new QHBoxLayout();
+        mediaBtnRow->setSpacing(6);
+        iffBtnPrev = new QPushButton("\u23ee"); iffBtnPrev->setToolTip("Previous clip");
+        iffBtnStepBack = new QPushButton("\u23ea"); iffBtnStepBack->setToolTip("Step backward one frame");
+        iffBtnPlay = new QPushButton("\u25b6"); iffBtnPlay->setObjectName("playBtn"); iffBtnPlay->setToolTip("Play / Pause");
+        iffBtnStepFwd = new QPushButton("\u23e9"); iffBtnStepFwd->setToolTip("Step forward one frame");
+        iffBtnNext = new QPushButton("\u23ed"); iffBtnNext->setToolTip("Next clip");
+        mediaBtnRow->addStretch();
+        mediaBtnRow->addWidget(iffBtnPrev);
+        mediaBtnRow->addWidget(iffBtnStepBack);
+        mediaBtnRow->addWidget(iffBtnPlay);
+        mediaBtnRow->addWidget(iffBtnStepFwd);
+        mediaBtnRow->addWidget(iffBtnNext);
+        mediaBtnRow->addStretch();
+        mediaVLayout->addLayout(mediaBtnRow);
+
+        iffMediaBar->hide();
+        rightLayout->addWidget(iffMediaBar);
+
+        // Wire media bar buttons
+        connect(iffBtnPlay, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffTogglePlayPause();
+            iffBtnPlay->setText(modelViewer->iffPlaying ? "\u23f8" : "\u25b6");
+        });
+        connect(iffBtnStepBack, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+            modelViewer->iffStepBackward();
+        });
+        connect(iffBtnStepFwd, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+            modelViewer->iffStepForward();
+        });
+        connect(iffBtnPrev, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffSetClip(modelViewer->iffGetClipIndex() - 1);
+        });
+        connect(iffBtnNext, &QPushButton::clicked, this, [this]() {
+            modelViewer->iffSetClip(modelViewer->iffGetClipIndex() + 1);
+        });
+        connect(iffClipCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+            modelViewer->iffSetClip(idx);
+        });
+        connect(iffScrubber, &QSlider::sliderPressed, this, [this]() {
+            iffScrubbing = true;
+            modelViewer->iffPause();
+            iffBtnPlay->setText("\u25b6");
+        });
+        connect(iffScrubber, &QSlider::sliderReleased, this, [this]() {
+            iffScrubbing = false;
+        });
+        connect(iffScrubber, &QSlider::valueChanged, this, [this](int val) {
+            if (!iffScrubbing) return;
+            float t = (val / 10000.0f) * modelViewer->iffGetDuration();
+            modelViewer->iffSeekTo(t);
+        });
+
+        // Wire ModelViewer callback -> update bar UI
+        modelViewer->onIffTimeChanged = [this](float time, float duration, int clip, int clipCount) {
+            if (iffScrubbing) return;
+            if (iffScrubber) {
+                iffScrubber->blockSignals(true);
+                iffScrubber->setValue(duration > 0 ? (int)((time / duration) * 10000) : 0);
+                iffScrubber->blockSignals(false);
+            }
+            if (iffTimeLabel) {
+                // Duration is in milliseconds in the IFF format
+                iffTimeLabel->setText(QString("%1 / %2 ms")
+                    .arg((int)time).arg((int)duration));
+            }
+            if (iffClipCombo && iffClipCombo->count() != clipCount) {
+                iffClipCombo->blockSignals(true);
+                iffClipCombo->clear();
+                for (int i = 0; i < clipCount; i++)
+                    iffClipCombo->addItem(QString("Clip %1").arg(i + 1));
+                iffClipCombo->blockSignals(false);
+            }
+            if (iffClipCombo && iffClipCombo->currentIndex() != clip) {
+                iffClipCombo->blockSignals(true);
+                iffClipCombo->setCurrentIndex(clip);
+                iffClipCombo->blockSignals(false);
+            }
+        };
 
         // Debug Output
         QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
@@ -2012,16 +2908,37 @@ public:
         QMainWindow::closeEvent(event);
     }
 
-    void logMessage(const QString& msg) {
-        if (consoleEdit) {
-            consoleEdit->append(msg);
-        }
+    void logMessage(const QString& msg, LogLevel msgLevel = LOG_INFO) {
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        QString levelStr = QSettings(iniPath, QSettings::IniFormat).value("LOGS_LEVEL", "INFO").toString();
+        LogLevel currentLevel = LOG_INFO;
+        if (levelStr == "ERROR") currentLevel = LOG_ERROR;
+        else if (levelStr == "DEBUG") currentLevel = LOG_DEBUG;
+        else if (levelStr == "VERBOSE") currentLevel = LOG_VERBOSE;
+        
+        if (msgLevel > currentLevel) return;
+        
+        QString prefix = "[INFO] ";
+        if (msgLevel == LOG_ERROR) prefix = "[ERROR] ";
+        else if (msgLevel == LOG_DEBUG) prefix = "[DEBUG] ";
+        else if (msgLevel == LOG_VERBOSE) prefix = "[VERBOSE] ";
+        
+        QString finalMsg = msg;
+        if (finalMsg.startsWith("[INFO] ")) finalMsg = finalMsg.mid(7);
+        else if (finalMsg.startsWith("[ERROR] ")) finalMsg = finalMsg.mid(8);
+        else if (finalMsg.startsWith("[DEBUG] ")) finalMsg = finalMsg.mid(8);
+        else if (finalMsg.startsWith("[VERBOSE] ")) finalMsg = finalMsg.mid(10);
+        
+        finalMsg = prefix + finalMsg;
+        
+        if (consoleEdit) {
+            consoleEdit->append(finalMsg);
+        }
         if (QSettings(iniPath, QSettings::IniFormat).value("LOGS_ENABLED", true).toBool()) {
             QFile logFile(QCoreApplication::applicationDirPath() + "/igi1conv.log");
             if (logFile.open(QIODevice::Append | QIODevice::Text)) {
                 QTextStream out(&logFile);
-                out << msg << "\n";
+                out << finalMsg << "\n";
             }
         }
     }
@@ -2037,6 +2954,16 @@ private:
     CodeEditor* viewerEdit;
     ImageEditor* imageEditor;
     ModelViewer* modelViewer;
+    QWidget* iffMediaBar = nullptr;
+    QPushButton* iffBtnPrev = nullptr;
+    QPushButton* iffBtnStepBack = nullptr;
+    QPushButton* iffBtnPlay = nullptr;
+    QPushButton* iffBtnStepFwd = nullptr;
+    QPushButton* iffBtnNext = nullptr;
+    QSlider* iffScrubber = nullptr;
+    QLabel* iffTimeLabel = nullptr;
+    QComboBox* iffClipCombo = nullptr;
+    bool iffScrubbing = false;
     QTextEdit* consoleEdit;
     QString currentFile;
     QString currentExt;
@@ -2046,11 +2973,18 @@ private:
     QString globalLevelDatPath;
     QString globalTextureDir;
     QString globalCacheDir;
+    bool globalAutoSaveRes = false;
 
     void hideAllViewers() {
         viewerEdit->hide();
         imageEditor->hide();
         modelViewer->hide();
+        if (iffMediaBar) iffMediaBar->hide();
+        // Stop animation and reset play button
+        if (modelViewer) {
+            modelViewer->iffPause();
+            if (iffBtnPlay) iffBtnPlay->setText("\u25b6");
+        }
     }
 
     void showContextMenu(const QPoint& pos) {
@@ -2117,8 +3051,87 @@ private:
 
         // Single item context menu
         if (isDir) {
-            menu.addAction("Pack to .res archive", [this, path]() {
-                QString folderName = QFileInfo(path).fileName();
+            QDir d(path);
+            if (!d.entryList({"*.iff", "*.IFF"}, QDir::Files).isEmpty()) {
+                menu.addAction("Batch Convert IFF -> BEF", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "convert", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Batch converted animations in directory to " + outDir);
+                        QMessageBox::information(this, "Success", "Batch converted animation files.");
+                    } else {
+                        logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to batch convert IFF files:\n" + proc.readAllStandardError());
+                    }
+                });
+
+                menu.addAction("Decompile IFF -> text + per-anim IFFs", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "decompile", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Decompiled IFF into " + outDir);
+                        QMessageBox::information(this, "Success", "Decompiled IFF to text + per-anim IFFs.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF decompile failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to decompile IFF:\n" + err);
+                    }
+                });
+                menu.addSeparator();
+            }
+            // If the folder contains a batch of .BEF scripts, offer to pack them
+            // back into a single IFF (the inverse of convert).
+            if (!d.entryList({"*.bef", "*.BEF"}, QDir::Files).isEmpty()) {
+                menu.addAction("Create IFF from .BEF scripts", [this, path]() {
+                    QString outIff = QFileDialog::getSaveFileName(this, "Save IFF",
+                        QFileInfo(path).absoluteFilePath() + ".iff", "IFF Skeletal Animation (*.iff)");
+                    if (outIff.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "create", path, outIff});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Wrote IFF " + outIff);
+                        QMessageBox::information(this, "Success", "Created IFF file.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF create failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to create IFF:\n" + err);
+                    }
+                });
+                menu.addAction("Generate Anims.qsc for .BEF scripts", [this, path]() {
+                    QString outQsc = QFileDialog::getSaveFileName(this, "Save Anims.qsc",
+                        QFileInfo(path).absoluteFilePath() + "/Anims.qsc", "QScript (*.qsc)");
+                    if (outQsc.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "emit-qsc", path, outQsc});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Wrote " + outQsc);
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] emit-qsc failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to write Anims.qsc:\n" + err);
+                    }
+                });
+                menu.addSeparator();
+            }
+
+            QString folderName = QFileInfo(path).fileName();
+            menu.addAction("Pack to .res archive", [this, path, folderName]() {
                 QString defaultOut = path + "/" + folderName + ".res";
                 QString outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
                     defaultOut, "Resource Archive (*.res)");
@@ -2154,13 +3167,85 @@ private:
             menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
             QMenu* viewMenu = menu.addMenu("View As");
-            viewMenu->addAction("Text View", [this, path]() { loadFile(path, 1); });
-            viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
-            viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
-            viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
+            viewMenu->addAction("Text", [this, path]() { loadFile(path, 1); });
+            viewMenu->addAction("Hex",  [this, path]() { loadFile(path, 2); });
+            viewMenu->addAction("Image",     [this, path]() { loadFile(path, 3); });
+            viewMenu->addAction("3D",        [this, path]() { loadFile(path, 4); });
             menu.addSeparator();
-        }
 
+            if (ext == "iff" || ext == "bff") {
+                menu.addAction("Convert to BEF", [this, path]() {
+                    QString dir = QFileInfo(path).absolutePath();
+                    QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    QDir().mkpath(tempDir + "/Input");
+                    QFile::copy(path, tempDir + "/Input/" + QFileInfo(path).fileName());
+
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "convert", tempDir + "/Input", tempDir + "/Converted"});
+                    proc.start();
+                    proc.waitForFinished(-1);
+
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        QStringList filters; filters << "*.BEF" << "*.bef";
+                        QDir out(tempDir + "/Converted");
+                        for (QString f : out.entryList(filters, QDir::Files)) {
+                            QFile::copy(tempDir + "/Converted/" + f, dir + "/" + f);
+                        }
+                        logMessage("[SUCCESS] Converted IFF to BEF in " + dir);
+                        QMessageBox::information(this, "Success", "Converted IFF file.");
+                    } else {
+                        logMessage("[ERROR] IFF convert failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to convert IFF file:\n" + proc.readAllStandardError());
+                    }
+                    QDir(tempDir).removeRecursively();
+                });
+
+                menu.addAction("Decompile to text + per-anim IFFs", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", QFileInfo(path).absolutePath());
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "decompile", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Decompiled " + path + " into " + outDir);
+                        QMessageBox::information(this, "Success", "Decompiled IFF file to text + per-anim IFFs.");
+                    } else {
+                        QString err = proc.readAllStandardError();
+                        logMessage("[ERROR] IFF decompile failed:\n" + err);
+                        QMessageBox::critical(this, "Error", "Failed to decompile IFF:\n" + err);
+                    }
+                });
+
+                menu.addAction("Export Animation as GIF...", [this, path]() {
+                    QString outPath = QFileDialog::getSaveFileName(this, "Export GIF", QFileInfo(path).absolutePath() + "/" + QFileInfo(path).completeBaseName() + ".gif", "GIF Image (*.gif)");
+                    if (!outPath.isEmpty()) {
+                        // Spawn the CLI's native headless renderer so the GUI's
+                        // OpenGL viewport doesn't have to be visible.  This is
+                        // the same code path as `igi1conv iff export-gif`.
+                        int w = modelViewer->width()  > 0 ? modelViewer->width()  : 640;
+                        int h = modelViewer->height() > 0 ? modelViewer->height() : 480;
+                        QProcess proc;
+                        proc.setProgram(qApp->applicationFilePath());
+                        proc.setArguments({"iff", "export-gif", path, outPath,
+                                          QString::number(w), QString::number(h), "15"});
+                        proc.start();
+                        proc.waitForFinished(-1);
+                        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                            logMessage("[SUCCESS] GIF written to " + outPath);
+                            QMessageBox::information(this, "Success",
+                                "GIF written successfully to:\n" + outPath);
+                        } else {
+                            QString err = proc.readAllStandardError();
+                            logMessage("[ERROR] GIF export failed:\n" + err);
+                            QMessageBox::critical(this, "Error", "GIF export failed:\n" + err);
+                        }
+                    }
+                });
+            }
+        }
 
         menu.addSeparator();
         menu.addAction("Rename...", [this, path]() {
@@ -2234,6 +3319,38 @@ private:
         } else if (ext == "tex" || ext == "spr" || ext == "pic") {
             menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeCommand("tex to-png"); });
             menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
+            menu.addAction("Replace Texture", [this, path]() {
+                QString newTex = QFileDialog::getOpenFileName(this, "Select Replacement Texture", QFileInfo(path).absolutePath(), "Texture Files (*.tex)");
+                if (!newTex.isEmpty()) {
+                    QFile::remove(path);
+                    if (QFile::copy(newTex, path)) {
+                        logMessage("[SUCCESS] Replaced texture: " + QFileInfo(path).fileName());
+                        QMessageBox::information(this, "Replaced", "Successfully replaced texture.");
+                        if (globalAutoSaveRes) {
+                            QDir parentDir = QFileInfo(path).absoluteDir();
+                            QString folderName = parentDir.dirName();
+                            QString parentOfParent = parentDir.absolutePath() + "/..";
+                            QString resPath = QDir::cleanPath(parentOfParent + "/" + folderName + ".res");
+                            if (QFileInfo::exists(resPath)) {
+                                logMessage("[INFO] Auto Saving RES: " + resPath);
+                                QProcess proc;
+                                proc.setProgram(qApp->applicationFilePath());
+                                proc.setArguments(QStringList() << "res" << "pack" << parentDir.absolutePath() << resPath << "--prefix" << folderName + "/");
+                                proc.start();
+                                proc.waitForFinished(-1);
+                                if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                                    logMessage("[SUCCESS] Auto Packed RES archive: " + resPath);
+                                } else {
+                                    logMessage("[ERROR] Auto Save Failed to pack RES: " + resPath + "\n" + proc.readAllStandardError());
+                                }
+                            }
+                        }
+                    } else {
+                        logMessage("[ERROR] Failed to replace texture: " + path);
+                        QMessageBox::critical(this, "Error", "Failed to replace texture.");
+                    }
+                }
+            });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
             menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
         } else if (ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
@@ -2254,83 +3371,99 @@ private:
             menu.addAction("Decompile",      [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
             menu.addAction("Disassemble",    [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("qvm info"); });
-        } else if (ext == "mef") {
-            menu.addAction("Info",             [this, path]() {
-                // Run mef info and display in console
-                loadFile(path);
-                executeCommand("mef info");
-            });
-            menu.addAction("Texture Map", [this, path]() {
-                QString baseName = QFileInfo(path).completeBaseName();
-                if (globalLevelDatPath.isEmpty()) {
-                    logMessage("[ERROR] No Level Set. Please set a Level path in Settings > Level first.");
-                    return;
+        } else if (ext == "mef" || ext == "mex") {
+            bool isBinary = true;
+            QFile f(path);
+            if (f.open(QIODevice::ReadOnly)) {
+                QByteArray magic = f.read(4);
+                if (magic != "ILFF") {
+                    isBinary = false;
                 }
-                
-                // 1. Get Texture Map from DAT export (JSON)
-                QProcess proc;
-                proc.setProgram(qApp->applicationFilePath());
-                proc.setArguments(QStringList() << "dat" << "export" << globalLevelDatPath);
-                proc.start();
-                proc.waitForFinished(10000);
-                QString datOut = proc.readAllStandardOutput();
-                
-                QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
-                
-                // Quick hacky JSON extraction for the specific model
-                int modelIdx = datOut.indexOf(QString("\"modelName\": \"%1\"").arg(baseName), 0, Qt::CaseInsensitive);
-                if (modelIdx != -1) {
-                    int texStart = datOut.indexOf("\"textures\": [", modelIdx);
-                    if (texStart != -1) {
-                        int texEnd = datOut.indexOf("]", texStart);
-                        QString texArr = datOut.mid(texStart + 12, texEnd - texStart - 12);
-                        report += "Textures mapped in DAT:\n" + texArr.replace("\"", "").trimmed() + "\n";
-                    } else {
-                        report += "No textures found in DAT for this model.\n";
-                    }
+                f.close();
+            }
+
+            QString cmdPrefix = ext;
+
+            if (isBinary) {
+                QMenu* infoMenu = menu.addMenu("Details");
+                infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
+                infoMenu->addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
+
+                QMenu* exportMenu = menu.addMenu("Export");
+                exportMenu->addAction("Export to Obj",       [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export-bundle"); });
+                if (ext == "mef") {
+                    exportMenu->addAction("Export to Mef(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
+                    exportMenu->addAction("Build Rigid Model", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " build-rigid"); });
                 } else {
-                    report += "(No texture mapping found in DAT for this model)\n";
+                    exportMenu->addAction("Export to Mex(Text)",      [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " to-text"); });
                 }
-                
-                // 2. Dump MEF to ASCII to show internal materials and ATTA positions
-                QProcess mefProc;
-                mefProc.setProgram(qApp->applicationFilePath());
-                mefProc.setArguments(QStringList() << "mef" << "dump" << path);
-                mefProc.start();
-                mefProc.waitForFinished(5000);
-                QString mefOut = mefProc.readAllStandardOutput();
-                
-                report += "\n=== MEF Internal Info (Materials & ATTA) ===\n";
-                QStringList mefLines = mefOut.split('\n');
-                for (const QString& line : mefLines) {
-                    if (line.startsWith("material") || line.startsWith("ATTA") || line.startsWith("attachment")) {
-                        report += line.trimmed() + "\n";
-                    }
+
+                if (ext == "mef") {
+
+                    // Textures submenu
+                    QMenu* texMenu = menu.addMenu("Textures");
+                    texMenu->addAction("Apply Textures", [this, path]() {
+                        currentFile = path;
+                        executeCommand("mef apply-tex");
+                        QString baseName = QFileInfo(path).completeBaseName();
+                        QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
+                        if (QDir(tempDir).exists()) {
+                            logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
+                            viewModeCombo->setCurrentIndex(4);
+                            modelViewer->loadModel(path);
+                            modelViewer->show();
+                        }
+                    });
+                    texMenu->addAction("Apply Textures (All)", [this, path]() {
+                        currentFile = QFileInfo(path).absolutePath();
+                        executeCommand("mef apply-tex-all");
+                    });
+                    texMenu->addAction("Map Textures", [this, path]() {
+                        QString baseName = QFileInfo(path).completeBaseName();
+                        if (globalLevelDatPath.isEmpty()) {
+                            logMessage("[ERROR] No level DAT set. Go to Settings > Level to set one.");
+                            return;
+                        }
+                        QProcess proc;
+                        proc.setProgram(qApp->applicationFilePath());
+                        proc.setArguments(QStringList() << "dat" << "export" << globalLevelDatPath);
+                        proc.start();
+                        proc.waitForFinished(10000);
+                        QString datOut = proc.readAllStandardOutput();
+
+                        QString report = QString("=== Texture Map: %1 ===\n").arg(baseName);
+                        int modelIdx = datOut.indexOf(QString("\"modelName\": \"%1\"").arg(baseName), 0, Qt::CaseInsensitive);
+                        if (modelIdx != -1) {
+                            int texStart = datOut.indexOf("\"textures\": [", modelIdx);
+                            if (texStart != -1) {
+                                int texEnd = datOut.indexOf("]", texStart);
+                                QString texArr = datOut.mid(texStart + 12, texEnd - texStart - 12);
+                                report += "Textures mapped in DAT:\n" + texArr.replace("\"", "").trimmed() + "\n";
+                            } else {
+                                report += "No textures found in DAT for this model.\n";
+                            }
+                        } else {
+                            report += "(No texture mapping found in DAT for this model)\n";
+                        }
+                        QProcess mefProc;
+                        mefProc.setProgram(qApp->applicationFilePath());
+                        mefProc.setArguments(QStringList() << "mef" << "dump" << path);
+                        mefProc.start();
+                        mefProc.waitForFinished(5000);
+                        QString mefOut = mefProc.readAllStandardOutput();
+                        report += "\n=== MEF Materials & Attachments ===\n";
+                        for (const QString& line : mefOut.split('\n')) {
+                            if (line.startsWith("material") || line.startsWith("ATTA") || line.startsWith("attachment"))
+                                report += line.trimmed() + "\n";
+                        }
+                        logMessage(report);
+                    });
                 }
-                
-                logMessage(report);
-            });
-            menu.addAction("Export", [this, path]() {
-                currentFile = path;
-                executeCommand("mef export-bundle");
-            });
-            menu.addAction("Apply Textures", [this, path]() {
-                currentFile = path;
-                executeCommand("mef apply-tex");
-                QString baseName = QFileInfo(path).completeBaseName();
-                QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
-                if (QDir(tempDir).exists()) {
-                    logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
-                    viewModeCombo->setCurrentIndex(4);
-                    modelViewer->loadModel(path);
-                    modelViewer->show();
-                }
-            });
-            menu.addAction("Apply Textures (All)", [this, path]() {
-                currentFile = QFileInfo(path).absolutePath();
-                executeCommand("mef apply-tex-all");
-            });
-            menu.addAction("Dump",      [this, path]() { loadFile(path); executeCommand("mef dump"); });
+            } else {
+                menu.addAction("Compile to Binary", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " compile-text"); });
+                QMenu* exportMenu = menu.addMenu("Export");
+                exportMenu->addAction("Export to Obj", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " export"); });
+            }
         } else if (ext == "res") {
             menu.addAction("Extract", [this, path]() { loadFile(path); executeCommand("res extract"); });
             menu.addAction("List",    [this, path]() { loadFile(path); executeCommand("res list"); });
@@ -2346,6 +3479,8 @@ private:
         } else if (ext == "fnt") {
             menu.addAction("Export PNG", [this, path]() { loadFile(path); executeCommand("fnt export"); });
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
+        } else if (ext == "iff") {
+            menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("iff info"); });
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -2361,10 +3496,30 @@ private:
         if (mode == 0) {
             if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic" || currentExt == "tga") {
                 mode = 3; // Image
-            } else if (currentExt == "mef" || currentExt == "obj") {
+            } else if (currentExt == "mef" || currentExt == "mex") {
+                bool isBinary = true;
+                QFile f(path);
+                if (f.open(QIODevice::ReadOnly)) {
+                    QByteArray magic = f.read(4);
+                    if (magic != "ILFF") isBinary = false;
+                    f.close();
+                }
+                if (isBinary) {
+                    if (currentExt == "mef") mode = 4; // 3D
+                    else mode = 2; // Hex
+                } else {
+                    mode = 1; // Text
+                }
+            } else if (currentExt == "obj") {
                 mode = 4; // 3D
-            } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat") {
-                mode = 1; // Text
+            } else if (currentExt == "iff") {
+                mode = 5; // Video
+            } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat" || currentExt == "qvm") {
+                if (currentExt == "dat" && info.fileName().toLower().contains("graph")) {
+                    mode = 4; // 3D
+                } else {
+                    mode = 1; // Text
+                }
             } else {
                 mode = 2; // Hex
             }
@@ -2464,9 +3619,19 @@ private:
                 }
             }
             imageEditor->show();
-        } else if (mode == 4) { // 3D
+        } else if (mode == 4 || mode == 5) { // 3D or Video
             modelViewer->loadModel(path);
             modelViewer->show();
+            // Show media bar only for .iff files in Video mode
+            bool isIffVideo = (mode == 5 && QFileInfo(path).suffix().toLower() == "iff");
+            if (iffMediaBar) {
+                if (isIffVideo) {
+                    iffMediaBar->show();
+                    if (iffBtnPlay) iffBtnPlay->setText("\u23f8"); // show pause since it auto-plays
+                } else {
+                    iffMediaBar->hide();
+                }
+            }
         }
     }
 
@@ -2638,14 +3803,38 @@ private:
             logMessage(QString("[INFO] Export-All complete: %1/%2 models bundled").arg(bundled).arg(mefs.size()));
             return; // Already ran all sub-processes above
 
+        } else if (cmd == "mef to-text" || cmd == "mex to-text") {
+            QString outTxt = currentFile;
+            args.clear();
+            if (cmd == "mex to-text") {
+                args << "mef" << "dump" << currentFile << "-o" << outTxt;
+                logMessage(QString("[INFO] Dumping MEX text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+            } else {
+                args << "mef" << "to-text" << currentFile << "-o" << outTxt;
+                logMessage(QString("[INFO] Exporting text %1 to: %2").arg(currentExt.toUpper(), outTxt));
+            }
+        } else if (cmd == "mef compile-text" || cmd == "mex compile-text") {
+            QString outBin = currentFile;
+            args.clear();
+            args << "mef" << "compile" << currentFile << "-o" << outBin;
+            logMessage(QString("[INFO] Compiling text %1 to binary: %2").arg(currentExt.toUpper(), outBin));
         } else if (cmd == "res unpack") {
             args << currentFile << (outDir + "/" + baseName + "_unpacked");
+        } else if (cmd == "mef export" || cmd == "mex export") {
+            QString outFolder = QFileDialog::getExistingDirectory(this, "Select Export Folder", outDir);
+            if (outFolder.isEmpty()) return;
+            args << currentFile << "-o" << (outFolder + "/" + baseName + ".obj");
+        } else if (cmd == "mef build-rigid") {
+            QString outFolder = QFileDialog::getExistingDirectory(this, "Select Output Folder for Rigid Model", outDir);
+            if (outFolder.isEmpty()) return;
+            args << currentFile << "-o" << (outFolder + "/" + baseName + ".mef");
+            if (!globalLevelDatPath.isEmpty()) args << "--dat" << globalLevelDatPath;
+            if (!globalTextureDir.isEmpty())   args << "--texdir" << globalTextureDir;
         } else {
             args << currentFile;
             if (cmd == "qsc compile") args << "-o" << (outDir + "/" + baseName + ".qvm");
             else if (cmd == "qvm decompile") args << "-o" << (outDir + "/" + baseName + ".qsc");
-            else if (cmd == "mef export") args << "-o" << (outDir + "/" + baseName + ".obj");
-            else if (cmd == "mef dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
+            else if (cmd == "mef dump" || cmd == "mex dump") args << "-o" << (outDir + "/" + baseName + "_dump.txt");
             else if (cmd == "res extract") args << "-o" << outDir;
             else if (cmd == "fnt export") args << "-o" << (outDir + "/" + baseName + ".png");
             else if (cmd == "qvm disasm") args << "-o" << (outDir + "/" + baseName + ".qas");
@@ -2653,7 +3842,11 @@ private:
 
         if (args.isEmpty()) return;
 
-        QProgressDialog progress("Executing command...", "Cancel", 0, 0, this);
+        QString progressText = "Executing command...";
+        if (cmd.endsWith("build-rigid")) {
+            progressText = "Completing Build model finding attachments textures.... Please wait";
+        }
+        QProgressDialog progress(progressText, "Cancel", 0, 0, this);
         progress.setWindowModality(Qt::WindowModal);
         progress.setMinimumDuration(0);
         progress.show();

@@ -146,25 +146,27 @@ Used for animated characters and objects with skeletal rigs.
 Used for level geometry with lightmap UVs.
 
 | Byte Offset | Size | Type    | Field              |
-|-------------|------|---------|-------------------|
+|-------------|------|---------|--------------------|
 | 0x00        | 4    | float32 | Position X         |
 | 0x04        | 4    | float32 | Position Y         |
 | 0x08        | 4    | float32 | Position Z         |
-| 0x0C        | 4    | float32 | UV0 U (primary)    |
-| 0x10        | 4    | float32 | UV0 V (primary)    |
-| 0x14        | 4    | float32 | UV1 U (lightmap)   |
-| 0x18        | 4    | float32 | UV1 V (lightmap)   |
-| 0x1C        | 12   | -       | Additional data    |
+| 0x0C        | 4    | float32 | Normal X           |
+| 0x10        | 4    | float32 | Normal Y           |
+| 0x14        | 4    | float32 | Normal Z           |
+| 0x18        | 4    | float32 | UV0 U (primary)    |
+| 0x1C        | 4    | float32 | UV0 V (primary)    |
+| 0x20        | 4    | float32 | UV1 U (lightmap)   |
+| 0x24        | 4    | float32 | UV1 V (lightmap)   |
 
-**Total: 40 bytes per vertex.** Primary UV offset within vertex: 12.
+**Total: 40 bytes per vertex.** Primary UV offset within vertex: 24. Lightmap UV offset: 32.
 
 #### Summary Table
 
 | Model Type | Vertex Size | UV Offset | Description |
 |------------|-------------|-----------|-------------|
 | 0          | 32 bytes    | 24        | Rigid (pos + normal + uv) |
-| 1          | 40 bytes    | 24        | Bone/skeletal (pos + normal + uv0 + uv1) |
-| 3          | 40 bytes    | 12        | Lightmap (pos + uv0 + uv1 + ...) |
+| 1          | 40 bytes    | 24        | Bone/skeletal (pos + normal + uv0 + uv1/weight/bone) |
+| 3          | 40 bytes    | 24        | Lightmap (pos + normal + uv0 + uv1) |
 
 The vertex count is determined by: `XTRV.chunk_data_size / vertex_size`.
 

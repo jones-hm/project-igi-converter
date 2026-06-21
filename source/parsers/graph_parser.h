@@ -27,6 +27,13 @@ struct GraphNode {
     std::string criteria;        // e.g. "NODECRITERIA_VIEW"
     int    link1    = -1;        // connected node ID (-1 = none)
     int    link2    = -1;        // connected node ID (-1 = none)
+    // Legacy (alternate tagged) format only — preserved verbatim on save.
+    float  f3       = 0.5f;      // 3rd float after radius (purpose unknown)
+    std::vector<int> legacy_link_targets;  // per-node link target IDs
+    std::vector<int> legacy_link_types;    // per-node link types
+    int    legacy_graph_link     = 0;      // 0 = no inter-graph link, 1 = has
+    int    legacy_graph_link_tgt = 0;
+    int    legacy_graph_link_typ = 0;
 };
 
 struct GraphEdge {
@@ -41,8 +48,40 @@ struct GraphFile {
     std::vector<GraphEdge>  edges;
     bool                    valid = false;
     std::string             error;
+    bool                    is_legacy = false;  // alternate tagged format (no magic)
 };
+
+// Visual/semantic classification of a node, derived from its criteria string.
+// Precedence when multiple keywords are present: Door > Stair > View > Default.
+enum class GraphNodeKind { Default, Door, View, Stair };
+
+// Classify a node by its criteria text (case-sensitive substring match,
+// e.g. "NODECRITERIA_DOOR" -> Door). Empty/unknown criteria -> Default.
+GraphNodeKind GRAPH_NodeKind(const GraphNode& node);
+
+// Find a node by id. Returns nullptr if absent.
+GraphNode*       GRAPH_FindNode(GraphFile& graph, int id);
+const GraphNode* GRAPH_FindNode(const GraphFile& graph, int id);
 
 // Parse a navigation graph .dat file.
 // Filepath example: missions/location0/level1/graphs/graph1.dat
 GraphFile GRAPH_Parse(const std::string& filepath);
+
+// Parse the legacy alternate tagged format (no magic; 1-byte type tags).
+// Called internally by GRAPH_Parse when the standard magic is absent.
+GraphFile GRAPH_ParseLegacy(const uint8_t* data, size_t size, const std::string& filepath);
+
+// Save edited node positions back to disk.
+// Re-reads the original bytes from `srcPath`, overwrites the X/Y/Z position of
+// every node record whose id matches an entry in `graph.nodes`, then writes the
+// result to `outPath` (may equal srcPath). All other bytes (criteria, gamma,
+// radius, material, edges, adjacency table) are preserved verbatim, so the file
+// size never changes. Returns false on error.
+bool GRAPH_Save(const std::string& srcPath, const std::string& outPath, const GraphFile& graph);
+
+// Full serializer: preserves the original header + adjacency table from srcPath,
+// then regenerates ALL node and edge tagged records from `graph`. Unlike
+// GRAPH_Save (which only patches positions in place), this supports adding,
+// removing, and editing nodes/edges (position, criteria, gamma, radius,
+// material, links). Returns false on error.
+bool GRAPH_Write(const std::string& srcPath, const std::string& outPath, const GraphFile& graph);
