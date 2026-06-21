@@ -124,24 +124,30 @@ public:
 
     void updateIffSkeleton() {
         if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
-        
-        const auto& clip = currentIff.clips[currentClipIndex];
-        const auto& skel = currentIff.skeleton;
-        
+
+        const auto& clip  = currentIff.clips[currentClipIndex];
+        const auto& skel  = currentIff.skeleton;
+
         std::vector<QMatrix4x4> globalTransforms(skel.bone_count);
-        
+
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
-        
+
+        // ── 1. Compute global bone positions ─────────────────────────────────
+        const float IGI_SCALE = 40.96f; // IGI uses 40.96 units = 1 m
+
         for (int i = 0; i < skel.bone_count; ++i) {
             QMatrix4x4 localMat;
             localMat.setToIdentity();
-            
-            QVector3D trans(0,0,0);
-            if (i * 3 + 2 < skel.translations.size()) {
-                trans = QVector3D(skel.translations[i*3], skel.translations[i*3+1], skel.translations[i*3+2]);
-            }
-            
+
+            // Rest-pose translation (from TLST) — already in IGI units
+            QVector3D trans(0, 0, 0);
+            if (i * 3 + 2 < (int)skel.translations.size())
+                trans = QVector3D(skel.translations[i*3],
+                                  skel.translations[i*3+1],
+                                  skel.translations[i*3+2]);
+
+            // Root bone: apply animated translation if available
             if (i == 0 && !clip.root_translations.empty()) {
                 IffTranslationKey k1, k2;
                 float t = 0.0f;
@@ -150,11 +156,13 @@ public:
                 } else if (animTime >= clip.root_translations.back().time) {
                     k1 = k2 = clip.root_translations.back();
                 } else {
-                    for(size_t j=0; j<clip.root_translations.size()-1; j++) {
-                        if (animTime >= clip.root_translations[j].time && animTime <= clip.root_translations[j+1].time) {
+                    for (size_t j = 0; j+1 < clip.root_translations.size(); j++) {
+                        if (animTime >= clip.root_translations[j].time &&
+                            animTime <= clip.root_translations[j+1].time) {
                             k1 = clip.root_translations[j];
                             k2 = clip.root_translations[j+1];
-                            t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                            float dt = k2.time - k1.time;
+                            t = (dt == 0) ? 0.0f : (animTime - k1.time) / dt;
                             break;
                         }
                     }
@@ -163,9 +171,11 @@ public:
                 trans.setY(k1.pos[1] + (k2.pos[1] - k1.pos[1]) * t);
                 trans.setZ(k1.pos[2] + (k2.pos[2] - k1.pos[2]) * t);
             }
-            
+
+            // Animated rotation
             QQuaternion rot;
-            if (i < clip.bone_rotations.size() && !clip.bone_rotations[i].empty()) {
+            rot.setScalar(1.0f);
+            if (i < (int)clip.bone_rotations.size() && !clip.bone_rotations[i].empty()) {
                 const auto& track = clip.bone_rotations[i];
                 IffRotationKey k1, k2;
                 float t = 0.0f;
@@ -174,11 +184,11 @@ public:
                 } else if (animTime >= track.back().time) {
                     k1 = k2 = track.back();
                 } else {
-                    for(size_t j=0; j<track.size()-1; j++) {
+                    for (size_t j = 0; j+1 < track.size(); j++) {
                         if (animTime >= track[j].time && animTime <= track[j+1].time) {
-                            k1 = track[j];
-                            k2 = track[j+1];
-                            t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                            k1 = track[j]; k2 = track[j+1];
+                            float dt = k2.time - k1.time;
+                            t = (dt == 0) ? 0.0f : (animTime - k1.time) / dt;
                             break;
                         }
                     }
@@ -187,37 +197,139 @@ public:
                 QQuaternion q2(k2.rot[3], k2.rot[0], k2.rot[1], k2.rot[2]);
                 rot = QQuaternion::slerp(q1, q2, t);
             }
-            
-            localMat.translate(trans);
+
+            localMat.translate(trans / IGI_SCALE); // normalise to meters
             localMat.rotate(rot);
-            
-            int parent = -1;
-            if (i < skel.parents.size()) parent = skel.parents[i];
-            
-            if (parent >= 0 && parent < i) {
+
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i)
                 globalTransforms[i] = globalTransforms[parent] * localMat;
-                QVector3D p1 = globalTransforms[parent].map(QVector3D(0,0,0));
-                QVector3D p2 = globalTransforms[i].map(QVector3D(0,0,0));
-                
-                vertices.push_back(p1.x()); vertices.push_back(p1.y()); vertices.push_back(p1.z());
-                vertices.push_back(p2.x()); vertices.push_back(p2.y()); vertices.push_back(p2.z());
-                for(int j=0; j<2; j++) {
-                    uvs.push_back(0); uvs.push_back(0);
-                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
-                }
-            } else {
+            else
                 globalTransforms[i] = localMat;
+        }
+
+        // ── 2. Collect bone positions ────────────────────────────────────────
+        QVector<QVector3D> bonePos(skel.bone_count);
+        for (int i = 0; i < skel.bone_count; ++i)
+            bonePos[i] = globalTransforms[i].map(QVector3D(0,0,0));
+
+        // ── 3. Auto-fit camera: find bounding box ────────────────────────────
+        QVector3D bbMin = bonePos.isEmpty() ? QVector3D(-1,-1,-1) : bonePos[0];
+        QVector3D bbMax = bonePos.isEmpty() ? QVector3D( 1, 1, 1) : bonePos[0];
+        for (const auto& p : bonePos) {
+            bbMin.setX(std::min(bbMin.x(), p.x()));
+            bbMin.setY(std::min(bbMin.y(), p.y()));
+            bbMin.setZ(std::min(bbMin.z(), p.z()));
+            bbMax.setX(std::max(bbMax.x(), p.x()));
+            bbMax.setY(std::max(bbMax.y(), p.y()));
+            bbMax.setZ(std::max(bbMax.z(), p.z()));
+        }
+        QVector3D center = (bbMin + bbMax) * 0.5f;
+        float extent = std::max({(bbMax - bbMin).x(),
+                                 (bbMax - bbMin).y(),
+                                 (bbMax - bbMin).z(), 0.01f});
+        // Store for camera — reuse modelCx/y/z and modelScale
+        modelCx = center.x(); modelCy = center.y(); modelCz = center.z();
+        modelScale = extent;
+
+        // Helper: add a vertex in normalised space
+        auto addV = [&](const QVector3D& p, const QVector3D& n) {
+            float nx = (p.x() - center.x()) / extent;
+            float ny = (p.y() - center.y()) / extent;
+            float nz = (p.z() - center.z()) / extent;
+            vertices.push_back(nx); vertices.push_back(ny); vertices.push_back(nz);
+            uvs.push_back(0); uvs.push_back(0);
+            normals.push_back(n.x()); normals.push_back(n.y()); normals.push_back(n.z());
+        };
+
+        // ── 4. Draw bones as LINES ───────────────────────────────────────────
+        int boneLineStart = 0;
+        int boneLineCount = 0;
+        for (int i = 0; i < skel.bone_count; ++i) {
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i) {
+                addV(bonePos[parent], QVector3D(0,1,0));
+                addV(bonePos[i],      QVector3D(0,1,0));
+                boneLineCount += 2;
             }
         }
-        
-        SubMesh sm;
-        sm.startIndex = 0;
-        sm.count = vertices.size() / 3;
-        sm.drawMode = 0x0001; // GL_LINES
-        sm.useOverrideColor = true;
-        sm.overrideColor = QVector4D(1.0f, 0.2f, 0.2f, 1.0f);
-        submeshes.push_back(sm);
-        
+        if (boneLineCount > 0) {
+            SubMesh sm;
+            sm.startIndex = boneLineStart;
+            sm.count = boneLineCount;
+            sm.drawMode = 0x0001; // GL_LINES
+            sm.useOverrideColor = true;
+            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 1.0f); // orange bones
+            submeshes.push_back(sm);
+        }
+
+        // ── 5. Draw joint DOTS as tiny cubes (8 triangles = 12 verts each) ──
+        // We emulate spheres as small cubes rendered as GL_TRIANGLES
+        int jointStart = vertices.size() / 3;
+        float r = 0.012f; // joint radius in normalised space
+        for (int i = 0; i < skel.bone_count; ++i) {
+            float cx = (bonePos[i].x()-center.x())/extent;
+            float cy = (bonePos[i].y()-center.y())/extent;
+            float cz = (bonePos[i].z()-center.z())/extent;
+            // 6 faces × 2 triangles × 3 verts = 36 verts per joint
+            QVector3D o(cx, cy, cz);
+            QVector3D verts[8] = {
+                o+QVector3D(-r,-r,-r), o+QVector3D(r,-r,-r),
+                o+QVector3D(r, r,-r), o+QVector3D(-r, r,-r),
+                o+QVector3D(-r,-r, r), o+QVector3D(r,-r, r),
+                o+QVector3D(r, r, r), o+QVector3D(-r, r, r)
+            };
+            int fi[36] = {0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1,
+                          1,5,6,1,6,2, 2,6,7,2,7,3, 0,3,7,0,7,4};
+            QVector3D fn[6] = {
+                {0,0,-1},{0,0,1},{0,-1,0},{1,0,0},{0,1,0},{-1,0,0}};
+            for (int f = 0; f < 6; f++) {
+                for (int t = 0; t < 6; t++) {
+                    int vi = fi[f*6+t];
+                    QVector3D p = verts[vi];
+                    vertices.push_back(p.x()); vertices.push_back(p.y()); vertices.push_back(p.z());
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(fn[f].x()); normals.push_back(fn[f].y()); normals.push_back(fn[f].z());
+                }
+            }
+        }
+        if (skel.bone_count > 0) {
+            SubMesh jsm;
+            jsm.startIndex = jointStart;
+            jsm.count = skel.bone_count * 36;
+            jsm.drawMode = 0x0004; // GL_TRIANGLES
+            jsm.useOverrideColor = true;
+            // Root bone white, others cyan
+            jsm.overrideColor = QVector4D(0.3f, 0.9f, 1.0f, 1.0f);
+            submeshes.push_back(jsm);
+        }
+
+        // ── 6. Draw XYZ axis cross at root ───────────────────────────────────
+        {
+            float ax = (bonePos[0].x()-center.x())/extent;
+            float ay = (bonePos[0].y()-center.y())/extent;
+            float az = (bonePos[0].z()-center.z())/extent;
+            float al = 0.08f;
+            int axStart = vertices.size() / 3;
+            // X=red Y=green Z=blue — we'll draw all 3 in one mesh, color orange
+            // X axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
+            vertices<<ax+al<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
+            // Y axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<1<<0;
+            vertices<<ax<<ay+al<<az; uvs<<0<<0; normals<<0<<1<<0;
+            // Z axis
+            vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<0<<1;
+            vertices<<ax<<ay<<az+al; uvs<<0<<0; normals<<0<<0<<1;
+            SubMesh xsm;
+            xsm.startIndex = axStart;
+            xsm.count = 6;
+            xsm.drawMode = 0x0001; // GL_LINES
+            xsm.useOverrideColor = true;
+            xsm.overrideColor = QVector4D(1.0f, 1.0f, 0.2f, 1.0f); // yellow
+            submeshes.push_back(xsm);
+        }
+
         iffBuffersDirty = true;
     }
 
@@ -528,19 +640,13 @@ public:
                 isIffAnimation = true;
                 currentClipIndex = 0;
                 animTime = 0.0f;
-                
-                // Set fake bounds for camera
-                vertices.clear(); uvs.clear(); normals.clear(); submeshes.clear();
-                vertices.push_back(-100); vertices.push_back(-100); vertices.push_back(-100);
-                vertices.push_back(100);  vertices.push_back(100);  vertices.push_back(100);
-                for(int j=0; j<2; j++) {
-                    uvs.push_back(0); uvs.push_back(0);
-                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
-                }
-                
+
+                // Compute first frame immediately so camera has real bounds
+                updateIffSkeleton();
+
                 if (!currentIff.clips.empty()) {
                     iffPlaying = true;
-                    animTimer->start(16); // ~60fps
+                    animTimer->start(16);
                     if (onIffTimeChanged) onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
                 }
             }
@@ -2897,6 +3003,46 @@ private:
             viewMenu->addAction("Image",     [this, path]() { loadFile(path, 3); });
             viewMenu->addAction("3D",        [this, path]() { loadFile(path, 4); });
             menu.addSeparator();
+
+            if (ext == "iff") {
+                menu.addAction("Convert IFF -> BEF (Batch directory)", [this, path]() {
+                    QString dir = QFileInfo(path).absolutePath();
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", dir);
+                    if (outDir.isEmpty()) return;
+                    
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "batch", dir, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Batch converted IFFs in directory to " + outDir);
+                        QMessageBox::information(this, "Success", "Converted IFF files.");
+                    } else {
+                        logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to convert IFF files:\n" + proc.readAllStandardError());
+                    }
+                });
+            } else if (ext == "bef") {
+                menu.addAction("Convert BEF -> IFF (Create)", [this, path]() {
+                    QString dir = QFileInfo(path).absolutePath();
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", dir);
+                    if (outDir.isEmpty()) return;
+                    
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "create", dir, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Created IFF from BEFs in directory to " + outDir);
+                        QMessageBox::information(this, "Success", "Created IFF file(s).");
+                    } else {
+                        logMessage("[ERROR] IFF create failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to create IFF file:\n" + proc.readAllStandardError());
+                    }
+                });
+            }
         }
 
 
