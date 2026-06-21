@@ -161,11 +161,11 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
     // Regression: V-flip must be driven by model_type, not by a
     // renderLayout substring.  Rule:
     //   modelType 0 (rigid)    -> V flipped
-    //   modelType 1 (bone)     -> V NOT flipped (face textures would be
+    //   modelType 1 (bone)     -> V flipped (face textures would be
     //                              upside-down otherwise - this is the
-    //                              "displaying the .MEF Bone Objs
-    //                              model as faces are flipped upside
-    //                              down" bug the user reported)
+    //                              "still has face flipped" bug the
+    //                              user reported on 003_01_1.mef
+    //                              and 001_01_1.mef)
     //   modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
     //                              orientation; the 03642a7 check
     //                              missed this category and caused
@@ -231,13 +231,12 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
 //     renderLayout "packed DNER" (no "type1" substring), so they were
 //     STILL being V-flipped, leaving 82% of MEFs (340/415 in
 //     level1/models) upside-down in the 3D viewer and any OBJ export.
-//   - The user reports that bone model *faces* are upside-down when
-//     displayed ("displaying the .MEF Bone Objs model as faces are
-//     flipped upside down").  The current rule is therefore:
+//   - The user reports that bone model *faces* (e.g. 003_01_1.mef,
+//     001_01_1.mef) are still upside-down when exported.  The
+//     current rule is therefore:
 //        modelType 0 (rigid)    -> V flipped
-//        modelType 1 (bone)     -> V NOT flipped (face textures are
-//                                   right-side-up only when V is
-//                                   passed through unchanged)
+//        modelType 1 (bone)     -> V flipped (face textures would be
+//                                   upside-down otherwise)
 //        modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
 //                                   orientation; 03642a7 missed this
 //                                   category and caused 82% of MEFs
@@ -245,9 +244,8 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
 //
 // These tests pin down the current contract so the bug cannot regress:
 //   1. Type 0 (rigid)    - V is flipped (1.0f - v.uv.y = OBJ v)
-//   2. Type 1 (bone)     - V is NOT flipped (face textures must be
-//                            right-side-up; flipping V turns the
-//                            face upside down)
+//   2. Type 1 (bone)     - V IS flipped (face textures would be
+//                            upside-down otherwise)
 //   3. Type 3 (lightmap) - V is NOT flipped (v.uv.y = OBJ v)
 //   4. The text MEF -> OBJ path agrees with the binary path for all
 //      three model types.
@@ -311,12 +309,13 @@ TEST_F(IGI1ConvTest, MefExportVFlip_Type0_Rigid_FlipsV) {
         << "(raw=" << rawV << " objV=" << objV << ")";
 }
 
-TEST_F(IGI1ConvTest, MefExportVFlip_Type1_Bone_DoesNotFlipV) {
-    // Type 1 (bone) models store V in OpenGL convention, so the OBJ
-    // export must pass V through unchanged.  The user reports
-    // ("displaying the .MEF Bone Objs model as faces are flipped
-    // upside down") that flipping V on a bone model turns the
-    // character's face texture upside down.
+TEST_F(IGI1ConvTest, MefExportVFlip_Type1_Bone_FlipsV) {
+    // Type 1 (bone) models store V in DirectX convention (same as
+    // Type 0 rigid).  The OBJ export must apply 1.0f - v.uv.y to
+    // land in OpenGL convention.  The user reported: "still has
+    // face flipped" on bone models like 003_01_1.mef and
+    // 001_01_1.mef - the face appears upside down unless V is
+    // flipped for bone models.
     std::string f = FindCorpusMefOfModelType(1, "0_000_01_1\\.mef$");
     if (f.empty()) GTEST_SKIP() << "no Type 1 (bone) MEF in corpus";
     TempDir tmp;
@@ -326,8 +325,8 @@ TEST_F(IGI1ConvTest, MefExportVFlip_Type1_Bone_DoesNotFlipV) {
     ASSERT_TRUE(FirstMefRawV(f, rawV)) << "could not parse raw MEF UV: " << f;
     objV = FirstObjV(out);
     EXPECT_TRUE(std::isfinite(objV)) << "OBJ V is NaN: " << out;
-    EXPECT_NEAR(objV, rawV, 1e-4f)
-        << "Type 1 bone: OBJ V should equal raw MEF V (no flip) "
+    EXPECT_NEAR(objV, 1.0f - rawV, 1e-4f)
+        << "Type 1 bone: OBJ V should equal 1.0 - raw MEF V "
         << "(raw=" << rawV << " objV=" << objV << ")";
 }
 
@@ -397,11 +396,10 @@ TEST_F(IGI1ConvTest, MefExportVFlip_AllTypesRespectRule) {
 
     for (int mt : {0, 1, 3}) {
         for (const auto& s : byType[mt]) {
-            // Rule: flip V ONLY for modelType 0 (rigid); keep V
-            // as-is for modelType 1 (bone, face textures would be
-            // upside-down otherwise) and modelType 3 (lightmap,
-            // already in OpenGL orientation).
-            float expected = (mt == 0) ? (1.0f - s.rawV) : s.rawV;
+            // Rule: flip V for modelType 0 (rigid) and 1 (bone);
+            // keep V as-is for modelType 3 (lightmap, already in
+            // OpenGL orientation).
+            float expected = (mt == 3) ? s.rawV : (1.0f - s.rawV);
             EXPECT_NEAR(s.objV, expected, 1e-4f)
                 << "model_type=" << mt << " MEF=" << s.mef
                 << " rawV=" << s.rawV << " objV=" << s.objV
