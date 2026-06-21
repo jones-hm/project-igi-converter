@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-06-22
+
+### Added
+- **Native IFF Decompiler** (`iff decompile`): Splits a binary IFF skeleton-animation file into a human-readable `.IFF` text representation of the bone skeleton plus a per-animation `anims_<id>/anim_NNN.IFF` text file. Mirrors the layout produced by the old dconv `IGI1_iff.py` reference.
+- **Native IFF Writer** (`iff create`): Reads a directory of BEF text files (output of `iff convert`) **or** the decompile text format (output of `iff decompile`) and assembles a single binary `.iff` file. The C++ round trip `iff convert` → `iff create` reproduces the original byte-for-byte for every IFF in the corpus.
+- **`iff rebuild <src.iff> <out.iff>`**: One-shot IFF → BEF → IFF round trip via a temp directory.
+- **`iff emit-qsc <dir> <out.qsc>`**: Generates the `Anims.qsc` for a folder of `.BEF` scripts (the file `IGI1_convert.py` produced in the legacy toolchain).
+- **`iff export-gif <file.iff> <out.gif> [w] [h] [fps]`**: Headless software renderer that turns the IFF skeleton animation into a looping `GIF89a`. Uses an orthographic 3/4 projection, orange bones, cyan/white joint discs, and the `gif.h` NETSCAPE2.0 extension. Replaces the old OpenGL-based GUI export.
+- **GUI IFF context menu**: New right-click actions on IFF files (`Decompile to text + per-anim IFFs`) and on folders of BEF scripts (`Create IFF from .BEF scripts`, `Generate Anims.qsc`). The `Export Animation as GIF...` GUI action now routes through the same `iff export-gif` headless renderer used by the CLI, so it works without the OpenGL viewport being visible.
+
+### Changed
+- **Removed `tools/` folder entirely**: the legacy `dconv/` (Python) and `gconv/` (3DS Max plugin) helpers that igi1conv used to shell out to have been deleted. `igi1conv.exe` is now a fully native, standalone C++ project with zero external runtime dependencies.
+- **`igi1conv iff help`**: The help text now lists every IFF subcommand (`info`, `test`, `decompile`, `convert`, `create`, `rebuild`, `emit-qsc`, `export-gif`).
+- **`iff_parser`**: The parser no longer aborts on the `>100MB` size sanity check when the chunk tag is `FORM`, because the IFF root/inner FORM sizes are intentionally "broken" (a small value that the engine walks past by tag). The 6-field `BOED` layout (2 int32 + 4 float32) is now decoded correctly with `bone_id` replacing the old misplaced `param` field.
+- **BEF event field**: `BefEvent.param` is renamed to `BefEvent.bone_id`; `TriggerData(..., bone, px, py, pz)` writes/reads it correctly. The BEF writer's IFF writer now writes 24-byte events with all 6 fields.
+- **BOSH object_id**: the IFF writer derives the BOSH object id from the leading digits of the first BEF filename (e.g. `003_anim_002.BEF` → object_id 3) so rebuilt IFFs report the same model id as the source.
+- **`gif.h`**: every function in the header is now `static` (gated by `GIF_H_API`) so the header can be `#include`d from multiple translation units (`gui_main.cpp` + `iff_gif_exporter.cpp`) without ODR violations.
+- **GUI**: dropped all references to the legacy `.bff` format and the "Batch Convert IFF/BFF" wording.
+
+### Fixed
+- **IFF writer byte order**: chunk sizes (FORM, BOSH, PLST, TLST, BOAH, BOEH, BOEH, BOED, BOTH, BOTD, BORH, BORD) are written big-endian, matching the IFF wire format. All multi-byte data values remain little-endian. The original 0-clips / wrong-object-id bugs are gone.
+- **BEF parser tokenisation**: line comments (`//`) and the `,;()` separators are now stripped correctly so `AnimInit("003_anim_002",0,3741,0);` parses to the right four-arg form.
+
+### Technical Details
+- New files: `source/parsers/iff_bef.{h,cpp}`, `iff_decompiler.{h,cpp}`, `iff_writer.{h,cpp}`, `iff_gif_exporter.{h,cpp}`.
+- 8 new gtest cases (`IffInfo`, `IffConvert`, `IffRebuild`, `IffDecompile`, `IffCreateFromBefs`, `IffExportGif`, `IffRoundTripSizeMatches`, `IffDecompileCreateRoundTrip`), all driven against `D:\IGI1\common\ANIMS` (000/001/002/003/005/006.IFF).
+- End-to-end verified for all six IFFs: `iff convert` + `iff create` reproduces the original byte-for-byte (same `604088`/`1565672`/etc. file sizes); `iff decompile` + `iff create` round-trips successfully (size matches to within ~700 bytes due to the FORM-size convention); `iff export-gif` produces valid `GIF89a` files for all six.
+
+---
+
 ## [1.8.0] - 2026-06-21
 
 ### Added

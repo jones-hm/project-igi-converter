@@ -22,7 +22,13 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > **AI Models / Characters Support**: As of v1.7.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
 
 > [!NOTE]
-> **v1.7.0 Updates**: 
+> **v1.9.0 Updates (June 2026)**:
+> - **Fully standalone `igi1conv.exe`** - the legacy `tools/dconv` (Python) and `tools/gconv` (3DS Max plugin) folders have been **removed entirely**. Every conversion, including IFF animation handling, is now native C++.
+> - **New IFF subcommands**: `iff decompile` (binary → text + per-anim IFFs), `iff create` (BEF dir or decompile output → IFF), `iff rebuild` (one-shot round trip), `iff emit-qsc`, `iff export-gif` (headless GIF renderer).
+> - **GUI IFF menu**: right-click any IFF file for "Decompile to text + per-anim IFFs" or "Export Animation as GIF..." (now uses the same headless renderer as the CLI - no OpenGL viewport required).
+
+> [!NOTE]
+> **v1.7.0 Updates**:
 > - The GUI "Export to Obj" now intuitively prompts for a destination folder when exporting both **binary** and **ASCII/text** `MEF/MEX` models. All textures and `.mtl` materials are generated in [...]
 > - **Recursive ATTA Support**: Both "Export to Obj" and "Build Rigid Model" now walk the full attachment hierarchy, merging all sub-models and resolving their textures automatically from the leve[...]
 > - **Fixed Bone Model Rendering**: Character bone models (type1) now render correctly in the GUI with proper world-space positioning.

@@ -19,6 +19,7 @@ This document lists the supported file formats, their conversion targets, and wh
 | **.lmp** | Terrain Heightmap | Info, export to PGM (`.pgm`) | Supported |
 | **.ctr** | Terrain Cube properties | Info, export to JSON | Supported |
 | **graph*.dat** | AI Navigation Graph | Info, export to JSON | Supported |
+| **.IFF** | Skeletal Animation | Info, decompile to text, convert to `.BEF`, create from `.BEF` / decompile text, rebuild round trip, export animated GIF | Supported |
 
 ---
 
