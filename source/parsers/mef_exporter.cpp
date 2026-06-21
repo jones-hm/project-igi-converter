@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <set>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -22,6 +23,23 @@ std::vector<int> CollectMaterialSlots(const ParsedGeometry &geometry) {
     ordered.push_back(0);
   }
   return ordered;
+}
+
+// Convert a raw MEF V coordinate to the OBJ/OpenGL convention.
+//
+// MEF stores UVs in DirectX convention (V=0 at top, V=1 at bottom).
+// OBJ / OpenGL use the opposite (V=0 at bottom, V=1 at top), so we
+// must flip V when exporting to OBJ.  However, Type 1 (bone) models
+// were found to already store V in OpenGL orientation in the wild
+// (face textures became upside-down after a naive flip), so for
+// those we leave V untouched.  The isBoneModel flag selects between
+// the two conventions.
+//
+// See commit 03642a7 ("Do not flip V coordinate for bone models
+// to fix distorted upside-down face textures") for the original
+// bone-model fix that only covered the binary MEF -> OBJ path.
+float MefVToObjV(float v, bool isBoneModel) {
+  return isBoneModel ? v : (1.0f - v);
 }
 
 // Write the OBJ body to an already-open stream.
@@ -40,8 +58,7 @@ void WriteObjBody(std::ostream &f, const ParsedGeometry &geometry,
 
   bool isBoneModel = (geometry.renderLayout.find("type1") != std::string::npos);
   for (const auto &v : geometry.vertices) {
-    float v_coord = isBoneModel ? v.uv.y : (1.0f - v.uv.y);
-    f << "vt " << v.uv.x << " " << v_coord << "\n";
+    f << "vt " << v.uv.x << " " << MefVToObjV(v.uv.y, isBoneModel) << "\n";
   }
 
   f << "\no model_mesh\n";
@@ -528,17 +545,30 @@ bool ExportTextMefToObj(const std::vector<MEFObject>& objects,
     for (const auto& n : obj.normals)
       f << "vn " << n[0] << " " << n[1] << " " << n[2] << "\n";
 
-    // UVs: one set of 3 (u,v) per face, stored as vt entries
-    // obj.uvs[i] = {u0,v0, u1,v1, u2,v2} for face i
-    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
-      if (fi < obj.uvs.size() && obj.uvs[fi].size() >= 6) {
-        const auto& uv = obj.uvs[fi];
-        f << "vt " << uv[0] << " " << (1.0f - uv[1]) << "\n";
-        f << "vt " << uv[2] << " " << (1.0f - uv[3]) << "\n";
-        f << "vt " << uv[4] << " " << (1.0f - uv[5]) << "\n";
-      } else {
-        f << "vt 0.0 0.0\nvt 0.0 0.0\nvt 0.0 0.0\n";
+    // UVs: text MEF stores UVs per-vertex (UV(0, u, v), UV(1, u, v), ...).
+    // OBJ needs per-face UV entries (3 vts per face, indexed from the
+    // face's vertex indices).  We also flip V via MefVToObjV for the
+    // same DirectX->OpenGL reason as the binary MEF -> OBJ path.
+    const bool isBoneModel = (obj.model_type == 1);
+    auto vtForVert = [&](int vi) {
+      // text MEF UV index is the same as vertex index (UV(0, ...) belongs
+      // to Vertex(0, ...), etc.)
+      if (vi >= 0 && vi < static_cast<int>(obj.uvs.size()) &&
+          obj.uvs[vi].size() >= 2) {
+        return std::pair<float, float>{
+            obj.uvs[vi][0],
+            MefVToObjV(obj.uvs[vi][1], isBoneModel)};
       }
+      return std::pair<float, float>{0.0f, 0.0f};
+    };
+    for (size_t fi = 0; fi < obj.faces.size(); ++fi) {
+      const auto& face = obj.faces[fi];
+      auto uv0 = vtForVert(face.v0);
+      auto uv1 = vtForVert(face.v1);
+      auto uv2 = vtForVert(face.v2);
+      f << "vt " << uv0.first << " " << uv0.second << "\n";
+      f << "vt " << uv1.first << " " << uv1.second << "\n";
+      f << "vt " << uv2.first << " " << uv2.second << "\n";
     }
 
     f << "\no " << obj.name << "\n";
