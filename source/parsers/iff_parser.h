@@ -19,8 +19,8 @@ struct IffRotationKey {
 
 struct IffEvent {
     uint32_t event_id;
+    int32_t  bone_id;
     float time;
-    float param;
     float pos[3];
 };
 

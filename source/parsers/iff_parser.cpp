@@ -46,8 +46,14 @@ IffFile IFF_Parse(const std::string& filepath, IffLogger logger) {
         uint32_t size = readBE32(f);
         if(logger) logger(3, "Parsed chunk TAG: [" + tag + "] SIZE: " + std::to_string(size));
 
-        // Sanity check size to prevent out of bounds memory allocation crashes
-        if(size > 100000000) {
+        // FORM chunks: size field is "broken" per the IFF format (BOBJ,
+        // BOAL, BOBH, BOAN containers never report their true size).  The
+        // parser walks into them by tag, so we must NOT apply the chunk
+        // sanity check on FORM - a 600 kB IFF has a "size" that the
+        // format itself treats as the inner-form size.  We will only
+        // validate the size for plain chunks that we seek past.
+        bool isForm = (tag == "FORM");
+        if (!isForm && size > 100000000) {
             if(logger) logger(0, "Chunk size suspiciously large! Aborting to prevent crash.");
             break;
         }
@@ -55,7 +61,7 @@ IffFile IFF_Parse(const std::string& filepath, IffLogger logger) {
         std::streampos next_pos = f.tellg() + (std::streamoff)size;
         if(size % 2 != 0) next_pos += 1;
 
-        if (tag == "FORM") {
+        if (isForm) {
             std::string ftype = readTag(f);
             if(logger) logger(3, "FORM Type: " + ftype);
             if (ftype == "BOBJ" || ftype == "BOAL") {
@@ -138,11 +144,11 @@ IffFile IFF_Parse(const std::string& filepath, IffLogger logger) {
             current_clip->events.resize(count);
             f.seekg(next_pos);
         } else if (tag == "BOED" && current_clip) {
-            for(auto& e : current_clip->events) {
+            for (auto& e : current_clip->events) {
                 if(f.eof()) break;
                 e.event_id = readLE32(f);
+                e.bone_id = (int32_t)readLE32(f);
                 e.time = readLEFloat(f);
-                e.param = readLEFloat(f);
                 e.pos[0] = readLEFloat(f); e.pos[1] = readLEFloat(f); e.pos[2] = readLEFloat(f);
             }
             f.seekg(next_pos);
