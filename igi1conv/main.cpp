@@ -10,6 +10,7 @@
 #include "cmd_dat.h"
 #include "cmd_fnt.h"
 #include "cmd_test.h"
+#include "cmd_iff.h"
 //   0 = success
 //   1 = bad args
 //   2 = file not found
@@ -38,6 +39,7 @@ static void print_help()
         "  graph    AI navigation graph (export to JSON, info)\n"
         "  dat      DAT model-texture data (info, export, to-mtp)\n"
         "  fnt      FNT font file (info, export PNG)\n"
+        "  iff      IFF skeletal animation format (info)\n"
         "  test     Run advanced test suite on game directory\n"
         "\n"
         "Run 'igi1conv <command> --help' for command-specific help.\n";
@@ -92,6 +94,7 @@ int main(int argc, char** argv)
     if (cmd == "graph")   return cmd_graph(sub_argc, sub_argv);
     if (cmd == "dat")     return cmd_dat(sub_argc, sub_argv);
     if (cmd == "fnt")     return cmd_fnt(sub_argc, sub_argv);
+    if (cmd == "iff")     return cmd_iff(sub_argc, sub_argv);
     if (cmd == "test")    return cmd_test(sub_argc, sub_argv);
 
     std::cerr << "igi1conv: unknown command '" << cmd << "'\n";

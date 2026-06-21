@@ -16,6 +16,9 @@
 #include <QMessageBox>
 #include <QSyntaxHighlighter>
 #include <QRegularExpression>
+#include <QTimer>
+#include <QQuaternion>
+#include "../source/parsers/iff_parser.h"
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QFontDatabase>
@@ -113,6 +116,95 @@ public:
         QVector4D overrideColor = QVector4D(1, 1, 1, 1);
     };
 
+    void updateIffSkeleton() {
+        if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
+        
+        const auto& clip = currentIff.clips[currentClipIndex];
+        const auto& skel = currentIff.skeleton;
+        
+        std::vector<QMatrix4x4> globalTransforms(skel.bone_count);
+        
+        vertices.clear(); uvs.clear(); normals.clear();
+        submeshes.clear();
+        
+        for (int i = 0; i < skel.bone_count; ++i) {
+            QMatrix4x4 localMat;
+            localMat.setToIdentity();
+            
+            QVector3D trans(0,0,0);
+            if (i * 3 + 2 < skel.translations.size()) {
+                trans = QVector3D(skel.translations[i*3], skel.translations[i*3+1], skel.translations[i*3+2]);
+            }
+            
+            if (i == 0 && !clip.root_translations.empty()) {
+                IffTranslationKey k1 = clip.root_translations.front();
+                IffTranslationKey k2 = clip.root_translations.back();
+                for(size_t j=0; j<clip.root_translations.size()-1; j++) {
+                    if (animTime >= clip.root_translations[j].time && animTime <= clip.root_translations[j+1].time) {
+                        k1 = clip.root_translations[j];
+                        k2 = clip.root_translations[j+1];
+                        break;
+                    }
+                }
+                float t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                trans.setX(k1.pos[0] + (k2.pos[0] - k1.pos[0]) * t);
+                trans.setY(k1.pos[1] + (k2.pos[1] - k1.pos[1]) * t);
+                trans.setZ(k1.pos[2] + (k2.pos[2] - k1.pos[2]) * t);
+            }
+            
+            QQuaternion rot;
+            if (i < clip.bone_rotations.size() && !clip.bone_rotations[i].empty()) {
+                const auto& track = clip.bone_rotations[i];
+                IffRotationKey k1 = track.front();
+                IffRotationKey k2 = track.back();
+                for(size_t j=0; j<track.size()-1; j++) {
+                    if (animTime >= track[j].time && animTime <= track[j+1].time) {
+                        k1 = track[j];
+                        k2 = track[j+1];
+                        break;
+                    }
+                }
+                float t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                QQuaternion q1(k1.rot[3], k1.rot[0], k1.rot[1], k1.rot[2]);
+                QQuaternion q2(k2.rot[3], k2.rot[0], k2.rot[1], k2.rot[2]);
+                rot = QQuaternion::slerp(q1, q2, t);
+            }
+            
+            localMat.translate(trans);
+            localMat.rotate(rot);
+            
+            int parent = -1;
+            if (i < skel.parents.size()) parent = skel.parents[i];
+            
+            if (parent >= 0 && parent < i) {
+                globalTransforms[i] = globalTransforms[parent] * localMat;
+                QVector3D p1 = globalTransforms[parent].map(QVector3D(0,0,0));
+                QVector3D p2 = globalTransforms[i].map(QVector3D(0,0,0));
+                
+                vertices.push_back(p1.x()); vertices.push_back(p1.y()); vertices.push_back(p1.z());
+                vertices.push_back(p2.x()); vertices.push_back(p2.y()); vertices.push_back(p2.z());
+                for(int j=0; j<2; j++) {
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                }
+            } else {
+                globalTransforms[i] = localMat;
+            }
+        }
+        
+        SubMesh sm;
+        sm.startIndex = 0;
+        sm.count = vertices.size() / 3;
+        sm.drawMode = 0x0001; // GL_LINES
+        sm.useOverrideColor = true;
+        sm.overrideColor = QVector4D(1.0f, 0.2f, 0.2f, 1.0f);
+        submeshes.push_back(sm);
+        
+        makeCurrent();
+        setupBuffers();
+        doneCurrent();
+    }
+
     QTextEdit* infoOverlay;
     QLabel* coordsOverlay;
     QLabel* statsOverlay;
@@ -133,12 +225,31 @@ public:
     float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
     float graphMaxDim = 1000.0f;
     float graphNodeScale = 1.0f;
+    
+    // IFF Animation State
+    bool isIffAnimation = false;
+    IffFile currentIff;
+    QTimer* animTimer = nullptr;
+    float animTime = 0.0f;
+    int currentClipIndex = 0;
+
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
     }
     
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
+        
+        animTimer = new QTimer(this);
+        connect(animTimer, &QTimer::timeout, this, [this]() {
+            if (isIffAnimation && currentIff.valid && !currentIff.clips.empty()) {
+                const auto& clip = currentIff.clips[currentClipIndex];
+                animTime += 1.0f / 30.0f; // 30 FPS playback speed approximately
+                if (animTime > clip.duration) animTime = 0.0f;
+                updateIffSkeleton();
+                update();
+            }
+        });
         
         infoOverlay = new QTextEdit(this);
         infoOverlay->setReadOnly(true);
@@ -333,6 +444,22 @@ public:
             loadMefRecursive(path, identity, 0);
         } else if (ext == "dat") {
             loadGraphData(path);
+        } else if (ext == "iff") {
+            currentIff = IFF_Parse(path.toStdString());
+            if (currentIff.valid) {
+                isIffAnimation = true;
+                currentClipIndex = 0;
+                animTime = 0.0f;
+                
+                // Set fake bounds for camera
+                vertices.clear();
+                vertices.push_back(-100); vertices.push_back(-100); vertices.push_back(-100);
+                vertices.push_back(100);  vertices.push_back(100);  vertices.push_back(100);
+                
+                if (!currentIff.clips.empty()) {
+                    animTimer->start(16); // ~60fps
+                }
+            }
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;
@@ -1980,10 +2107,20 @@ public:
         globalLevelDatPath = settings.value("LevelDAT", "").toString();
         globalTextureDir = settings.value("TextureDir", "").toString();
         globalCacheDir = settings.value("CacheDir", QDir::tempPath() + "/igi_temp_mef").toString();
+        globalAutoSaveRes = settings.value("AutoSaveRes", false).toBool();
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
         
+        QAction* autoSaveResAction = settingsMenu->addAction("Auto Save on RES");
+        autoSaveResAction->setCheckable(true);
+        autoSaveResAction->setChecked(globalAutoSaveRes);
+        connect(autoSaveResAction, &QAction::toggled, this, [this, iniPath](bool checked) {
+            globalAutoSaveRes = checked;
+            QSettings(iniPath, QSettings::IniFormat).setValue("AutoSaveRes", checked);
+            logMessage(QString("[INFO] Auto Save on RES is now %1").arg(checked ? "ON" : "OFF"));
+        });
+
         QMenu* levelMenu = settingsMenu->addMenu("&Level");
         levelMenu->addAction("Set Level...", this, [this, iniPath]() {
             QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? "D:/Software/IGI-Game" : QFileInfo(globalLevelDatPath).absolutePath());
@@ -2387,6 +2524,7 @@ private:
     QString globalLevelDatPath;
     QString globalTextureDir;
     QString globalCacheDir;
+    bool globalAutoSaveRes = false;
 
     void hideAllViewers() {
         viewerEdit->hide();
@@ -2575,6 +2713,38 @@ private:
         } else if (ext == "tex" || ext == "spr" || ext == "pic") {
             menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeCommand("tex to-png"); });
             menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
+            menu.addAction("Replace Texture", [this, path]() {
+                QString newTex = QFileDialog::getOpenFileName(this, "Select Replacement Texture", QFileInfo(path).absolutePath(), "Texture Files (*.tex)");
+                if (!newTex.isEmpty()) {
+                    QFile::remove(path);
+                    if (QFile::copy(newTex, path)) {
+                        logMessage("[SUCCESS] Replaced texture: " + QFileInfo(path).fileName());
+                        QMessageBox::information(this, "Replaced", "Successfully replaced texture.");
+                        if (globalAutoSaveRes) {
+                            QDir parentDir = QFileInfo(path).absoluteDir();
+                            QString folderName = parentDir.dirName();
+                            QString parentOfParent = parentDir.absolutePath() + "/..";
+                            QString resPath = QDir::cleanPath(parentOfParent + "/" + folderName + ".res");
+                            if (QFileInfo::exists(resPath)) {
+                                logMessage("[INFO] Auto Saving RES: " + resPath);
+                                QProcess proc;
+                                proc.setProgram(qApp->applicationFilePath());
+                                proc.setArguments(QStringList() << "res" << "pack" << parentDir.absolutePath() << resPath << "--prefix" << folderName + "/");
+                                proc.start();
+                                proc.waitForFinished(-1);
+                                if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                                    logMessage("[SUCCESS] Auto Packed RES archive: " + resPath);
+                                } else {
+                                    logMessage("[ERROR] Auto Save Failed to pack RES: " + resPath + "\n" + proc.readAllStandardError());
+                                }
+                            }
+                        }
+                    } else {
+                        logMessage("[ERROR] Failed to replace texture: " + path);
+                        QMessageBox::critical(this, "Error", "Failed to replace texture.");
+                    }
+                }
+            });
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
             menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
         } else if (ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
@@ -2703,6 +2873,8 @@ private:
         } else if (ext == "fnt") {
             menu.addAction("Export PNG", [this, path]() { loadFile(path); executeCommand("fnt export"); });
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
+        } else if (ext == "iff") {
+            menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("iff info"); });
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -2732,7 +2904,7 @@ private:
                 } else {
                     mode = 1; // Text
                 }
-            } else if (currentExt == "obj") {
+            } else if (currentExt == "obj" || currentExt == "iff") {
                 mode = 4; // 3D
             } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat" || currentExt == "qvm") {
                 if (currentExt == "dat" && info.fileName().toLower().contains("graph")) {
