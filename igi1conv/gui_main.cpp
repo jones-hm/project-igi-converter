@@ -131,6 +131,7 @@ public:
     bool showGraphNodes = true;
     bool showGraphLinks = true;
     float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
+    float graphMaxDim = 1000.0f;
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
     }
@@ -476,6 +477,22 @@ protected:
         statsOverlay->setText(QString("Graph loaded: %1 nodes, %2 edges")
                               .arg(currentGraph.nodes.size())
                               .arg(currentGraph.edges.size()));
+
+        if (!currentGraph.nodes.empty()) {
+            float minX = currentGraph.nodes[0].x, maxX = minX;
+            float minY = currentGraph.nodes[0].y, maxY = minY;
+            float minZ = currentGraph.nodes[0].z, maxZ = minZ;
+            for (const auto& node : currentGraph.nodes) {
+                minX = std::min(minX, (float)node.x); maxX = std::max(maxX, (float)node.x);
+                minY = std::min(minY, (float)node.y); maxY = std::max(maxY, (float)node.y);
+                minZ = std::min(minZ, (float)node.z); maxZ = std::max(maxZ, (float)node.z);
+            }
+            graphMaxDim = std::max({maxX - minX, maxY - minY, maxZ - minZ});
+            if (graphMaxDim < 1.0f) graphMaxDim = 1000.0f;
+        } else {
+            graphMaxDim = 1000.0f;
+        }
+
         generateGraphGeometry();
     }
 
@@ -496,7 +513,8 @@ protected:
                 else if (node.criteria.find("VIEW") != std::string::npos) { r=0.0f; g=1.0f; b=1.0f; }
                 sm.overrideColor = QVector4D(r, g, b, 1.0f);
 
-                float H = 50.0f * std::max(1.0f, (float)node.radius); 
+                float baseH = std::max(50.0f, graphMaxDim * 0.015f);
+                float H = baseH * std::max(1.0f, (float)node.radius); 
                 QVector3D c(node.x, node.y, node.z);
                 QVector3D p0(c.x()-H, c.y()-H, c.z());
                 QVector3D p1(c.x()+H, c.y()-H, c.z());
@@ -827,7 +845,8 @@ protected:
                 float minT = std::numeric_limits<float>::max();
                 int closestId = -1;
                 for (const auto& node : currentGraph.nodes) {
-                    float H = 50.0f * std::max(1.0f, (float)node.radius); 
+                    float baseH = std::max(50.0f, graphMaxDim * 0.015f);
+                    float H = baseH * std::max(1.0f, (float)node.radius); 
                     QVector3D center = worldToNormalized(node.x, node.y, node.z + H);
                     QVector3D oc = rayOrigin - center;
                     float b = QVector3D::dotProduct(oc, rayDir);
