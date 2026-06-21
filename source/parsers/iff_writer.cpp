@@ -17,6 +17,7 @@ namespace igi1conv {
 
 namespace {
 
+namespace fs = std::filesystem;
 constexpr float IGI_SCALE = 40.96f;
 
 // ─── Binary writer helpers ──────────────────────────────────────────────
@@ -230,9 +231,22 @@ bool WriteIffFromBefs(const std::vector<std::string>& befPaths,
     }
     int boneCount = (int)skelBef.bones.size();
 
+    // object_id: try to derive from the first BEF's filename.  The IGI
+    // 1 originals always use the model stem (e.g. 003 for "003.IFF");
+    // we follow the same convention so the rebuilt IFF reports the
+    // expected id.  Falls back to boneCount if no digits are present.
+    uint32_t objectId = (uint32_t)boneCount;
+    {
+        std::string base = fs::path(befPaths.front()).stem().string();
+        // Strip "_anim_NNN" suffix if present.
+        size_t pos = base.find("_anim_");
+        if (pos != std::string::npos) base = base.substr(0, pos);
+        try { objectId = (uint32_t)std::stoi(base); } catch (...) { /* leave default */ }
+    }
+
     // ─── BOBH block (BOSH + PLST + TLST) ───────────────────────────
     OutBuf bobhBody;
-    write_bosh(bobhBody, (uint32_t)boneCount, (uint32_t)boneCount);
+    write_bosh(bobhBody, objectId, (uint32_t)boneCount);
     write_plst(bobhBody, parents);
     write_tlst(bobhBody, translations);
     OutBuf bobhForm;
@@ -270,7 +284,6 @@ bool WriteIffFromBefs(const std::vector<std::string>& befPaths,
     root.raw(boalForm.data.data(), boalForm.data.size());
 
     // Make sure the output directory exists.
-    namespace fs = std::filesystem;
     fs::path op(outPath);
     if (op.has_parent_path()) fs::create_directories(op.parent_path());
 
