@@ -137,16 +137,22 @@ public:
             }
             
             if (i == 0 && !clip.root_translations.empty()) {
-                IffTranslationKey k1 = clip.root_translations.front();
-                IffTranslationKey k2 = clip.root_translations.back();
-                for(size_t j=0; j<clip.root_translations.size()-1; j++) {
-                    if (animTime >= clip.root_translations[j].time && animTime <= clip.root_translations[j+1].time) {
-                        k1 = clip.root_translations[j];
-                        k2 = clip.root_translations[j+1];
-                        break;
+                IffTranslationKey k1, k2;
+                float t = 0.0f;
+                if (animTime <= clip.root_translations.front().time) {
+                    k1 = k2 = clip.root_translations.front();
+                } else if (animTime >= clip.root_translations.back().time) {
+                    k1 = k2 = clip.root_translations.back();
+                } else {
+                    for(size_t j=0; j<clip.root_translations.size()-1; j++) {
+                        if (animTime >= clip.root_translations[j].time && animTime <= clip.root_translations[j+1].time) {
+                            k1 = clip.root_translations[j];
+                            k2 = clip.root_translations[j+1];
+                            t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                            break;
+                        }
                     }
                 }
-                float t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
                 trans.setX(k1.pos[0] + (k2.pos[0] - k1.pos[0]) * t);
                 trans.setY(k1.pos[1] + (k2.pos[1] - k1.pos[1]) * t);
                 trans.setZ(k1.pos[2] + (k2.pos[2] - k1.pos[2]) * t);
@@ -155,16 +161,22 @@ public:
             QQuaternion rot;
             if (i < clip.bone_rotations.size() && !clip.bone_rotations[i].empty()) {
                 const auto& track = clip.bone_rotations[i];
-                IffRotationKey k1 = track.front();
-                IffRotationKey k2 = track.back();
-                for(size_t j=0; j<track.size()-1; j++) {
-                    if (animTime >= track[j].time && animTime <= track[j+1].time) {
-                        k1 = track[j];
-                        k2 = track[j+1];
-                        break;
+                IffRotationKey k1, k2;
+                float t = 0.0f;
+                if (animTime <= track.front().time) {
+                    k1 = k2 = track.front();
+                } else if (animTime >= track.back().time) {
+                    k1 = k2 = track.back();
+                } else {
+                    for(size_t j=0; j<track.size()-1; j++) {
+                        if (animTime >= track[j].time && animTime <= track[j+1].time) {
+                            k1 = track[j];
+                            k2 = track[j+1];
+                            t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
+                            break;
+                        }
                     }
                 }
-                float t = (k2.time == k1.time) ? 0.0f : (animTime - k1.time) / (k2.time - k1.time);
                 QQuaternion q1(k1.rot[3], k1.rot[0], k1.rot[1], k1.rot[2]);
                 QQuaternion q2(k2.rot[3], k2.rot[0], k2.rot[1], k2.rot[2]);
                 rot = QQuaternion::slerp(q1, q2, t);
@@ -200,9 +212,7 @@ public:
         sm.overrideColor = QVector4D(1.0f, 0.2f, 0.2f, 1.0f);
         submeshes.push_back(sm);
         
-        makeCurrent();
-        setupBuffers();
-        doneCurrent();
+        iffBuffersDirty = true;
     }
 
     QTextEdit* infoOverlay;
@@ -228,6 +238,7 @@ public:
     
     // IFF Animation State
     bool isIffAnimation = false;
+    bool iffBuffersDirty = false;
     IffFile currentIff;
     QTimer* animTimer = nullptr;
     float animTime = 0.0f;
@@ -427,6 +438,9 @@ public:
     }
 
     void loadModel(const QString& path) {
+        if (animTimer) animTimer->stop();
+        isIffAnimation = false;
+        iffBuffersDirty = false;
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
@@ -881,6 +895,11 @@ protected:
             program.setUniformValue("hasTexture", false);
             glDrawArrays(GL_LINES, 0, gridVertexCount);
             gridVbo.release();
+        }
+
+        if (iffBuffersDirty) {
+            setupBuffers();
+            iffBuffersDirty = false;
         }
 
         vbo.bind();
