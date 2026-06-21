@@ -57,6 +57,7 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QColorDialog>
+#include "graph_parser.h"
 #include <QProgressDialog>
 
 #include <vector>
@@ -107,6 +108,7 @@ public:
         int count = 0;
         QString materialName;
         std::shared_ptr<QOpenGLTexture> texture;
+        unsigned int drawMode = 0x0004; // GL_TRIANGLES
     };
 
     QTextEdit* infoOverlay;
@@ -122,6 +124,13 @@ public:
     QString currentModelPath;
     QString cacheDir;
 
+    GraphFile currentGraph;
+    int selectedGraphNodeId = -1;
+    float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
+    QVector3D worldToNormalized(float x, float y, float z) {
+        return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
+    }
+    
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
         
@@ -316,6 +325,8 @@ public:
             QMatrix4x4 identity;
             identity.setToIdentity();
             loadMefRecursive(path, identity, 0);
+        } else if (ext == "dat") {
+            loadGraphData(path);
         } else if (ext == "obj") {
             std::vector<QVector3D> temp_v;
             std::vector<QVector2D> temp_vt;
@@ -433,6 +444,7 @@ protected:
         float cx = (minX + maxX)/2.f; float cy = (minY + maxY)/2.f; float cz = (minZ + maxZ)/2.f;
         float maxDim = std::max({maxX - minX, maxY - minY, maxZ - minZ});
         if (maxDim == 0) maxDim = 1.0f;
+        modelCx = cx; modelCy = cy; modelCz = cz; modelScale = maxDim;
         for (int i=0; i<vertices.size(); i+=3) {
             vertices[i] = (vertices[i]-cx)/maxDim;
             vertices[i+1] = (vertices[i+1]-cy)/maxDim;
@@ -452,6 +464,81 @@ protected:
         vbo.bind();
         vbo.allocate(bufferData.data(), bufferData.size() * sizeof(float));
         vbo.release();
+    }
+
+    void loadGraphData(const QString& path) {
+        currentGraph = GRAPH_Parse(path.toStdString());
+        if (!currentGraph.valid) return;
+        generateGraphGeometry();
+    }
+
+    void generateGraphGeometry() {
+        vertices.clear(); uvs.clear(); normals.clear(); submeshes.clear(); textureCache.clear();
+        QImage redImg(1, 1, QImage::Format_RGBA8888); redImg.fill(Qt::red);
+        auto redTex = std::make_shared<QOpenGLTexture>(redImg);
+        QImage yellowImg(1, 1, QImage::Format_RGBA8888); yellowImg.fill(Qt::yellow);
+        auto yellowTex = std::make_shared<QOpenGLTexture>(yellowImg);
+        QImage cyanImg(1, 1, QImage::Format_RGBA8888); cyanImg.fill(Qt::cyan);
+        auto cyanTex = std::make_shared<QOpenGLTexture>(cyanImg);
+
+        for (const auto& node : currentGraph.nodes) {
+            auto tex = redTex;
+            if (node.id == selectedGraphNodeId) tex = yellowTex;
+            else if (node.criteria.find("NODECRITERIA_COVER") != std::string::npos) tex = cyanTex;
+            
+            SubMesh sm;
+            sm.startIndex = vertices.size() / 3;
+            sm.texture = tex;
+            sm.drawMode = 0x0004; // GL_TRIANGLES
+
+            float hs = 0.5f; 
+            QVector3D c(node.x, node.y, node.z);
+            QVector3D p0(c.x()-hs, c.y()-hs, c.z()-hs);
+            QVector3D p1(c.x()+hs, c.y()-hs, c.z()-hs);
+            QVector3D p2(c.x()+hs, c.y()+hs, c.z()-hs);
+            QVector3D p3(c.x()-hs, c.y()+hs, c.z()-hs);
+            QVector3D p4(c.x()-hs, c.y()-hs, c.z()+hs);
+            QVector3D p5(c.x()+hs, c.y()-hs, c.z()+hs);
+            QVector3D p6(c.x()+hs, c.y()+hs, c.z()+hs);
+            QVector3D p7(c.x()-hs, c.y()+hs, c.z()+hs);
+
+            auto addQuad = [&](const QVector3D& v0, const QVector3D& v1, const QVector3D& v2, const QVector3D& v3, const QVector3D& n) {
+                vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                vertices << v1.x() << v1.y() << v1.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 0;
+                vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                vertices << v3.x() << v3.y() << v3.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 1;
+            };
+
+            addQuad(p0, p3, p2, p1, QVector3D(0, 0, -1));
+            addQuad(p1, p2, p6, p5, QVector3D(1, 0, 0));
+            addQuad(p5, p6, p7, p4, QVector3D(0, 0, 1));
+            addQuad(p4, p7, p3, p0, QVector3D(-1, 0, 0));
+            addQuad(p3, p7, p6, p2, QVector3D(0, 1, 0));
+            addQuad(p4, p0, p1, p5, QVector3D(0, -1, 0));
+
+            sm.count = 36;
+            submeshes.push_back(sm);
+        }
+
+        SubMesh lineSm;
+        lineSm.startIndex = vertices.size() / 3;
+        lineSm.texture = cyanTex;
+        lineSm.drawMode = 0x0001; // GL_LINES
+        
+        for (const auto& edge : currentGraph.edges) {
+            const GraphNode* n1 = GRAPH_FindNode(currentGraph, edge.node1);
+            const GraphNode* n2 = GRAPH_FindNode(currentGraph, edge.node2);
+            if (n1 && n2) {
+                vertices << n1->x << n1->y << n1->z;
+                normals << 0 << 1 << 0; uvs << 0 << 0;
+                vertices << n2->x << n2->y << n2->z;
+                normals << 0 << 1 << 0; uvs << 0 << 0;
+                lineSm.count += 2;
+            }
+        }
+        if (lineSm.count > 0) submeshes.push_back(lineSm);
     }
 
     void updateModelInfo(const QString& baseName) {
@@ -666,7 +753,7 @@ protected:
                 } else {
                     program.setUniformValue("hasTexture", false);
                 }
-                glDrawArrays(GL_TRIANGLES, sm.startIndex, sm.count);
+                glDrawArrays(sm.drawMode, sm.startIndex, sm.count);
             }
         }
 
@@ -694,7 +781,64 @@ protected:
         return angle;
     }
 
-    void mousePressEvent(QMouseEvent *event) override { lastPos = event->pos(); }
+    void mousePressEvent(QMouseEvent *event) override { 
+        lastPos = event->pos(); 
+        if (currentGraph.valid && event->button() == Qt::LeftButton) {
+            QMatrix4x4 projection, view, model;
+            projection.perspective(45.0f, float(width()) / float(height() ? height() : 1), 0.1f, 100.0f);
+            view.translate(transX, transY, -zoom);
+            model.rotate(rotX, 1.0f, 0.0f, 0.0f);
+            model.rotate(rotY, 0.0f, 1.0f, 0.0f);
+            model.rotate(rotZ, 0.0f, 0.0f, 1.0f);
+            
+            QMatrix4x4 mvp = projection * view * model;
+            bool invertible;
+            QMatrix4x4 invMvp = mvp.inverted(&invertible);
+            if (invertible) {
+                float x = (2.0f * event->pos().x()) / width() - 1.0f;
+                float y = 1.0f - (2.0f * event->pos().y()) / height();
+                QVector4D rayStart(x, y, -1.0f, 1.0f);
+                QVector4D rayEnd(x, y, 1.0f, 1.0f);
+                rayStart = invMvp * rayStart; rayStart /= rayStart.w();
+                rayEnd = invMvp * rayEnd; rayEnd /= rayEnd.w();
+                QVector3D rayOrigin = rayStart.toVector3D();
+                QVector3D rayDir = (rayEnd.toVector3D() - rayOrigin).normalized();
+                
+                float minT = std::numeric_limits<float>::max();
+                int closestId = -1;
+                for (const auto& node : currentGraph.nodes) {
+                    QVector3D center = worldToNormalized(node.x, node.y, node.z);
+                    QVector3D oc = rayOrigin - center;
+                    float b = QVector3D::dotProduct(oc, rayDir);
+                    float r = 0.5f / modelScale;
+                    float c = QVector3D::dotProduct(oc, oc) - r * r;
+                    float h = b * b - c;
+                    if (h > 0.0f) {
+                        float t = -b - sqrt(h);
+                        if (t > 0.0f && t < minT) {
+                            minT = t;
+                            closestId = node.id;
+                        }
+                    }
+                }
+                
+                if (closestId != -1) {
+                    selectedGraphNodeId = closestId;
+                    const GraphNode* n = GRAPH_FindNode(currentGraph, closestId);
+                    if (n) {
+                        currentJsonInfo = QString("ID: %1\nPos: %2, %3, %4\nCriteria: %5")
+                                       .arg(n->id).arg(n->x).arg(n->y).arg(n->z).arg(QString::fromStdString(n->criteria));
+                        infoOverlay->setPlainText(QString("=== Graph Node ===\n%1").arg(currentJsonInfo));
+                        if (!infoOverlay->isVisible()) infoOverlay->show();
+                    }
+                    generateGraphGeometry();
+                    centerModel();
+                    setupBuffers();
+                    update();
+                }
+            }
+        }
+    }
     void mouseMoveEvent(QMouseEvent *event) override {
         int dx = event->pos().x() - lastPos.x();
         int dy = event->pos().y() - lastPos.y();
