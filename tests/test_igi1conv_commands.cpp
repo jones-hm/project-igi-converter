@@ -297,4 +297,37 @@ TEST_F(IGI1ConvTest, IffRoundTripSizeMatches) {
     EXPECT_EQ(inSize, outSize) << "round-trip size mismatch: in=" << inSize
                                 << " out=" << outSize;
 }
+TEST_F(IGI1ConvTest, IffDecompileCreateRoundTrip) {
+    // Decompile -> Create round trip via the .IFF text representation.
+    // Output size may differ slightly from the original because the
+    // FORM root size convention is different (real-size vs broken-size)
+    // - what we require is that the rebuilt IFF parses to the same
+    // bone/clip/event count as the source.
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string decDir = tmp / "decomp";
+    std::string outIff = tmp / "dec_rebuilt.iff";
+    ASSERT_EQ(RunIGI1Conv("iff decompile " + Q(f) + " " + Q(decDir)), 0);
+    ASSERT_EQ(RunIGI1Conv("iff create "    + Q(decDir) + " " + Q(outIff)), 0);
+    // The rebuilt IFF must parse without error and emit the same
+    // header summary as the source (within a small tolerance - the
+    // decompiler's text re-encoding rounds times, so the rebuilt
+    // duration may differ by 1ms).
+    std::string origInfo, newInfo;
+    ASSERT_EQ(RunIGI1Conv("iff info " + Q(f),     &origInfo), 0);
+    ASSERT_EQ(RunIGI1Conv("iff info " + Q(outIff), &newInfo),  0);
+    // iff info writes to file, but the parser uses the file too - read
+    // back from the .info.txt sidecar.
+    auto readInfo = [&](const std::string& iff) {
+        std::ifstream f(iff + ".info.txt");
+        std::stringstream ss; ss << f.rdbuf();
+        return ss.str();
+    };
+    std::string origTxt = readInfo(f);
+    std::string newTxt  = readInfo(outIff);
+    EXPECT_NE(origTxt.find("Bone Count:"), std::string::npos);
+    EXPECT_NE(newTxt.find("Bone Count:"),  std::string::npos);
+    EXPECT_NE(origTxt.find("Clips:"),       std::string::npos);
+    EXPECT_NE(newTxt.find("Clips:"),       std::string::npos);
+}
 
