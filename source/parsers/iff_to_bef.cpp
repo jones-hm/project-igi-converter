@@ -89,7 +89,7 @@ bool ConvertIffToBef(const std::string& iffFile, const std::string& outDir) {
         for (size_t i = 0; i < clip.events.size(); ++i) {
             const auto& ev = clip.events[i];
             out << "TriggerData(" << i << "," << ev.event_id << "," << (int)ev.time << ","
-                << (int)ev.param << "," << (ev.pos[0] / Sc) << "," << (ev.pos[1] / Sc) << "," << (ev.pos[2] / Sc) << ");\n";
+                << (int)ev.bone_id << "," << (ev.pos[0] / Sc) << "," << (ev.pos[1] / Sc) << "," << (ev.pos[2] / Sc) << ");\n";
         }
 
         out.close();
