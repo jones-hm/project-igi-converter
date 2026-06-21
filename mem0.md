@@ -26,3 +26,11 @@
 ## Bug ID: MEF-Recursive-ATTA-Scan
 **Description:** The GUI editor did not recursively load ATTA (attachment) models and their textures when a base MEF file was opened. The 'build-rigid' CLI tool also lost textures when compiling the rigid model because it stripped the PMTL/TAMC chunks without generating a proper sidecar. This caused users to see missing geometries and textures when examining assembled levels like 435_01_1.mef.
 **Resolution:** Implemented loadMefRecursive in gui_main.cpp. The GUI now parses ATTA matrices and naturally handles the hierarchical structure, natively scanning for attachments and their textures directly into the viewport. This makes 'build-rigid' unnecessary for merely viewing full levels with textures.
+
+## Bug ID: Graph-3D-Viewport-Nodes
+**Description:** The 3D graph viewer did not display nodes as red 3D cubes, did not show links and link info properly like `igi-editor`, and lacked view-toggles and node details.
+**Resolution:** Replaced/fixed graph drawing logic in `gui_main.cpp` to render red cubes for nodes and lines for links, implemented toggles (keys 'N' and 'L'), and enabled mouse-hover and selection details display.
+
+## Bug ID: Graph-Nodes-Scale-Visibility
+**Description:** On graph files with a large number of nodes (30-100+), the nodes were too small to see.
+**Resolution:** Added dynamic sizing based on the graph's spatial span and introduced interactive scaling hotkeys (`Ctrl +` / `Ctrl -`, `Ctrl + Wheel`, and `Middle Mouse + Wheel`) to dynamically scale the red cubes representing the nodes in the 3D viewport.

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-06-21
+
+### Added
+- **3D Graph Editor Viewport**: Implemented interactive 3D viewport rendering for graph files (`graph*.dat`), displaying graph nodes as 3D red cubes and visual connections as lines.
+- **Dynamic Node Scaling**: Implemented automatic dynamic scaling for graph nodes based on the spatial span of the loaded map.
+- **Interactive Node Scale Controls**: Added hotkeys to manually scale nodes: `Ctrl +` / `Ctrl -` to increase/decrease node size, `Ctrl + Mouse Wheel`, and `Middle Mouse + Mouse Wheel`.
+- **View Toggles**: Added toggles (keys 'N' for Nodes, 'L' for Links) to hide/show nodes and links.
+- **Improved View Defaults**: Configured default view rules where any `.dat` file with `graph` in its name defaults to '3D' view, and `.qvm` files default to 'Text' view.
+- **View Mode Renaming**: Renamed '3D View' to '3D', and 'Image View' to 'Image' mode in the GUI.
+
+### Fixed
+- **Large Graphs Visibility**: Corrected sizing issue where nodes were too small to see in large graphs with 30-100+ nodes.
+
+---
+
 ## [1.7.0] - 2026-06-13
 
 ### Added
