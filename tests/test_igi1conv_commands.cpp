@@ -280,4 +280,21 @@ TEST_F(IGI1ConvTest, IffExportGif) {
     g.read(magic, 6);
     EXPECT_EQ(std::string(magic, 6), std::string("GIF89a"));
 }
+TEST_F(IGI1ConvTest, IffRoundTripSizeMatches) {
+    // Convert -> Create round trip must reproduce the same file size as
+    // the original IFF.  This is a strong invariant for the IFF writer
+    // (since the original is laid out with FORM-size == the bone block
+    // size; we re-derive the bone count and skeleton from the first BEF
+    // and must agree on chunk boundaries).
+    IGI1CONV_NEED(f, "\\.iff$");
+    TempDir tmp;
+    std::string bDir   = tmp / "befs";
+    std::string outIff = tmp / "roundtrip.iff";
+    ASSERT_EQ(RunIGI1Conv("iff convert " + Q(f) + " " + Q(bDir)), 0);
+    ASSERT_EQ(RunIGI1Conv("iff create "  + Q(bDir) + " " + Q(outIff)), 0);
+    auto inSize  = std::filesystem::file_size(f);
+    auto outSize = std::filesystem::file_size(outIff);
+    EXPECT_EQ(inSize, outSize) << "round-trip size mismatch: in=" << inSize
+                                << " out=" << outSize;
+}
 
