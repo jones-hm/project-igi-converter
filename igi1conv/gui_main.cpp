@@ -474,9 +474,13 @@ public:
                 animTime = 0.0f;
                 
                 // Set fake bounds for camera
-                vertices.clear();
+                vertices.clear(); uvs.clear(); normals.clear(); submeshes.clear();
                 vertices.push_back(-100); vertices.push_back(-100); vertices.push_back(-100);
                 vertices.push_back(100);  vertices.push_back(100);  vertices.push_back(100);
+                for(int j=0; j<2; j++) {
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                }
                 
                 if (!currentIff.clips.empty()) {
                     animTimer->start(16); // ~60fps
