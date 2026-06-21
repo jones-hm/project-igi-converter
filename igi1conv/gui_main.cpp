@@ -66,8 +66,10 @@ static std::function<void(const QString&, LogLevel)> g_logger;
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QColorDialog>
+#include <QUuid>
 #include "graph_parser.h"
 #include <QProgressDialog>
+#include "gif.h"
 
 #include <vector>
 #include <fstream>
@@ -612,6 +614,51 @@ public:
             else if (QFileInfo::exists(path3)) loadMefRecursive(path3, childTransform, depth + 1);
             else if (QFileInfo::exists(path4)) loadMefRecursive(path4, childTransform, depth + 1);
         }
+    }
+
+    void exportGif(const QString& filename) {
+        if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
+
+        const auto& clip = currentIff.clips[currentClipIndex];
+        
+        QProgressDialog progress("Exporting GIF...", "Cancel", 0, clip.duration, this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.show();
+
+        int w = this->width();
+        int h = this->height();
+
+        GifWriter writer;
+        GifBegin(&writer, filename.toLocal8Bit().constData(), w, h, 2, 8, true);
+
+        float oldTime = animTime;
+        bool oldGrid = showGrid;
+        bool oldWire = showWireframe;
+        showGrid = false;
+        showWireframe = false;
+
+        animTime = 0.0f;
+        
+        for (float t = 0.0f; t < clip.duration; t += 16.0f) {
+            if (progress.wasCanceled()) break;
+            animTime = t;
+            updateIffSkeleton();
+            repaint(); // force a synchronous paint
+            QImage frame = grabFramebuffer();
+            frame = frame.convertToFormat(QImage::Format_RGBA8888);
+            GifWriteFrame(&writer, frame.constBits(), w, h, 2, 8, true);
+            progress.setValue((int)t);
+            QCoreApplication::processEvents();
+        }
+        
+        GifEnd(&writer);
+        
+        animTime = oldTime;
+        showGrid = oldGrid;
+        showWireframe = oldWire;
+        updateIffSkeleton();
+        update();
+        QMessageBox::information(this, "Export complete", "GIF exported successfully to\n" + filename);
     }
 
     void loadModel(const QString& path) {
@@ -2964,8 +3011,28 @@ private:
 
         // Single item context menu
         if (isDir) {
-            menu.addAction("Pack to .res archive", [this, path]() {
-                QString folderName = QFileInfo(path).fileName();
+            QString folderName = QFileInfo(path).fileName();
+            if (folderName.toUpper() == "ANIMS") {
+                menu.addAction("Batch Convert IFF -> BFF (BEF)", [this, path]() {
+                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
+                    if (outDir.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments({"iff", "batch", path, outDir});
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Batch converted IFFs in ANIMS to " + outDir);
+                        QMessageBox::information(this, "Success", "Batch converted IFF files.");
+                    } else {
+                        logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to batch convert IFF files:\n" + proc.readAllStandardError());
+                    }
+                });
+                menu.addSeparator();
+            }
+
+            menu.addAction("Pack to .res archive", [this, path, folderName]() {
                 QString defaultOut = path + "/" + folderName + ".res";
                 QString outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
                     defaultOut, "Resource Archive (*.res)");
@@ -3008,27 +3075,38 @@ private:
             menu.addSeparator();
 
             if (ext == "iff") {
-                menu.addAction("Convert IFF -> BEF (Batch directory)", [this, path]() {
+                menu.addAction("Convert to BFF/BEF", [this, path]() {
                     QString dir = QFileInfo(path).absolutePath();
-                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", dir);
-                    if (outDir.isEmpty()) return;
+                    QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    QDir().mkpath(tempDir + "/Input");
+                    QFile::copy(path, tempDir + "/Input/" + QFileInfo(path).fileName());
                     
                     QProcess proc;
                     proc.setProgram(qApp->applicationFilePath());
-                    proc.setArguments({"iff", "batch", dir, outDir});
+                    proc.setArguments({"iff", "convert", tempDir + "/Input", tempDir + "/Converted"});
                     proc.start();
                     proc.waitForFinished(-1);
+                    
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
-                        logMessage("[SUCCESS] Batch converted IFFs in directory to " + outDir);
-                        QMessageBox::information(this, "Success", "Converted IFF files.");
+                        QStringList filters; filters << "*.BEF" << "*.bef" << "*.BFF" << "*.bff";
+                        QDir out(tempDir + "/Converted");
+                        for (QString f : out.entryList(filters, QDir::Files)) {
+                            QFile::copy(tempDir + "/Converted/" + f, dir + "/" + f);
+                        }
+                        logMessage("[SUCCESS] Converted IFF to " + dir);
+                        QMessageBox::information(this, "Success", "Converted IFF file.");
                     } else {
-                        logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
-                        QMessageBox::critical(this, "Error", "Failed to convert IFF files:\n" + proc.readAllStandardError());
+                        logMessage("[ERROR] IFF convert failed:\n" + proc.readAllStandardError());
+                        QMessageBox::critical(this, "Error", "Failed to convert IFF file:\n" + proc.readAllStandardError());
                     }
+                    QDir(tempDir).removeRecursively();
                 });
 
                 menu.addAction("Export Animation as GIF...", [this, path]() {
-                    QMessageBox::information(this, "Coming Soon", "GIF export is currently being integrated and will be available shortly.");
+                    QString outPath = QFileDialog::getSaveFileName(this, "Export GIF", QFileInfo(path).absolutePath() + "/" + QFileInfo(path).completeBaseName() + ".gif", "GIF Image (*.gif)");
+                    if (!outPath.isEmpty()) {
+                        modelViewer->exportGif(outPath);
+                    }
                 });
 
                 menu.addAction("Export Animation as Video (.mp4)...", [this, path]() {
@@ -3038,21 +3116,29 @@ private:
             } else if (ext == "bef") {
                 menu.addAction("Convert BEF -> IFF (Create)", [this, path]() {
                     QString dir = QFileInfo(path).absolutePath();
-                    QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", dir);
-                    if (outDir.isEmpty()) return;
+                    QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    QDir().mkpath(tempDir + "/Input");
+                    QFile::copy(path, tempDir + "/Input/" + QFileInfo(path).fileName());
                     
                     QProcess proc;
                     proc.setProgram(qApp->applicationFilePath());
-                    proc.setArguments({"iff", "create", dir, outDir});
+                    proc.setArguments({"iff", "create", tempDir + "/Input", tempDir + "/Output"});
                     proc.start();
                     proc.waitForFinished(-1);
+                    
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
-                        logMessage("[SUCCESS] Created IFF from BEFs in directory to " + outDir);
-                        QMessageBox::information(this, "Success", "Created IFF file(s).");
+                        QStringList filters; filters << "*.IFF" << "*.iff";
+                        QDir out(tempDir + "/Output");
+                        for (QString f : out.entryList(filters, QDir::Files)) {
+                            QFile::copy(tempDir + "/Output/" + f, dir + "/" + f);
+                        }
+                        logMessage("[SUCCESS] Created IFF to " + dir);
+                        QMessageBox::information(this, "Success", "Created IFF file.");
                     } else {
                         logMessage("[ERROR] IFF create failed:\n" + proc.readAllStandardError());
                         QMessageBox::critical(this, "Error", "Failed to create IFF file:\n" + proc.readAllStandardError());
                     }
+                    QDir(tempDir).removeRecursively();
                 });
             }
         }
