@@ -1,5 +1,6 @@
 #include "igi1conv_test_util.h"
 #include <random>
+#include <cstring>
 
 using namespace igi1conv_test;
 
@@ -12,14 +13,24 @@ bool g_test_dat = false;
 bool g_test_spr = false;
 bool g_test_tex = false;
 bool g_test_pic = false;
+std::string g_game_path;
 }
 
 // Custom main to parse custom test flags before Google Test runs
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
-    
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        // --game-path=PATH or --corpus=PATH (alias)
+        if (arg.rfind("--game-path=", 0) == 0) {
+            igi1conv_test::SetGamePath(arg.substr(std::strlen("--game-path=")));
+            continue;
+        }
+        if (arg.rfind("--corpus=", 0) == 0) {
+            igi1conv_test::SetGamePath(arg.substr(std::strlen("--corpus=")));
+            continue;
+        }
         if (arg == "--test-qvm" || arg == "--qvm") {
             igi1conv_test::g_test_qvm = true;
         } else if (arg == "--test-res" || arg == "--res") {
