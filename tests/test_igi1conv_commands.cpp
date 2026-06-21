@@ -2,6 +2,11 @@
 // every subcommand, driven against the real game-file corpus.
 #include "igi1conv_test_util.h"
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace igi1conv_test;
 
@@ -76,6 +81,78 @@ TEST_F(IGI1ConvTest, MefDump) {
     std::string out = tmp / "model.txt";
     EXPECT_EQ(RunIGI1Conv("mef dump " + Q(f) + " -o " + Q(out)), 0);
     EXPECT_TRUE(NonEmptyFile(out));
+}
+TEST_F(IGI1ConvTest, MefExportObjHasRealUvs) {
+    // Regression: OBJ export must not silently drop all UVs to 0,0 and
+    // must produce real per-vertex V coordinates (not always 0/1 for
+    // non-bone models).  We parse the OBJ `vt` lines and require at
+    // least one non-(0,0) entry, and the V range must be strictly
+    // between 0 and 1 (not all clamped to the flip extremes).
+    IGI1CONV_NEED(f, "\\.mef$");
+    TempDir tmp;
+    std::string out = tmp / "model.obj";
+    EXPECT_EQ(RunIGI1Conv("mef export " + Q(f) + " -o " + Q(out)), 0);
+    std::ifstream in(out);
+    ASSERT_TRUE(in.is_open()) << "OBJ not written: " << out;
+    int vtCount = 0, nonzero = 0;
+    float vmin = 2.f, vmax = -1.f;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("vt ", 0) != 0) continue;
+        ++vtCount;
+        float u = 0.f, v = 0.f;
+        if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) != 2) continue;
+        if (u != 0.f || v != 0.f) ++nonzero;
+        vmin = std::min(vmin, v);
+        vmax = std::max(vmax, v);
+    }
+    EXPECT_GT(vtCount, 0)   << "OBJ has no `vt` entries: " << out;
+    EXPECT_GT(nonzero, 0)   << "all OBJ UVs are (0,0): " << out;
+    // MEF UVs can extend slightly outside [0,1] for tiled/oversized
+    // textures; we only guard against a flipped or corrupted range
+    // (V clamped to exactly 0 or exactly 1 for every vertex would
+    // indicate a bad V-flip, not a tiled UV).
+    EXPECT_LT(vmax,  2.0f)  << "OBJ V exploded (V-flip / NaN): " << out;
+    EXPECT_GT(vmin, -1.0f)  << "OBJ V exploded (V-flip / NaN): " << out;
+    EXPECT_LT(vmax - vmin, 1.5f)
+        << "OBJ V looks clamped to 0/1 (no flip, or all 1-flip): " << out;
+}
+TEST_F(IGI1ConvTest, MefExportBinaryAndTextObjUvsMatch) {
+    // The binary MEF -> OBJ and text MEF -> OBJ paths must produce the
+    // same set of UV coordinates for the same source MEF (the text
+    // path must not silently drop UVs or flip V differently from the
+    // binary path).
+    IGI1CONV_NEED(f, "\\.mef$");
+    TempDir tmp;
+    std::string binObj = tmp / "bin.obj";
+    std::string txt    = tmp / "model.txt";
+    std::string txtObj = tmp / "text.obj";
+    ASSERT_EQ(RunIGI1Conv("mef export "  + Q(f)  + " -o " + Q(binObj)), 0);
+    ASSERT_EQ(RunIGI1Conv("mef to-text " + Q(f)  + " -o " + Q(txt)),    0);
+    ASSERT_EQ(RunIGI1Conv("mef export "  + Q(txt)+ " -o " + Q(txtObj)), 0);
+    auto collectVts = [](const std::string& obj) {
+        std::ifstream in(obj);
+        std::vector<std::pair<float,float>> vts;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.rfind("vt ", 0) != 0) continue;
+            float u = 0.f, v = 0.f;
+            if (std::sscanf(line.c_str(), "vt %f %f", &u, &v) == 2)
+                vts.emplace_back(u, v);
+        }
+        return vts;
+    };
+    auto bin = collectVts(binObj);
+    auto txtv = collectVts(txtObj);
+    ASSERT_GT(bin.size(),  0u) << "binary OBJ has no vts: " << binObj;
+    ASSERT_GT(txtv.size(), 0u) << "text OBJ has no vts: "   << txtObj;
+    // The first 3 vts (face 0) must match exactly between the two paths.
+    for (size_t i = 0; i < 3 && i < bin.size() && i < txtv.size(); ++i) {
+        EXPECT_NEAR(bin[i].first,  txtv[i].first,  1e-5f)
+            << "U mismatch at vt " << i;
+        EXPECT_NEAR(bin[i].second, txtv[i].second, 1e-5f)
+            << "V mismatch at vt " << i;
+    }
 }
 
 // ─── qsc ─────────────────────────────────────────────────────────────────────
