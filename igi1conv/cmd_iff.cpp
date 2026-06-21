@@ -9,33 +9,7 @@
 
 namespace fs = std::filesystem;
 
-// Locate the dconv Python package (parent dir that contains dconv/__main__.py)
-static std::string findDconvTools() {
-    const char* candidates[] = {
-        "D:/IGI-Tools/GM_123/IGI_IFF_CONV_GM/IGI_IFF_CONV_GM/tools",
-        "tools",
-        nullptr
-    };
-    for (int i = 0; candidates[i]; ++i) {
-        std::string p = std::string(candidates[i]) + "/dconv/__main__.py";
-        if (fs::exists(p)) return candidates[i];
-    }
-    return "";
-}
-
-static int runPythonDconv(const std::string& toolsDir, const std::string& plugin,
-                          const std::string& src, const std::string& dst) {
-    if (toolsDir.empty()) {
-        std::cerr << "[ERROR] dconv not found. Expected tools/dconv alongside igi1conv.exe\n";
-        std::cerr << "        or at D:/IGI-Tools/GM_123/IGI_IFF_CONV_GM/IGI_IFF_CONV_GM/tools\n";
-        return 1;
-    }
-    // cd into tools dir so "python dconv ..." finds the package by relative import
-    std::string cmd = "cd /d \"" + toolsDir + "\" && python dconv iff " + plugin
-                      + " \"" + src + "\" \"" + dst + "\"";
-    std::cout << "[INFO] " << cmd << "\n";
-    return (std::system(cmd.c_str()) == 0) ? 0 : 1;
-}
+// Removed python helper functions
 
 int cmd_iff(int argc, char** argv) {
     if (argc < 3) {
@@ -104,7 +78,8 @@ int cmd_iff(int argc, char** argv) {
                 int count = 0;
                 for (const auto& entry : fs::directory_iterator(src)) {
                     if (entry.is_regular_file() && 
-                       (entry.path().extension() == ".iff" || entry.path().extension() == ".IFF")) {
+                       (entry.path().extension() == ".iff" || entry.path().extension() == ".IFF" ||
+                        entry.path().extension() == ".bff" || entry.path().extension() == ".BFF")) {
                         ConvertIffToBef(entry.path().string(), dst);
                         count++;
                     }
@@ -117,11 +92,10 @@ int cmd_iff(int argc, char** argv) {
             return 0;
         }
 
-        std::string tools = findDconvTools();
-        if (command == "decompile")
-            return runPythonDconv(tools, "IGI1_decompile", src, dst);
-        if (command == "create")
-            return runPythonDconv(tools, "IGI1_create", src, dst);
+        if (command == "decompile" || command == "create") {
+            std::cerr << "[ERROR] " << command << " requires Python which is now fully removed for standalone execution.\n";
+            return 1;
+        }
     }
 
     std::cerr << "Unknown iff command: " << command << "\n";
