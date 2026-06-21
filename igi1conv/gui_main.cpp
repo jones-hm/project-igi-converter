@@ -109,6 +109,8 @@ public:
         QString materialName;
         std::shared_ptr<QOpenGLTexture> texture;
         unsigned int drawMode = 0x0004; // GL_TRIANGLES
+        bool useOverrideColor = false;
+        QVector4D overrideColor = QVector4D(1, 1, 1, 1);
     };
 
     QTextEdit* infoOverlay;
@@ -126,6 +128,8 @@ public:
 
     GraphFile currentGraph;
     int selectedGraphNodeId = -1;
+    bool showGraphNodes = true;
+    bool showGraphLinks = true;
     float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
@@ -469,76 +473,81 @@ protected:
     void loadGraphData(const QString& path) {
         currentGraph = GRAPH_Parse(path.toStdString());
         if (!currentGraph.valid) return;
+        statsOverlay->setText(QString("Graph loaded: %1 nodes, %2 edges")
+                              .arg(currentGraph.nodes.size())
+                              .arg(currentGraph.edges.size()));
         generateGraphGeometry();
     }
 
     void generateGraphGeometry() {
         vertices.clear(); uvs.clear(); normals.clear(); submeshes.clear(); textureCache.clear();
-        QImage redImg(1, 1, QImage::Format_RGBA8888); redImg.fill(Qt::red);
-        auto redTex = std::make_shared<QOpenGLTexture>(redImg);
-        QImage yellowImg(1, 1, QImage::Format_RGBA8888); yellowImg.fill(Qt::yellow);
-        auto yellowTex = std::make_shared<QOpenGLTexture>(yellowImg);
-        QImage cyanImg(1, 1, QImage::Format_RGBA8888); cyanImg.fill(Qt::cyan);
-        auto cyanTex = std::make_shared<QOpenGLTexture>(cyanImg);
 
-        for (const auto& node : currentGraph.nodes) {
-            auto tex = redTex;
-            if (node.id == selectedGraphNodeId) tex = yellowTex;
-            else if (node.criteria.find("NODECRITERIA_COVER") != std::string::npos) tex = cyanTex;
-            
-            SubMesh sm;
-            sm.startIndex = vertices.size() / 3;
-            sm.texture = tex;
-            sm.drawMode = 0x0004; // GL_TRIANGLES
+        if (showGraphNodes) {
+            for (const auto& node : currentGraph.nodes) {
+                SubMesh sm;
+                sm.startIndex = vertices.size() / 3;
+                sm.drawMode = 0x0004; // GL_TRIANGLES
+                sm.useOverrideColor = true;
 
-            float hs = 0.5f; 
-            QVector3D c(node.x, node.y, node.z);
-            QVector3D p0(c.x()-hs, c.y()-hs, c.z()-hs);
-            QVector3D p1(c.x()+hs, c.y()-hs, c.z()-hs);
-            QVector3D p2(c.x()+hs, c.y()+hs, c.z()-hs);
-            QVector3D p3(c.x()-hs, c.y()+hs, c.z()-hs);
-            QVector3D p4(c.x()-hs, c.y()-hs, c.z()+hs);
-            QVector3D p5(c.x()+hs, c.y()-hs, c.z()+hs);
-            QVector3D p6(c.x()+hs, c.y()+hs, c.z()+hs);
-            QVector3D p7(c.x()-hs, c.y()+hs, c.z()+hs);
+                float r = 0.85f, g = 0.12f, b = 0.12f;
+                if (node.id == selectedGraphNodeId) { r=1.0f; g=0.6f; b=0.0f; }
+                else if (node.criteria.find("DOOR") != std::string::npos) { r=1.0f; g=1.0f; b=0.0f; }
+                else if (node.criteria.find("STAIR") != std::string::npos) { r=1.0f; g=0.0f; b=1.0f; }
+                else if (node.criteria.find("VIEW") != std::string::npos) { r=0.0f; g=1.0f; b=1.0f; }
+                sm.overrideColor = QVector4D(r, g, b, 1.0f);
 
-            auto addQuad = [&](const QVector3D& v0, const QVector3D& v1, const QVector3D& v2, const QVector3D& v3, const QVector3D& n) {
-                vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
-                vertices << v1.x() << v1.y() << v1.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 0;
-                vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
-                vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
-                vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
-                vertices << v3.x() << v3.y() << v3.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 1;
-            };
+                float H = 50.0f * std::max(1.0f, (float)node.radius); 
+                QVector3D c(node.x, node.y, node.z);
+                QVector3D p0(c.x()-H, c.y()-H, c.z());
+                QVector3D p1(c.x()+H, c.y()-H, c.z());
+                QVector3D p2(c.x()+H, c.y()+H, c.z());
+                QVector3D p3(c.x()-H, c.y()+H, c.z());
+                QVector3D p4(c.x()-H, c.y()-H, c.z() + 2*H);
+                QVector3D p5(c.x()+H, c.y()-H, c.z() + 2*H);
+                QVector3D p6(c.x()+H, c.y()+H, c.z() + 2*H);
+                QVector3D p7(c.x()-H, c.y()+H, c.z() + 2*H);
 
-            addQuad(p0, p3, p2, p1, QVector3D(0, 0, -1));
-            addQuad(p1, p2, p6, p5, QVector3D(1, 0, 0));
-            addQuad(p5, p6, p7, p4, QVector3D(0, 0, 1));
-            addQuad(p4, p7, p3, p0, QVector3D(-1, 0, 0));
-            addQuad(p3, p7, p6, p2, QVector3D(0, 1, 0));
-            addQuad(p4, p0, p1, p5, QVector3D(0, -1, 0));
+                auto addQuad = [&](const QVector3D& v0, const QVector3D& v1, const QVector3D& v2, const QVector3D& v3, const QVector3D& n) {
+                    vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                    vertices << v1.x() << v1.y() << v1.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 0;
+                    vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                    vertices << v0.x() << v0.y() << v0.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 0;
+                    vertices << v2.x() << v2.y() << v2.z(); normals << n.x() << n.y() << n.z(); uvs << 1 << 1;
+                    vertices << v3.x() << v3.y() << v3.z(); normals << n.x() << n.y() << n.z(); uvs << 0 << 1;
+                };
 
-            sm.count = 36;
-            submeshes.push_back(sm);
-        }
+                addQuad(p4, p5, p6, p7, QVector3D(0, 0, 1)); // Top
+                addQuad(p1, p0, p3, p2, QVector3D(0, 0, -1)); // Bottom
+                addQuad(p0, p1, p5, p4, QVector3D(0, -1, 0)); // Front
+                addQuad(p2, p3, p7, p6, QVector3D(0, 1, 0)); // Back
+                addQuad(p3, p0, p4, p7, QVector3D(-1, 0, 0)); // Left
+                addQuad(p1, p2, p6, p5, QVector3D(1, 0, 0)); // Right
 
-        SubMesh lineSm;
-        lineSm.startIndex = vertices.size() / 3;
-        lineSm.texture = cyanTex;
-        lineSm.drawMode = 0x0001; // GL_LINES
-        
-        for (const auto& edge : currentGraph.edges) {
-            const GraphNode* n1 = GRAPH_FindNode(currentGraph, edge.node1);
-            const GraphNode* n2 = GRAPH_FindNode(currentGraph, edge.node2);
-            if (n1 && n2) {
-                vertices << n1->x << n1->y << n1->z;
-                normals << 0 << 1 << 0; uvs << 0 << 0;
-                vertices << n2->x << n2->y << n2->z;
-                normals << 0 << 1 << 0; uvs << 0 << 0;
-                lineSm.count += 2;
+                sm.count = 36;
+                submeshes.push_back(sm);
             }
         }
-        if (lineSm.count > 0) submeshes.push_back(lineSm);
+
+        if (showGraphLinks) {
+            SubMesh lineSm;
+            lineSm.startIndex = vertices.size() / 3;
+            lineSm.drawMode = 0x0001; // GL_LINES
+            lineSm.useOverrideColor = true;
+            lineSm.overrideColor = QVector4D(0.0f, 1.0f, 1.0f, 1.0f); // Cyan
+            
+            for (const auto& edge : currentGraph.edges) {
+                const GraphNode* n1 = GRAPH_FindNode(currentGraph, edge.node1);
+                const GraphNode* n2 = GRAPH_FindNode(currentGraph, edge.node2);
+                if (n1 && n2) {
+                    vertices << n1->x << n1->y << n1->z;
+                    normals << 0 << 1 << 0; uvs << 0 << 0;
+                    vertices << n2->x << n2->y << n2->z;
+                    normals << 0 << 1 << 0; uvs << 0 << 0;
+                    lineSm.count += 2;
+                }
+            }
+            if (lineSm.count > 0) submeshes.push_back(lineSm);
+        }
     }
 
     void updateModelInfo(const QString& baseName) {
@@ -667,13 +676,17 @@ protected:
             "out vec4 FragColor;\n"
             "uniform sampler2D texture1;\n"
             "uniform bool hasTexture;\n"
+            "uniform bool useOverrideColor;\n"
+            "uniform vec4 overrideColor;\n"
             "void main() {\n"
             "    vec3 norm = normalize(Normal);\n"
             "    vec3 viewDir = vec3(0.0, 0.0, 1.0);\n" // Directional headlight
             "    float diff = max(abs(dot(norm, viewDir)), 0.1);\n" // Two-sided lighting
             "    float ambient = 0.3;\n"
             "    float lighting = min(diff + ambient, 1.0);\n"
-            "    vec4 baseColor = hasTexture ? texture(texture1, TexCoord) : vec4(0.8, 0.8, 0.8, 1.0);\n"
+            "    vec4 baseColor = vec4(0.8, 0.8, 0.8, 1.0);\n"
+            "    if (hasTexture) baseColor = texture(texture1, TexCoord);\n"
+            "    if (useOverrideColor) baseColor = overrideColor;\n"
             "    FragColor = vec4(lighting * baseColor.rgb, baseColor.a);\n"
             "}\n";
 
@@ -753,6 +766,13 @@ protected:
                 } else {
                     program.setUniformValue("hasTexture", false);
                 }
+                
+                if (sm.useOverrideColor) {
+                    program.setUniformValue("useOverrideColor", true);
+                    program.setUniformValue("overrideColor", sm.overrideColor);
+                } else {
+                    program.setUniformValue("useOverrideColor", false);
+                }
                 glDrawArrays(sm.drawMode, sm.startIndex, sm.count);
             }
         }
@@ -807,10 +827,11 @@ protected:
                 float minT = std::numeric_limits<float>::max();
                 int closestId = -1;
                 for (const auto& node : currentGraph.nodes) {
-                    QVector3D center = worldToNormalized(node.x, node.y, node.z);
+                    float H = 50.0f * std::max(1.0f, (float)node.radius); 
+                    QVector3D center = worldToNormalized(node.x, node.y, node.z + H);
                     QVector3D oc = rayOrigin - center;
                     float b = QVector3D::dotProduct(oc, rayDir);
-                    float r = 0.5f / modelScale;
+                    float r = (H * 1.5f) / modelScale;
                     float c = QVector3D::dotProduct(oc, oc) - r * r;
                     float h = b * b - c;
                     if (h > 0.0f) {
@@ -826,9 +847,14 @@ protected:
                     selectedGraphNodeId = closestId;
                     const GraphNode* n = GRAPH_FindNode(currentGraph, closestId);
                     if (n) {
-                        currentJsonInfo = QString("ID: %1\nPos: %2, %3, %4\nCriteria: %5")
-                                       .arg(n->id).arg(n->x).arg(n->y).arg(n->z).arg(QString::fromStdString(n->criteria));
-                        infoOverlay->setPlainText(QString("=== Graph Node ===\n%1").arg(currentJsonInfo));
+                        int numLinks = 0;
+                        for (auto& e : currentGraph.edges) {
+                            if (e.node1 == n->id || e.node2 == n->id) numLinks++;
+                        }
+                        currentJsonInfo = QString("Node ID: %1\nPos: %2, %3, %4\nRadius: %5\nGamma: %6\nCriteria: %7\nConnected Links: %8")
+                                       .arg(n->id).arg(n->x).arg(n->y).arg(n->z).arg(n->radius).arg(n->gamma)
+                                       .arg(QString::fromStdString(n->criteria)).arg(numLinks);
+                        infoOverlay->setPlainText(QString("=== Node Info ===\n%1").arg(currentJsonInfo));
                         if (!infoOverlay->isVisible()) infoOverlay->show();
                     }
                     generateGraphGeometry();
@@ -855,6 +881,28 @@ protected:
         lastPos = event->pos();
         updateCoordsOverlay();
     }
+    void keyPressEvent(QKeyEvent *event) override {
+        if (currentGraph.valid) {
+            if (event->key() == Qt::Key_N) {
+                showGraphNodes = !showGraphNodes;
+                generateGraphGeometry();
+                centerModel();
+                setupBuffers();
+                update();
+                return;
+            }
+            if (event->key() == Qt::Key_L) {
+                showGraphLinks = !showGraphLinks;
+                generateGraphGeometry();
+                centerModel();
+                setupBuffers();
+                update();
+                return;
+            }
+        }
+        QOpenGLWidget::keyPressEvent(event);
+    }
+
     void wheelEvent(QWheelEvent *event) override {
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
         if (zoom < 0.1f) zoom = 0.1f;
