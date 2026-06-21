@@ -39,7 +39,7 @@ static void print_help()
         "  graph    AI navigation graph (export to JSON, info)\n"
         "  dat      DAT model-texture data (info, export, to-mtp)\n"
         "  fnt      FNT font file (info, export PNG)\n"
-        "  iff      IFF skeletal animation format (info)\n"
+        "  iff      IFF skeletal animation format (info, test, decompile, convert, create, rebuild, emit-qsc, export-gif)\n"
         "  test     Run advanced test suite on game directory\n"
         "\n"
         "Run 'igi1conv <command> --help' for command-specific help.\n";
