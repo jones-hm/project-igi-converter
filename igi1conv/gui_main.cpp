@@ -32,6 +32,12 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QSettings>
+
+enum LogLevel { LOG_ERROR = 0, LOG_INFO = 1, LOG_DEBUG = 2, LOG_VERBOSE = 3 };
+
+#include <functional>
+static std::function<void(const QString&, LogLevel)> g_logger;
+
 #include <QCloseEvent>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
@@ -459,7 +465,9 @@ public:
         } else if (ext == "dat") {
             loadGraphData(path);
         } else if (ext == "iff") {
-            currentIff = IFF_Parse(path.toStdString());
+            currentIff = IFF_Parse(path.toStdString(), [](int level, const std::string& msg) {
+                if (g_logger) g_logger(QString::fromStdString(msg), static_cast<LogLevel>(level));
+            });
             if (currentIff.valid) {
                 isIffAnimation = true;
                 currentClipIndex = 0;
@@ -1744,6 +1752,9 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
+        g_logger = [this](const QString& msg, LogLevel level) {
+            this->logMessage(msg, level);
+        };
         setWindowTitle("IGI Game Converter");
         QIcon appIcon(":/igi1conv.ico");
         setWindowIcon(appIcon);
@@ -2264,15 +2275,19 @@ public:
         QMenu* logsLevelMenu = logsMenu->addMenu("Logs Level");
         logsLevelMenu->addAction("INFO", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "INFO");
-            logMessage("[INFO] LOGS_LEVEL set to INFO");
+            logMessage("[INFO] LOGS_LEVEL set to INFO", LOG_INFO);
         });
         logsLevelMenu->addAction("DEBUG", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "DEBUG");
-            logMessage("[INFO] LOGS_LEVEL set to DEBUG");
+            logMessage("[INFO] LOGS_LEVEL set to DEBUG", LOG_INFO);
         });
         logsLevelMenu->addAction("ERROR", this, [this, iniPath]() {
             QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "ERROR");
-            logMessage("[INFO] LOGS_LEVEL set to ERROR");
+            logMessage("[INFO] LOGS_LEVEL set to ERROR", LOG_INFO);
+        });
+        logsLevelMenu->addAction("VERBOSE", this, [this, iniPath]() {
+            QSettings(iniPath, QSettings::IniFormat).setValue("LOGS_LEVEL", "VERBOSE");
+            logMessage("[INFO] LOGS_LEVEL set to VERBOSE", LOG_INFO);
         });
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
@@ -2510,16 +2525,37 @@ public:
         QMainWindow::closeEvent(event);
     }
 
-    void logMessage(const QString& msg) {
-        if (consoleEdit) {
-            consoleEdit->append(msg);
-        }
+    void logMessage(const QString& msg, LogLevel msgLevel = LOG_INFO) {
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        QString levelStr = QSettings(iniPath, QSettings::IniFormat).value("LOGS_LEVEL", "INFO").toString();
+        LogLevel currentLevel = LOG_INFO;
+        if (levelStr == "ERROR") currentLevel = LOG_ERROR;
+        else if (levelStr == "DEBUG") currentLevel = LOG_DEBUG;
+        else if (levelStr == "VERBOSE") currentLevel = LOG_VERBOSE;
+        
+        if (msgLevel > currentLevel) return;
+        
+        QString prefix = "[INFO] ";
+        if (msgLevel == LOG_ERROR) prefix = "[ERROR] ";
+        else if (msgLevel == LOG_DEBUG) prefix = "[DEBUG] ";
+        else if (msgLevel == LOG_VERBOSE) prefix = "[VERBOSE] ";
+        
+        QString finalMsg = msg;
+        if (finalMsg.startsWith("[INFO] ")) finalMsg = finalMsg.mid(7);
+        else if (finalMsg.startsWith("[ERROR] ")) finalMsg = finalMsg.mid(8);
+        else if (finalMsg.startsWith("[DEBUG] ")) finalMsg = finalMsg.mid(8);
+        else if (finalMsg.startsWith("[VERBOSE] ")) finalMsg = finalMsg.mid(10);
+        
+        finalMsg = prefix + finalMsg;
+        
+        if (consoleEdit) {
+            consoleEdit->append(finalMsg);
+        }
         if (QSettings(iniPath, QSettings::IniFormat).value("LOGS_ENABLED", true).toBool()) {
             QFile logFile(QCoreApplication::applicationDirPath() + "/igi1conv.log");
             if (logFile.open(QIODevice::Append | QIODevice::Text)) {
                 QTextStream out(&logFile);
-                out << msg << "\n";
+                out << finalMsg << "\n";
             }
         }
     }

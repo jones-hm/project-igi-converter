@@ -48,5 +48,9 @@ struct IffFile {
     std::vector<IffClip> clips;
 };
 
-IffFile IFF_Parse(const std::string& filepath);
-void IFF_Dump(const std::string& filepath, const std::string& outfile);
+#include <functional>
+
+using IffLogger = std::function<void(int level, const std::string& msg)>;
+
+IffFile IFF_Parse(const std::string& filepath, IffLogger logger = nullptr);
+void IFF_Dump(const std::string& filepath, const std::string& outfile, IffLogger logger = nullptr);
