@@ -20,15 +20,35 @@
 // where <id> is the bare stem of the source file (e.g. "003" for
 // "003.IFF") and NNN is the per-clip animation id.
 //
+// The companion helper IFF_LoadDecompiledDir() reads the same text
+// layout back into a vector of BefFile structs, which lets the
+// `iff create` command accept either .BEF files (convert output) or
+// the .IFF text format (decompile output) as input.  See cmd_iff.cpp.
+//
 // Returns true on success.  On failure, `err` (if non-null) is set to
 // a human-readable message and the partial output is left in place.
 
 #include <string>
+#include <vector>
+#include "iff_bef.h"
 
 namespace igi1conv {
 
 bool IFF_Decompile(const std::string& srcIffPath,
                    const std::string& outDir,
                    std::string* err = nullptr);
+
+// Read a directory produced by IFF_Decompile() back into a list of
+// BEF-style clip structs.  The baseName argument selects which main
+// .IFF text file inside the directory to consume (typically the file
+// stem of the original source IFF).  bonesSk is filled with the bone
+// skeleton parsed from the main .IFF; the returned vector contains
+// one BefFile per animation in the Anims List.  Returns true on
+// success.
+bool IFF_LoadDecompiledDir(const std::string& outDir,
+                           const std::string& baseName,
+                           std::vector<BefFile>& clipsOut,
+                           BefFile& skeletonOut,
+                           std::string* err = nullptr);
 
 } // namespace igi1conv

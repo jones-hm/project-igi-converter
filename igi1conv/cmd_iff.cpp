@@ -149,6 +149,12 @@ static int create_from_bef_dir(const std::string& srcDir, const std::string& out
         if (err) *err = "source is not a directory: " + srcDir;
         return 1;
     }
+    // Accept either:
+    //   (a) the BEF-based output of `iff convert` (a flat directory of
+    //       .BEF files), or
+    //   (b) the .IFF text + per-anim IFF output of `iff decompile`
+    //       (a top-level <basename>.IFF plus an `anims_<basename>/`
+    //       subfolder of per-anim .IFF text files).
     std::vector<std::string> befs;
     for (const auto& entry : fs::directory_iterator(srcDir)) {
         if (!entry.is_regular_file()) continue;
@@ -156,13 +162,85 @@ static int create_from_bef_dir(const std::string& srcDir, const std::string& out
         std::string lext = ext; std::transform(lext.begin(), lext.end(), lext.begin(), ::tolower);
         if (lext == ".bef") befs.push_back(entry.path().string());
     }
-    if (befs.empty()) {
-        if (err) *err = "no .BEF files in: " + srcDir;
+    if (!befs.empty()) {
+        std::sort(befs.begin(), befs.end());
+        if (!igi1conv::WriteIffFromBefs(befs, outIff, err)) return 3;
+        std::cout << "Wrote " << outIff << " (" << befs.size() << " animations)\n";
+        return 0;
+    }
+
+    // No BEF files - try the decompile-output layout.  The basename is
+    // the first <something>.IFF text file we find in the directory.
+    std::string baseName;
+    for (const auto& entry : fs::directory_iterator(srcDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::string lext = ext; std::transform(lext.begin(), lext.end(), lext.begin(), ::tolower);
+        if (lext == ".iff") {
+            // Skip per-anim files inside an anims_* subfolder.
+            if (entry.path().parent_path().filename().string().rfind("anims_", 0) == 0)
+                continue;
+            baseName = entry.path().stem().string();
+            break;
+        }
+    }
+    if (baseName.empty()) {
+        if (err) *err = "no .BEF files or <basename>.IFF text in: " + srcDir;
         return 1;
     }
-    std::sort(befs.begin(), befs.end());
-    if (!igi1conv::WriteIffFromBefs(befs, outIff, err)) return 3;
-    std::cout << "Wrote " << outIff << " (" << befs.size() << " animations)\n";
+    std::vector<igi1conv::BefFile> clips;
+    igi1conv::BefFile skel;
+    if (!igi1conv::IFF_LoadDecompiledDir(srcDir, baseName, clips, skel, err)) {
+        return 1;
+    }
+    // Materialise the parsed decompile text back to .BEF files in a
+    // scratch dir, then run the standard BEF->IFF writer.
+    fs::path scratch = fs::temp_directory_path() /
+        ("igi1conv_iff_create_" +
+         std::to_string(std::rand()) + "_" +
+         std::to_string(::GetCurrentProcessId()));
+    fs::remove_all(scratch);
+    fs::create_directories(scratch);
+    // Write a _skeleton.BEF first so the writer can pick up the bones
+    // from the first BEF in the directory.
+    if (!skel.bones.empty()) {
+        igi1conv::BefFile skelBef = skel;
+        skelBef.anim_name = baseName + "_skeleton";
+        skelBef.length_ms = 1;
+        std::string e;
+        if (!igi1conv::WriteBefFile((scratch / "_skeleton.BEF").string(), skelBef, &e)) {
+            if (err) *err = "skeleton BEF write failed: " + e;
+            return 1;
+        }
+    }
+    for (const auto& b : clips) {
+        fs::path p = scratch / (b.anim_name + ".BEF");
+        std::string e;
+        if (!igi1conv::WriteBefFile(p.string(), b, &e)) {
+            if (err) *err = "scratch BEF write failed: " + e;
+            return 1;
+        }
+    }
+    std::vector<std::string> scratchBefs;
+    for (const auto& entry : fs::directory_iterator(scratch)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::string lext = ext; std::transform(lext.begin(), lext.end(), lext.begin(), ::tolower);
+        if (lext == ".bef") scratchBefs.push_back(entry.path().string());
+    }
+    std::sort(scratchBefs.begin(), scratchBefs.end());
+    if (scratchBefs.size() > 1 && scratchBefs.front().find("_skeleton") == std::string::npos) {
+        auto it = std::find_if(scratchBefs.begin(), scratchBefs.end(),
+            [](const std::string& p){ return p.find("_skeleton") != std::string::npos; });
+        if (it != scratchBefs.end()) std::iter_swap(scratchBefs.begin(), it);
+    }
+    // Materialise the parsed decompile text back to .BEF files in a
+    // scratch dir, then run the standard BEF->IFF writer.
+    bool ok = igi1conv::WriteIffFromBefs(scratchBefs, outIff, err);
+    fs::remove_all(scratch);
+    if (!ok) return 3;
+    std::cout << "Wrote " << outIff << " (" << clips.size()
+              << " animations, via decompile output)\n";
     return 0;
 }
 
