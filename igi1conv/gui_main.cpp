@@ -96,20 +96,13 @@ static QImage loadImageSafe(const QString& path) {
     return img;
 }
 
-// V-flip for the GUI 3D viewer.  Mirrors MefVToObjV() in
-// source/parsers/mef_exporter.cpp.  Kept inline (not linked from
-// mef_exporter.cpp) because the GUI is a separate Qt target and the
-// parser lib is built without Qt.  The structural test
-// MefExportVFlip_NoStrayOneMinusVLiterals in tests/test_igi1conv_commands.cpp
-// pins the formula so the two copies can never drift apart silently.
-//
-// Rule (must match MefVToObjV()):
-//   modelType 0 (rigid)    -> flip V   (DirectX -> OpenGL)
-//   modelType 1 (bone)     -> flip V   (face textures would be upside-down otherwise)
-//   modelType 3 (lightmap) -> keep V   (already in OpenGL orientation)
-static inline float guiMefVToObjV(float v, uint32_t modelType) {
-    return (modelType == 3) ? v : (1.0f - v);
-}
+// V-flip is a pure EXPORT-time transformation: see MefVToObjV in
+// source/parsers/mef_exporter.cpp and the MefExportVFlip_*
+// regression tests in tests/test_igi1conv_commands.cpp.  The 3D
+// viewer is contractually required to render V as-is from the
+// MEF (no flip), and that contract is pinned by the
+// MefViewerDoesNotFlipV test.  No viewer-side V-flip helper
+// exists on purpose.
 
 static QString formatJson(const QJsonObject& obj, int indent = 0) {
     QString result;
@@ -597,18 +590,20 @@ public:
                             norm.normalize();
                             normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
 
-                            // Centralised V-flip: see MefVToObjV() in
-                            // mef_exporter.cpp.  Mirrors that helper
-                            // for the GUI 3D viewer (which cannot link
-                            // mef_exporter.cpp directly because the
-                            // helper lives in the parsers library and
-                            // the GUI is a separate Qt target).
-                            // The structural test
-                            // MefExportVFlip_NoStrayOneMinusVLiterals
-                            // asserts the GUI never spells the
-                            // formula out as a literal subtraction.
+                            // V-flip is an EXPORT-time transformation
+                            // only (see MefVToObjV in
+                            // source/parsers/mef_exporter.cpp and the
+                            // MefExportVFlip_* tests in
+                            // tests/test_igi1conv_commands.cpp).  In
+                            // the live 3D viewer we pass V through
+                            // unchanged so the model is never
+                            // displayed upside down.  Do not route
+                            // this through the guiMefVToObjV helper
+                            // and do NOT call MefVToObjV - the GUI's
+                            // contract is identity.  Pinned by the
+                            // MefViewerDoesNotFlipV regression test.
                             uvs.push_back(v.uv.x);
-                            uvs.push_back(guiMefVToObjV(v.uv.y, geo.modelType));
+                            uvs.push_back(v.uv.y);
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
                             normals.push_back(0); normals.push_back(0); normals.push_back(0);

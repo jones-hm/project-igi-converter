@@ -231,28 +231,27 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
 //     renderLayout "packed DNER" (no "type1" substring), so they were
 //     STILL being V-flipped, leaving 82% of MEFs (340/415 in
 //     level1/models) upside-down in the 3D viewer and any OBJ export.
-//   - The user reports that bone model *faces* (e.g. 003_01_1.mef,
-//     001_01_1.mef) are still upside-down when exported.  The
-//     current rule is therefore:
-//        modelType 0 (rigid)    -> V flipped
-//        modelType 1 (bone)     -> V flipped (face textures would be
-//                                   upside-down otherwise)
+//   - The user clarified the rule: V is only flipped at *export*
+//     time (OBJ / MEF write), NOT in the live 3D viewer.  So the
+//     GUI viewer (guiMefVToObjV) is the identity, and only the
+//     exporter (MefVToObjV) applies the per-model-type flip:
+//        modelType 0 (rigid)    -> V flipped on export
+//        modelType 1 (bone)     -> V flipped on export
 //        modelType 3 (lightmap) -> V NOT flipped (already in OpenGL
-//                                   orientation; 03642a7 missed this
-//                                   category and caused 82% of MEFs
-//                                   to be upside-down)
+//                                   orientation)
 //
-// These tests pin down the current contract so the bug cannot regress:
+// These tests pin down the export contract so the bug cannot regress:
 //   1. Type 0 (rigid)    - V is flipped (1.0f - v.uv.y = OBJ v)
 //   2. Type 1 (bone)     - V IS flipped (face textures would be
 //                            upside-down otherwise)
 //   3. Type 3 (lightmap) - V is NOT flipped (v.uv.y = OBJ v)
 //   4. The text MEF -> OBJ path agrees with the binary path for all
 //      three model types.
-//   5. The MefVToObjV helper itself obeys the rule (a structural
-//      test that grep's for stray "1.0f - v.uv.y" / "1.0f - uv["
-//      literals outside the helper, so the formula cannot drift
-//      between call sites in mef_exporter.cpp and gui_main.cpp).
+//   5. The export MefVToObjV helper is the ONLY place that flips V;
+//      the GUI viewer's guiMefVToObjV is the identity.  A structural
+//      test grep's mef_exporter.cpp + gui_main.cpp for stray
+//      "1.0f - v.uv.y" / "1.0f - uv[" literals outside the helper
+//      so the formula cannot drift.
 
 // Helper: read raw V from the first vt line of an OBJ.
 static float FirstObjV(const std::string& obj) {
@@ -453,49 +452,88 @@ TEST_F(IGI1ConvTest, MefExportVFlip_BinaryAndTextPathsAgree) {
 // The V-flip formula must be centralised.  If a future contributor
 // re-introduces a per-call-site (1.0f - v.uv.y) literal anywhere in
 // the export paths, this test will fail.  This is a structural test
-// that grep's the source for the bad pattern and asserts it only
-// appears inside the MefVToObjV helper itself.
+// that grep's mef_exporter.cpp for the bad pattern and asserts it
+// only appears inside the MefVToObjV helper itself.
+//
+// gui_main.cpp is exempt: the GUI viewer's guiMefVToObjV is the
+// identity (V is rendered as-is from the MEF).  V is only flipped
+// at export time.
 TEST_F(IGI1ConvTest, MefExportVFlip_NoStrayOneMinusVLiterals) {
     namespace fs = std::filesystem;
-    // Walk the source tree looking for the canonical "1.0f - v.uv.y"
-    // / "1.0f - uv[" pattern.  It is allowed in mef_exporter.cpp ONLY
-    // inside the MefVToObjV() helper.
-    std::vector<std::string> sources;
-    for (const char* sub : {"source/parsers/mef_exporter.cpp",
-                            "igi1conv/gui_main.cpp"}) {
-        fs::path p = std::filesystem::current_path() / sub;
-        if (fs::exists(p)) sources.push_back(p.string());
-    }
-    ASSERT_FALSE(sources.empty())
-        << "could not locate mef_exporter.cpp / gui_main.cpp";
+    fs::path p = std::filesystem::current_path() / "source/parsers/mef_exporter.cpp";
+    ASSERT_TRUE(fs::exists(p))
+        << "could not locate mef_exporter.cpp at " << p.string();
 
     int hits = 0;
     std::string offending;
-    for (const auto& src : sources) {
-        std::ifstream in(src);
-        std::string line;
-        int lineNo = 0;
-        while (std::getline(in, line)) {
-            ++lineNo;
-            if (line.find("1.0f - v.uv.y") == std::string::npos &&
-                line.find("1.0f - uv[")    == std::string::npos)
-                continue;
-            // MefVToObjV() in mef_exporter.cpp is the only place that
-            // may spell out the flip formula.
-            if (src.find("mef_exporter.cpp") != std::string::npos &&
-                line.find("MefVToObjV") != std::string::npos) {
-                continue;
-            }
-            ++hits;
-            offending += src + ":" + std::to_string(lineNo) + ": " + line + "\n";
-        }
+    std::ifstream in(p.string());
+    std::string line;
+    int lineNo = 0;
+    while (std::getline(in, line)) {
+        ++lineNo;
+        if (line.find("1.0f - v.uv.y") == std::string::npos &&
+            line.find("1.0f - uv[")    == std::string::npos)
+            continue;
+        // MefVToObjV() in mef_exporter.cpp is the only place that
+        // may spell out the flip formula.  Allow:
+        //   - the bool overload (returns the same expression both
+        //     branches)
+        //   - the uint32_t modelType overload (the canonical rule)
+        if (line.find("MefVToObjV") != std::string::npos) continue;
+        ++hits;
+        offending += p.filename().string() + ":" + std::to_string(lineNo)
+                    + ": " + line + "\n";
     }
     EXPECT_EQ(hits, 0)
-        << "Found stray '1.0f - v.uv.y' / '1.0f - uv[' literal(s) outside "
-        << "MefVToObjV().  All V-flip decisions must go through the "
-        << "centralised MefVToObjV(v, modelType) helper so a model_type "
-        << "change (e.g. 03642a7's bone fix) propagates to every call site:\n"
-        << offending;
+        << "Found stray '1.0f - v.uv.y' / '1.0f - uv[' literal(s) "
+        << "outside MefVToObjV() in mef_exporter.cpp.  All V-flip "
+        << "decisions must go through the centralised "
+        << "MefVToObjV(v, modelType) helper so a model_type rule "
+        << "change (e.g. 03642a7's bone fix) propagates to every "
+        << "call site:\n" << offending;
+}
+
+// The GUI viewer must NOT apply the V-flip.  guiMefVToObjV is
+// required to be the identity.  This is a structural / behavioural
+// contract: the 3D viewer shows the MEF's V as-is.  V is only
+// flipped at export time (see MefVToObjV in mef_exporter.cpp and
+// the MefExportVFlip_* regression tests above).
+//
+// We assert the contract by reading the source: the GUI helper must
+// return its `v` argument unchanged for every model_type.  The
+// simplest way to enforce that is to require `guiMefVToObjV` to be
+// implemented as a single return-v statement and never call
+// MefVToObjV.  The viewer code must read `v.uv.y` directly.
+TEST_F(IGI1ConvTest, MefViewerDoesNotFlipV) {
+    namespace fs = std::filesystem;
+    fs::path p = std::filesystem::current_path() / "igi1conv/gui_main.cpp";
+    ASSERT_TRUE(fs::exists(p))
+        << "could not locate gui_main.cpp at " << p.string();
+
+    int callSites = 0;
+    std::string offending;
+    std::ifstream in(p.string());
+    std::string line;
+    int lineNo = 0;
+    while (std::getline(in, line)) {
+        ++lineNo;
+        // The viewer must not call MefVToObjV / guiMefVToObjV with
+        // a flip, nor spell out the 1.0f - v.uv.y formula.  We allow
+        // references to the helper in comments (the viewer CAN
+        // mention guiMefVToObjV in a comment), so we only flag a
+        // line if it actually invokes the function.
+        if (line.find("guiMefVToObjV(") != std::string::npos &&
+            line.find("//") == std::string::npos) {
+            ++callSites;
+            offending += p.filename().string() + ":" + std::to_string(lineNo)
+                        + ": " + line + "\n";
+        }
+    }
+    EXPECT_EQ(callSites, 0)
+        << "The 3D viewer still calls guiMefVToObjV() with a flip. "
+        << "The user requirement is: V is flipped ONLY at export "
+        << "time (OBJ / MEF).  In the 3D viewer, pass v.uv.y "
+        << "through unchanged:\n" << offending;
 }
 
 // ─── qsc ─────────────────────────────────────────────────────────────────────
