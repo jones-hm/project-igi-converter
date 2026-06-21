@@ -1890,8 +1890,8 @@ public:
         viewMenu->addAction("Auto", [this]() { viewModeCombo->setCurrentIndex(0); });
         viewMenu->addAction("Text", [this]() { viewModeCombo->setCurrentIndex(1); });
         viewMenu->addAction("Hex", [this]() { viewModeCombo->setCurrentIndex(2); });
-        viewMenu->addAction("Image View", [this]() { viewModeCombo->setCurrentIndex(3); });
-        viewMenu->addAction("3D View", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addAction("Image", [this]() { viewModeCombo->setCurrentIndex(3); });
+        viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(4); });
         viewMenu->addSeparator();
         auto applyMenuTheme = [iniPath](const QString& name) {
             QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
@@ -2256,7 +2256,7 @@ public:
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
         viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
-        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image View", "3D View"});
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D"});
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
@@ -2495,10 +2495,10 @@ private:
             menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
             QMenu* viewMenu = menu.addMenu("View As");
-            viewMenu->addAction("Text View", [this, path]() { loadFile(path, 1); });
-            viewMenu->addAction("Hex View",  [this, path]() { loadFile(path, 2); });
-            viewMenu->addAction("Image View",[this, path]() { loadFile(path, 3); });
-            viewMenu->addAction("3D View",   [this, path]() { loadFile(path, 4); });
+            viewMenu->addAction("Text", [this, path]() { loadFile(path, 1); });
+            viewMenu->addAction("Hex",  [this, path]() { loadFile(path, 2); });
+            viewMenu->addAction("Image",     [this, path]() { loadFile(path, 3); });
+            viewMenu->addAction("3D",        [this, path]() { loadFile(path, 4); });
             menu.addSeparator();
         }
 
@@ -2734,8 +2734,12 @@ private:
                 }
             } else if (currentExt == "obj") {
                 mode = 4; // 3D
-            } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat") {
-                mode = 1; // Text
+            } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat" || currentExt == "qvm") {
+                if (currentExt == "dat" && info.fileName().toLower().contains("graph")) {
+                    mode = 4; // 3D
+                } else {
+                    mode = 1; // Text
+                }
             } else {
                 mode = 2; // Hex
             }
