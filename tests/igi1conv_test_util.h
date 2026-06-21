@@ -2,9 +2,12 @@
 //
 // The suite spawns the freshly built igi1conv.exe (next to igi1conv_tests.exe) and
 // drives it against a corpus of real IGI game files.  The corpus directory is
-// taken from the IGI_GAME_PATH environment variable, defaulting to
-// D:\IGI1\full_test.  Tests that need a file which is absent are SKIPPED (not
-// failed) so the suite stays green on machines without the corpus.
+// provided at runtime via:
+//   - the command-line flag  --game-path=PATH  (parsed by the test main)
+//   - or the IGI_GAME_PATH environment variable
+// If neither is set, FindCorpusFileByRegex() returns "" and any test that
+// calls IGI1CONV_NEED() will GTEST_SKIP() so the suite stays green on
+// machines without a corpus.  NO path is hard-coded here.
 #pragma once
 
 #include <gtest/gtest.h>
@@ -23,6 +26,13 @@
 
 namespace igi1conv_test {
 
+// Set at runtime by the test main when --game-path=PATH is passed, or
+// pulled from the IGI_GAME_PATH env var as a fallback.  Never defaults
+// to a hard-coded path - tests must opt in to a corpus.
+extern std::string g_game_path;
+
+inline void SetGamePath(const std::string& p) { g_game_path = p; }
+
 // Directory of the running test executable (igi1conv.exe lives alongside it).
 inline std::string ExeDir() {
     char buf[MAX_PATH] = {};
@@ -35,16 +45,22 @@ inline std::string IGI1ConvExe() {
     return ExeDir() + "\\igi1conv.exe";
 }
 
-// Root of the test corpus (env override, else the canonical full_test dir).
-inline std::string CorpusDir() {
-    char* env = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
-        std::string v(env);
-        free(env);
-        if (!v.empty()) return v;
-    }
-    return "D:\\IGI1\\full_test";
+// Root of the test corpus.  Returns "" if no path was provided - in
+// that case tests that call IGI1CONV_NEED() will GTEST_SKIP().
+inline const std::string& CorpusDir() {
+    // Lazy: pull env var on first call (before the g_game_path override
+    // is set, e.g. when IGI1CONV_NEED is evaluated in a static init).
+    static const std::string s_envPath = []() -> std::string {
+        char* env = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&env, &len, "IGI_GAME_PATH") == 0 && env) {
+            std::string v(env);
+            free(env);
+            return v;
+        }
+        return std::string();
+    }();
+    return g_game_path.empty() ? s_envPath : g_game_path;
 }
 
 inline std::string Corpus(const std::string& rel) {
