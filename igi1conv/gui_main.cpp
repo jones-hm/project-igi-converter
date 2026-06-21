@@ -132,6 +132,7 @@ public:
     bool showGraphLinks = true;
     float modelCx = 0, modelCy = 0, modelCz = 0, modelScale = 1;
     float graphMaxDim = 1000.0f;
+    float graphNodeScale = 1.0f;
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
     }
@@ -513,7 +514,7 @@ protected:
                 else if (node.criteria.find("VIEW") != std::string::npos) { r=0.0f; g=1.0f; b=1.0f; }
                 sm.overrideColor = QVector4D(r, g, b, 1.0f);
 
-                float baseH = std::max(50.0f, graphMaxDim * 0.015f);
+                float baseH = std::max(50.0f, graphMaxDim * 0.015f) * graphNodeScale;
                 float H = baseH * std::max(1.0f, (float)node.radius); 
                 QVector3D c(node.x, node.y, node.z);
                 QVector3D p0(c.x()-H, c.y()-H, c.z());
@@ -845,7 +846,7 @@ protected:
                 float minT = std::numeric_limits<float>::max();
                 int closestId = -1;
                 for (const auto& node : currentGraph.nodes) {
-                    float baseH = std::max(50.0f, graphMaxDim * 0.015f);
+                    float baseH = std::max(50.0f, graphMaxDim * 0.015f) * graphNodeScale;
                     float H = baseH * std::max(1.0f, (float)node.radius); 
                     QVector3D center = worldToNormalized(node.x, node.y, node.z + H);
                     QVector3D oc = rayOrigin - center;
@@ -918,11 +919,38 @@ protected:
                 update();
                 return;
             }
+            if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal) {
+                if (event->modifiers() & Qt::ControlModifier) {
+                    graphNodeScale *= 1.2f;
+                    generateGraphGeometry(); centerModel(); setupBuffers(); update();
+                    return;
+                }
+            }
+            if (event->key() == Qt::Key_Minus) {
+                if (event->modifiers() & Qt::ControlModifier) {
+                    graphNodeScale /= 1.2f;
+                    generateGraphGeometry(); centerModel(); setupBuffers(); update();
+                    return;
+                }
+            }
         }
         QOpenGLWidget::keyPressEvent(event);
     }
 
     void wheelEvent(QWheelEvent *event) override {
+        if (currentGraph.valid && ((event->buttons() & Qt::MiddleButton) || (event->modifiers() & Qt::ControlModifier))) {
+            if (event->angleDelta().y() > 0) {
+                graphNodeScale *= 1.1f;
+            } else if (event->angleDelta().y() < 0) {
+                graphNodeScale /= 1.1f;
+            }
+            generateGraphGeometry();
+            centerModel();
+            setupBuffers();
+            update();
+            return;
+        }
+
         zoom -= event->angleDelta().y() / 120.0f * 0.2f;
         if (zoom < 0.1f) zoom = 0.1f;
         update();
