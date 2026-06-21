@@ -22,6 +22,13 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > **AI Models / Characters Support**: As of v1.7.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
 
 > [!NOTE]
+> **v1.9.1 Updates (June 2026)**:
+> - **MEF texture-orientation bug fixed**: The `.mef → .obj` and `.mef → .mef` (via `mef build-rigid`) export paths now preserve V verbatim for every model type, matching the orientation the IGI engine and the GUI 3D viewer use. The 82% of MEFs that are Type 3 (lightmap) no longer come out flipped, and bone-model face textures are no longer upside down. The 3D viewer and the exported files now render identically.
+> - **Centralised V-flip decision**: replaced per-call-site `1.0f - v.uv.y` literals with a single `MefVToObjV(v, modelType)` helper in `source/parsers/mef_exporter.cpp`. The GUI 3D viewer reads `v.uv.y` directly with no V-flip helper.
+> - **Removed hardcoded `D:\IGI1` path** from the test suite. The corpus location is now user-controlled via the new `--game-path=PATH` / `--corpus=PATH` CLI flag or the `IGI_GAME_PATH` env var. Tests `GTEST_SKIP()` cleanly when no corpus is provided.
+> - **Comprehensive MEF V-flip regression suite** (8 new tests in `tests/test_igi1conv_commands.cpp`): per-type V checks (Type 0 rigid, Type 1 bone, Type 3 lightmap), a sweep across the corpus, a binary-vs-text agreement check, and structural tests that pin the formula in `MefVToObjV` and forbid V-flip helpers in the GUI viewer.
+
+> [!NOTE]
 > **v1.9.0 Updates (June 2026)**:
 > - **Fully standalone `igi1conv.exe`** - the legacy `tools/dconv` (Python) and `tools/gconv` (3DS Max plugin) folders have been **removed entirely**. Every conversion, including IFF animation handling, is now native C++.
 > - **New IFF subcommands**: `iff decompile` (binary → text + per-anim IFFs), `iff create` (BEF dir or decompile output → IFF), `iff rebuild` (one-shot round trip), `iff emit-qsc`, `iff export-gif` (headless GIF renderer).

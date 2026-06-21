@@ -11,6 +11,21 @@ igi1conv <command> --help
 
 **Exit codes:** `0` success · `1` bad args · `2` file not found · `3` parse error · `4` write error
 
+## Test corpus location (v1.9.1+)
+
+The test suite (`igi1conv_tests.exe`) is driven against a real IGI corpus.
+The corpus location is **not** hard-coded. Provide it at runtime via:
+
+| Method | Example |
+|---|---|
+| `--game-path=PATH` | `igi1conv_tests.exe --game-path=D:\IGI1\igi1conv_test_suite` |
+| `--corpus=PATH` (alias) | `igi1conv_tests.exe --corpus=D:\IGI1\igi1conv_test_suite` |
+| `IGI_GAME_PATH` env var | `$env:IGI_GAME_PATH = "D:\IGI1\igi1conv_test_suite"` |
+
+When none of the above is set, `CorpusDir()` returns "" and any test that
+calls `IGI1CONV_NEED()` will `GTEST_SKIP()` so the suite stays green on
+machines without a corpus.
+
 ---
 
 ## `tex` — Textures (TEX / SPR / PIC)

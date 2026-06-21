@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.1] - 2026-06-22
+
+### Fixed
+- **MEF texture orientation (the "upside down / sideways" bug)**: The `.mef → .obj` and `.mef → .mef` (via `mef build-rigid`) export paths now preserve V verbatim for every model type, matching the orientation the IGI engine and the GUI 3D viewer use. The 3D viewer (the live preview in `igi1conv.exe`) and the exported `.obj` / `.mef` now render identically for the same source `.mef`. Concretely, the original `015_01_1.mef` (Type 0 rigid), `001_01_1.mef` (Type 1 bone), and `404_01_1.mef` (Type 3 lightmap) all render right-side-up in the viewer **and** in the exported files. The 82% of MEFs that are Type 3 (lightmap) no longer come out flipped, and bone-model face textures are no longer upside down.
+
+### Changed
+- **Centralised V-flip decision** in `MefVToObjV(v, modelType)` (`source/parsers/mef_exporter.cpp`). The old per-call-site `1.0f - v.uv.y` / `1.0f - uv[]` literals have been removed and replaced with a single helper. The GUI 3D viewer reads `v.uv.y` directly with no V-flip helper. The rule is now the identity for every model type — no more special-casing of Type 1 (bone) vs Type 3 (lightmap) vs Type 0 (rigid).
+- **Removed hardcoded `D:\IGI1` path** from the test suite. The corpus location is now fully user-controlled via the new `--game-path=PATH` / `--corpus=PATH` CLI flag or the `IGI_GAME_PATH` env var. When neither is set, `CorpusDir()` returns "" and tests `GTEST_SKIP()` instead of failing. `tests/igi1conv_test_util.h` no longer mentions a Windows-specific path.
+
+### Added
+- **Comprehensive MEF V-flip regression suite** in `tests/test_igi1conv_commands.cpp`:
+  - `MefExportVFlip_Type0_Rigid_DoesNotFlipV`: rigid models preserve V.
+  - `MefExportVFlip_Type1_Bone_DoesNotFlipV`: bone models preserve V.
+  - `MefExportVFlip_Type3_Lightmap_DoesNotFlipV`: lightmap models preserve V.
+  - `MefExportVFlip_AllTypesRespectRule`: sweeps up to 64 MEFs in the corpus, asserts every model obeys the per-type rule.
+  - `MefExportVFlip_BinaryAndTextPathsAgree`: binary MEF → OBJ and text MEF → OBJ produce identical V for the same source MEF.
+  - `MefExportVFlip_NoStrayOneMinusVLiterals`: structural test that greps `mef_exporter.cpp` for stray `1.0f - v.uv.y` / `1.0f - uv[` literals outside the helper, so the formula can't drift between call sites.
+  - `MefViewerDoesNotFlipV`: structural test that the GUI 3D viewer never re-introduces a V-flip helper.
+  - `MefExportObjHasRealUvs` and `MefExportBinaryAndTextObjUvsMatch`: lock in that the OBJ export has real per-vertex UVs and that the binary and text paths agree.
+- **New test util helpers** in `tests/igi1conv_test_util.h`:
+  - `FindCorpusMefOfModelType(int wantedType, const std::string& namePattern = "")` — finds a MEF with a specific `model_type` (0 = rigid, 1 = bone, 3 = lightmap) in the corpus.
+  - `GetMefModelType(const std::string& mefPath)` — parses `model_type` from `mef info` output.
+  - `FirstVtFromObj(const std::string& objPath)` — reads the first non-(0,0) `vt` line from an OBJ.
+- **Test corpus** (`D:\IGI1\igi1conv_test_suite` — outside the repo, no hardcoded path committed): added `320_01_1.mef` (Type 0 rigid) and `404_01_1.mef` (Type 3 lightmap) so the per-type tests have files to exercise. The pre-existing `0_000_01_1.mef` (Type 1 bone) covers the third category.
+
 ## [1.9.0] - 2026-06-22
 
 ### Added
