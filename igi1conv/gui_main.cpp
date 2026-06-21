@@ -619,9 +619,10 @@ public:
     void exportGif(const QString& filename) {
         if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
 
-        const auto& clip = currentIff.clips[currentClipIndex];
+        float totalDuration = 0;
+        for (const auto& c : currentIff.clips) totalDuration += c.duration;
         
-        QProgressDialog progress("Exporting GIF...", "Cancel", 0, clip.duration, this);
+        QProgressDialog progress("Exporting GIF...", "Cancel", 0, totalDuration, this);
         progress.setWindowModality(Qt::WindowModal);
         progress.show();
 
@@ -632,28 +633,39 @@ public:
         GifBegin(&writer, filename.toLocal8Bit().constData(), w, h, 2, 8, true);
 
         float oldTime = animTime;
+        int oldClip = currentClipIndex;
         bool oldGrid = showGrid;
         bool oldWire = showWireframe;
         showGrid = false;
         showWireframe = false;
 
         animTime = 0.0f;
+        currentClipIndex = 0;
         
-        for (float t = 0.0f; t < clip.duration; t += 16.0f) {
+        float currentProgress = 0.0f;
+        for (int i = 0; i < currentIff.clips.size(); ++i) {
+            const auto& clip = currentIff.clips[i];
+            currentClipIndex = i;
+            for (float t = 0.0f; t < clip.duration; t += 16.0f) {
+                if (progress.wasCanceled()) break;
+                animTime = t;
+                updateIffSkeleton();
+                repaint(); // force a synchronous paint
+                QImage frame = grabFramebuffer();
+                frame = frame.convertToFormat(QImage::Format_RGBA8888);
+                GifWriteFrame(&writer, frame.constBits(), w, h, 2, 8, true);
+                
+                currentProgress += 16.0f;
+                progress.setValue((int)currentProgress);
+                QCoreApplication::processEvents();
+            }
             if (progress.wasCanceled()) break;
-            animTime = t;
-            updateIffSkeleton();
-            repaint(); // force a synchronous paint
-            QImage frame = grabFramebuffer();
-            frame = frame.convertToFormat(QImage::Format_RGBA8888);
-            GifWriteFrame(&writer, frame.constBits(), w, h, 2, 8, true);
-            progress.setValue((int)t);
-            QCoreApplication::processEvents();
         }
         
         GifEnd(&writer);
         
         animTime = oldTime;
+        currentClipIndex = oldClip;
         showGrid = oldGrid;
         showWireframe = oldWire;
         updateIffSkeleton();
@@ -3011,9 +3023,9 @@ private:
 
         // Single item context menu
         if (isDir) {
-            QString folderName = QFileInfo(path).fileName();
-            if (folderName.toUpper() == "ANIMS") {
-                menu.addAction("Batch Convert IFF -> BFF (BEF)", [this, path]() {
+            QDir d(path);
+            if (!d.entryList({"*.iff", "*.IFF"}, QDir::Files).isEmpty()) {
+                menu.addAction("Batch Convert IFF -> BEF", [this, path]() {
                     QString outDir = QFileDialog::getExistingDirectory(this, "Select Output Directory", path);
                     if (outDir.isEmpty()) return;
                     QProcess proc;
@@ -3022,7 +3034,7 @@ private:
                     proc.start();
                     proc.waitForFinished(-1);
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
-                        logMessage("[SUCCESS] Batch converted IFFs in ANIMS to " + outDir);
+                        logMessage("[SUCCESS] Batch converted IFFs in directory to " + outDir);
                         QMessageBox::information(this, "Success", "Batch converted IFF files.");
                     } else {
                         logMessage("[ERROR] IFF batch convert failed:\n" + proc.readAllStandardError());
@@ -3032,6 +3044,7 @@ private:
                 menu.addSeparator();
             }
 
+            QString folderName = QFileInfo(path).fileName();
             menu.addAction("Pack to .res archive", [this, path, folderName]() {
                 QString defaultOut = path + "/" + folderName + ".res";
                 QString outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
@@ -3075,7 +3088,7 @@ private:
             menu.addSeparator();
 
             if (ext == "iff") {
-                menu.addAction("Convert to BFF/BEF", [this, path]() {
+                menu.addAction("Convert to BEF", [this, path]() {
                     QString dir = QFileInfo(path).absolutePath();
                     QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
                     QDir().mkpath(tempDir + "/Input");
@@ -3088,12 +3101,12 @@ private:
                     proc.waitForFinished(-1);
                     
                     if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
-                        QStringList filters; filters << "*.BEF" << "*.bef" << "*.BFF" << "*.bff";
+                        QStringList filters; filters << "*.BEF" << "*.bef";
                         QDir out(tempDir + "/Converted");
                         for (QString f : out.entryList(filters, QDir::Files)) {
                             QFile::copy(tempDir + "/Converted/" + f, dir + "/" + f);
                         }
-                        logMessage("[SUCCESS] Converted IFF to " + dir);
+                        logMessage("[SUCCESS] Converted IFF to BEF in " + dir);
                         QMessageBox::information(this, "Success", "Converted IFF file.");
                     } else {
                         logMessage("[ERROR] IFF convert failed:\n" + proc.readAllStandardError());
@@ -3107,10 +3120,6 @@ private:
                     if (!outPath.isEmpty()) {
                         modelViewer->exportGif(outPath);
                     }
-                });
-
-                menu.addAction("Export Animation as Video (.mp4)...", [this, path]() {
-                    QMessageBox::information(this, "Coming Soon", "MP4 export is currently being integrated and will be available shortly.");
                 });
 
             } else if (ext == "bef") {
