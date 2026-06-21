@@ -552,6 +552,14 @@ public:
             if (v.rawPos.x != 0 || v.rawPos.y != 0 || v.rawPos.z != 0) { hasRawPos = true; break; }
         }
         bool isBoneModel = (geo.renderLayout.find("type1") != std::string::npos);
+        // MEF stores V in different conventions depending on model type:
+        //   * modelType 0 (rigid)  - V in DirectX (V=0 at top)
+        //   * modelType 1 (bone)   - V in OpenGL  (V=0 at bottom)
+        //   * modelType 3 (lightmap) - V in OpenGL  (V=0 at bottom)
+        // We only need to flip V for rigid (modelType 0) models.  The
+        // older isBoneModel check (renderLayout contains "type1") missed
+        // Type 3 lightmap models, leaving them upside-down in the viewer.
+        const bool flipV = (geo.modelType == 0);
 
         for (const auto& block : geo.renderBlocks) {
             SubMesh sm;
@@ -575,10 +583,10 @@ public:
                             norm.normalize();
                             normals.push_back(norm.x()); normals.push_back(norm.y()); normals.push_back(norm.z());
 
-                            uvs.push_back(v.uv.x); uvs.push_back(isBoneModel ? v.uv.y : (1.0f - v.uv.y));
+                            uvs.push_back(v.uv.x); uvs.push_back(flipV ? (1.0f - v.uv.y) : v.uv.y);
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
-                            normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                            normals.push_back(0); normals.push_back(0); normals.push_back(0);
                             uvs.push_back(0); uvs.push_back(0);
                         }
                     };
