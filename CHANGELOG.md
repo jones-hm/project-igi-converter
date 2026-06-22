@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.3] - 2026-06-22
+
+### Changed
+- **3D graph toolbar placement**: The graph toolbar (Node / -Node / Nodes / Links / Total Nodes / Total Links / Reset) was previously rendered BELOW the 3D viewer. It is now created BEFORE the modelViewer in the constructor and added to `rightLayout` between the view-mode row and the modelViewer, so the buttons sit on top of the 3D rendering surface - matching the layout pattern used by the IFF media bar and the image editor toolbar.
+
 ## [1.9.2] - 2026-06-22
 
 ### Added
