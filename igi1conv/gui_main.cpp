@@ -824,6 +824,14 @@ public:
         update();
     }
 
+    // Public wrapper so external widgets (graph toolbar buttons) can
+    // request a geometry rebuild when graphNodeScale / showGraphNodes
+    // / showGraphLinks change.  Only rebuilds if a graph is loaded.
+    void regenerateGraphGeometry() {
+        if (!currentGraph.valid) return;
+        generateGraphGeometry();
+    }
+
 protected:
     void parseFaceVertex(const QString& str, const std::vector<QVector3D>& tv, const std::vector<QVector2D>& tvt, const std::vector<QVector3D>& tvn) {
         QStringList p = str.split('/');
@@ -1401,14 +1409,21 @@ public:
         QVBoxLayout* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
-        
-        // ── Toolbar row ──────────────────────────────────────
-        QWidget* toolsWidget = new QWidget();
+
+        // ── Toolbar row (embedded in ImageEditor; MainWindow mirrors
+        // these buttons into the unified top-of-screen viewer toolbar
+        // so the user always sees them at the same position as the
+        // 3D graph buttons).  The internal copy stays here so the
+        // image-editor canvas still has its controls even when the
+        // viewer is shown without the unified toolbar (e.g. the
+        // embedded "Convert to TEX" / "Save As" action in the
+        // context menu). ───────────────────────────────
+        toolsWidget = new QWidget();
         toolsWidget->setStyleSheet("background:#2a2a2a; border-bottom:1px solid #444;");
         QHBoxLayout* tools = new QHBoxLayout(toolsWidget);
         tools->setContentsMargins(6, 4, 6, 4);
         tools->setSpacing(4);
-        
+
         auto mkBtn = [](const QString& text, const QString& tip = "") {
             QPushButton* b = new QPushButton(text);
             b->setToolTip(tip);
@@ -1427,7 +1442,7 @@ public:
                              "QPushButton:hover{background:#4a4a4a;}");
             return b;
         };
-        
+
         btnDraw    = mkBtn("✏ Draw",   "Toggle pencil tool [D]");
         btnEraser  = mkBtn("⌫ Erase",  "Toggle eraser tool [E]");
         QPushButton* btnColor  = mkBtnNorm("🎨 Color",  "Pick pen color");
@@ -1436,7 +1451,7 @@ public:
         QPushButton* btnZoomOut= mkBtnNorm("- Zoom",    "Zoom out");
         QPushButton* btnClear  = mkBtnNorm("⟳ Reset",  "Reset to original");
         QPushButton* btnSave   = mkBtnNorm("💾 Save",  "Save (Ctrl+S)");
-        
+
         // Pen size spinner
         QLabel* lblSize = new QLabel("Size:");
         lblSize->setStyleSheet("color:#aaa; font-size:11px;");
@@ -1446,11 +1461,11 @@ public:
         penSizeSpin->setFixedWidth(50);
         penSizeSpin->setFixedHeight(24);
         penSizeSpin->setStyleSheet("background:#333;color:#ddd;border:1px solid #555;border-radius:2px;");
-        
+
         // Info label
         infoLabel = new QLabel("No image");
         infoLabel->setStyleSheet("color:#888;font-size:10px;font-family:Consolas;");
-        
+
         tools->addWidget(btnDraw);
         tools->addWidget(btnEraser);
         tools->addWidget(lblSize);
@@ -1466,7 +1481,7 @@ public:
         tools->addStretch();
         tools->addWidget(infoLabel);
         layout->addWidget(toolsWidget);
-        
+
         // ── Scroll area for zoomable canvas ──────────────────
         scrollArea = new QScrollArea();
         scrollArea->setAlignment(Qt::AlignCenter);
@@ -1697,6 +1712,12 @@ public:
         }
         return QWidget::eventFilter(obj, event);
     }
+
+    // Exposed so MainWindow can reparent the image toolbar into the
+    // unified viewer toolbar row (Row 2, below "Mode: ...") so the
+    // image buttons sit at the same screen position as the 3D graph
+    // buttons and the IFF media bar.
+    QWidget* toolsWidget = nullptr;
 
 protected:
     void resizeEvent(QResizeEvent* event) override {
@@ -2027,6 +2048,273 @@ private:
     QscSyntaxHighlighter* highlighter;
     QStringList autocompleteList;
     QJsonObject modelInfoObj;
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// GraphHexEditor - read-only hex viewer tailored for IGI navigation
+// graph .dat files.  Mirrors the layout of the legacy IGI Graph
+// Editor: 16-byte-wide hex view on the left, info panel on the
+// right.  Only instantiated for graph*.dat files (the loadFile()
+// flow routes graph.dat here when the user selects Hex mode).
+// ────────────────────────────────────────────────────────────────────────────
+class GraphHexEditor : public QWidget {
+public:
+    explicit GraphHexEditor(QWidget* parent = nullptr) : QWidget(parent) {
+        QHBoxLayout* root = new QHBoxLayout(this);
+        root->setContentsMargins(0, 0, 0, 0);
+        root->setSpacing(0);
+
+        // ── Left: hex view ──
+        QWidget* leftPanel = new QWidget();
+        leftPanel->setStyleSheet("background:#1a1a1a; color:#9cdcfe; font-family:Consolas;");
+        QVBoxLayout* leftLayout = new QVBoxLayout(leftPanel);
+        leftLayout->setContentsMargins(0, 0, 0, 0);
+        leftLayout->setSpacing(0);
+
+        // Header: address offsets 0..F
+        QLabel* hdr = new QLabel("    00 01 02 03 04 05 06 07   08 09 0A 0B 0C 0D 0E 0F  | Text");
+        hdr->setStyleSheet("color:#6a9955; background:#0a0a0a; padding:2px 4px; font-family:Consolas;");
+        leftLayout->addWidget(hdr);
+
+        // Hex rows: one QLabel per row keeps this simple and read-only.
+        m_hexView = new QTextEdit();
+        m_hexView->setReadOnly(true);
+        m_hexView->setStyleSheet(
+            "QTextEdit { background:#1a1a1a; color:#9cdcfe; border:none;"
+            "  font-family:Consolas; font-size:11px; }");
+        leftLayout->addWidget(m_hexView, 1);
+
+        root->addWidget(leftPanel, 3);
+
+        // ── Right: info panel ──
+        QWidget* rightPanel = new QWidget();
+        rightPanel->setFixedWidth(260);
+        rightPanel->setStyleSheet("background:#252526; color:#cfd; font-family:Consolas;");
+        QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
+        rightLayout->setContentsMargins(8, 8, 8, 8);
+        rightLayout->setSpacing(6);
+
+        auto addField = [&](const QString& label, QLabel** out) {
+            QLabel* l = new QLabel(label);
+            l->setStyleSheet("color:#9cdcfe; font-size:11px;");
+            rightLayout->addWidget(l);
+            QLabel* v = new QLabel("-");
+            v->setStyleSheet("color:#fff; font-size:12px; font-weight:bold; padding:2px 4px;"
+                              " background:#333; border:1px solid #555; border-radius:3px;");
+            v->setWordWrap(true);
+            rightLayout->addWidget(v);
+            *out = v;
+        };
+        addField("Max Nodes",    &m_maxNodes);
+        addField("Signature",    &m_signature);
+        addField("Data-Type",    &m_dataType);
+        addField("Node #",       &m_nodeId);
+        addField("Graph Data",   &m_graphData);
+
+        // Dropdown for graph items (Item, Signature, Datatype, Datasize)
+        // mirrors the legacy IGI Graph Editor's `graphHexItemsDD`
+        // ComboBox.
+        QLabel* ddLabel = new QLabel("Item:");
+        ddLabel->setStyleSheet("color:#9cdcfe; font-size:11px;");
+        rightLayout->addWidget(ddLabel);
+        m_itemCombo = new QComboBox();
+        m_itemCombo->addItems({"Item", "Signature", "Datatype", "Datasize", "Node data", "Edge data"});
+        rightLayout->addWidget(m_itemCombo);
+
+        m_itemLabel = new QLabel("-");
+        m_itemLabel->setStyleSheet("color:#fff; font-size:11px; padding:4px;"
+                                    " background:#333; border:1px solid #555; border-radius:3px;");
+        m_itemLabel->setWordWrap(true);
+        rightLayout->addWidget(m_itemLabel);
+
+        // Checkboxes (Reset Data, Auto Format, Edit Mode) for parity
+        // with the legacy editor.
+        m_resetData = new QCheckBox("Reset Data");
+        m_autoFormat = new QCheckBox("Auto Format");
+        m_autoFormat->setChecked(true);
+        m_editMode = new QCheckBox("Edit Mode");
+        rightLayout->addWidget(m_resetData);
+        rightLayout->addWidget(m_autoFormat);
+        rightLayout->addWidget(m_editMode);
+        rightLayout->addStretch();
+
+        root->addWidget(rightPanel, 1);
+    }
+
+    // Load a graph .dat file and rebuild the hex view + info panel.
+    void loadFile(const QString& path) {
+        m_path = path;
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            m_hexView->setPlainText("(could not open " + path + ")");
+            return;
+        }
+        QByteArray data = f.readAll();
+        m_data = data;
+
+        // Build a 16-byte-wide hex view similar to the legacy IGI
+        // Graph Editor's `UpdateHexInfoPanel` / `HexByteClick` flow.
+        QString out;
+        int rows = (data.size() + 15) / 16;
+        for (int i = 0; i < rows; ++i) {
+            int off = i * 16;
+            out += QString("%1  ").arg(off, 8, 16, QChar('0')).toUpper();
+            // First 8 bytes
+            for (int n = 0; n < 8; ++n) {
+                if (off + n < data.size())
+                    out += QString("%1 ").arg((quint8)data[off + n], 2, 16, QChar('0')).toUpper();
+                else
+                    out += "   ";
+            }
+            out += " ";
+            // Last 8 bytes
+            for (int n = 8; n < 16; ++n) {
+                if (off + n < data.size())
+                    out += QString("%1 ").arg((quint8)data[off + n], 2, 16, QChar('0')).toUpper();
+                else
+                    out += "   ";
+            }
+            out += " | ";
+            // ASCII text
+            for (int n = 0; n < 16; ++n) {
+                if (off + n < data.size()) {
+                    char c = data[off + n];
+                    out += (c >= 32 && c < 127) ? QChar(c) : QChar('.');
+                } else {
+                    out += " ";
+                }
+            }
+            out += "\n";
+        }
+        m_hexView->setPlainText(out);
+
+        // ── Info panel ──
+        // Signature: first 4 bytes of the file
+        QString sig = "";
+        for (int i = 0; i < 4 && i < data.size(); ++i) {
+            sig += QString("%1 ").arg((quint8)data[i], 2, 16, QChar('0')).toUpper();
+        }
+        m_signature->setText(sig.trimmed());
+
+        // Max Nodes at offset 4-7 (uint32 LE)
+        int maxNodes = 0;
+        if (data.size() >= 8) {
+            maxNodes = (quint8)data[4] | ((quint8)data[5] << 8)
+                     | ((quint8)data[6] << 16) | ((quint8)data[7] << 24);
+        }
+        m_maxNodes->setText(QString::number(maxNodes));
+
+        // Graph Data: total file size in bytes (Datasize)
+        m_graphData->setText(QString::number(data.size()) + " bytes");
+
+        // Data-Type: "Integer" (since the node IDs and table are
+        // little-endian uint32, the dominant data type is "Integer").
+        m_dataType->setText("Integer");
+
+        // Node # at the currently selected byte (start with 0)
+        m_nodeId->setText("0");
+        m_lastClickedByte = 0;
+
+        // Wire the hex view so a click selects a byte and the info
+        // panel updates to show what type of record lives at that
+        // offset (mirrors `IGIGraphEditorUI.HexByteClick`).
+        connect(m_hexView, &QTextEdit::cursorPositionChanged, this, [this, data]() {
+            QTextCursor cur = m_hexView->textCursor();
+            int block = cur.blockNumber();
+            int col   = cur.columnNumber();
+            int byteOff = block * 16;
+            if (col >= 0 && col < 3) {
+                // First hex column group: 0..7
+                int idx = (col - 0) / 3;
+                if (idx >= 0 && idx < 8) byteOff += idx;
+            } else if (col >= 19 && col < 22) {
+                // Second hex column group: 8..F  (after the gap)
+                int idx = (col - 19) / 3;
+                if (idx >= 0 && idx < 8) byteOff += 8 + idx;
+            }
+            if (byteOff >= data.size()) return;
+            m_lastClickedByte = byteOff;
+            updateInfoForByte(data, byteOff);
+        });
+
+        // Wire the item dropdown so the user can switch between
+        // Item / Signature / Datatype / Datasize / Node data / Edge
+        // data and see the corresponding value for the byte at the
+        // current cursor position (mirrors
+        // `graphHexItemsDD_SelectedIndexChanged`).
+        connect(m_itemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, data](int) { updateItemPanel(data, m_lastClickedByte); });
+        connect(m_resetData,  &QCheckBox::toggled, this, [this](bool on) {
+            if (on) { m_editMode->setChecked(false); m_autoFormat->setChecked(false); }
+        });
+        connect(m_editMode,  &QCheckBox::toggled, this, [this](bool on) {
+            if (on) { m_resetData->setChecked(false); m_autoFormat->setChecked(true); }
+        });
+
+        updateInfoForByte(data, 0);
+        updateItemPanel(data, 0);
+    }
+
+private:
+    void updateInfoForByte(const QByteArray& data, int byteOff) {
+        // Decode the uint32 little-endian value at this offset and
+        // show it as a node # (if it looks like a valid index in the
+        // range [0, maxNodes)) or as raw "Value: <hex>" otherwise.
+        if (byteOff + 4 > data.size()) return;
+        quint32 v = (quint8)data[byteOff]
+                  | ((quint8)data[byteOff + 1] << 8)
+                  | ((quint8)data[byteOff + 2] << 16)
+                  | ((quint8)data[byteOff + 3] << 24);
+        QString hex = QString::number(v, 16).toUpper();
+        int maxNodes = m_maxNodes->text().toInt();
+        if (maxNodes > 0 && v < (quint32)maxNodes) {
+            m_nodeId->setText(QString::number(v));
+        } else {
+            m_nodeId->setText("0x" + hex + " (out of node range)");
+        }
+    }
+
+    void updateItemPanel(const QByteArray& data, int byteOff) {
+        // Mirrors `graphHexItemsDD_SelectedIndexChanged` in the
+        // legacy IGI Graph Editor.
+        int idx = m_itemCombo->currentIndex();
+        if (byteOff + 4 > data.size()) {
+            m_itemLabel->setText("(offset out of range)");
+            return;
+        }
+        quint32 v = (quint8)data[byteOff]
+                  | ((quint8)data[byteOff + 1] << 8)
+                  | ((quint8)data[byteOff + 2] << 16)
+                  | ((quint8)data[byteOff + 3] << 24);
+        QString valHex = QString("0x%1").arg(v, 8, 16, QChar('0')).toUpper().right(8);
+        QString out;
+        switch (idx) {
+        case 0: out = "Item: " + QString::number(v); break;
+        case 1: out = "Signature: " + valHex; break;
+        case 2: out = "Datatype: Integer (" + valHex + ")"; break;
+        case 3: out = "Datasize: " + QString::number(v); break;
+        case 4: out = "Node data @0x" + QString::number(byteOff, 16).toUpper().right(4)
+                    + " = " + valHex; break;
+        case 5: out = "Edge data @0x" + QString::number(byteOff, 16).toUpper().right(4)
+                    + " = " + valHex; break;
+        }
+        m_itemLabel->setText(out);
+    }
+
+    QString     m_path;
+    QByteArray  m_data;
+    int         m_lastClickedByte = 0;
+    QTextEdit*  m_hexView   = nullptr;
+    QLabel*     m_maxNodes  = nullptr;
+    QLabel*     m_signature = nullptr;
+    QLabel*     m_dataType  = nullptr;
+    QLabel*     m_nodeId    = nullptr;
+    QLabel*     m_graphData = nullptr;
+    QLabel*     m_itemLabel  = nullptr;
+    QComboBox*  m_itemCombo = nullptr;
+    QCheckBox*  m_resetData = nullptr;
+    QCheckBox*  m_autoFormat = nullptr;
+    QCheckBox*  m_editMode  = nullptr;
 };
 
 class MainWindow : public QMainWindow {
@@ -2407,10 +2695,15 @@ public:
                 qApp->setStyleSheet("");
             }
         };
-        viewMenu->addAction("Light Theme",    [applyMenuTheme]() { applyMenuTheme("Light"); });
-        viewMenu->addAction("Dark Theme",     [applyMenuTheme]() { applyMenuTheme("Dark"); });
-        viewMenu->addAction("Solarized Theme",[applyMenuTheme]() { applyMenuTheme("Solarized"); });
-        viewMenu->addAction("Military Theme", [applyMenuTheme]() { applyMenuTheme("Military"); });
+        // Themes go in a submenu so the parent View menu stays short.
+        // The user complained about the old flat "Light Theme / Dark
+        // Theme / Solarized Theme / Military Theme" entries filling
+        // the View menu — they wanted a "Themes" cascade instead.
+        QMenu* themesMenu = viewMenu->addMenu("Themes");
+        themesMenu->addAction("Light Theme",    [applyMenuTheme]() { applyMenuTheme("Light"); });
+        themesMenu->addAction("Dark Theme",     [applyMenuTheme]() { applyMenuTheme("Dark"); });
+        themesMenu->addAction("Solarized Theme",[applyMenuTheme]() { applyMenuTheme("Solarized"); });
+        themesMenu->addAction("Military Theme", [applyMenuTheme]() { applyMenuTheme("Military"); });
 
 
         QSettings settings(iniPath, QSettings::IniFormat);
@@ -2530,17 +2823,43 @@ public:
 
         settingsMenu->addAction("Clear Cache", this, doClearCache);
 
-        // Small button in the menu-bar corner for quick cache clearing
-        QPushButton* clearCacheBtn = new QPushButton("\xf0\x9f\x97\x91 Clear Cache", menuBar());
-        clearCacheBtn->setFlat(true);
-        clearCacheBtn->setStyleSheet(
-            "QPushButton{color:#ccc;background:transparent;border:1px solid #555;"
-            "border-radius:3px;padding:2px 8px;font-size:11px;}"
-            "QPushButton:hover{background:#3a3a3a;border-color:#888;}"
-            "QPushButton:pressed{background:#222;}");
-        clearCacheBtn->setToolTip("Clear temporary cache folder");
+        // Small buttons in the menu-bar corner: Refresh (file tree) +
+        // Clear Cache (temporary cache folder).  Both sit at the
+        // top-right of the main window so they're always reachable
+        // regardless of the active view.
+        QWidget* cornerBtns = new QWidget(menuBar());
+        QHBoxLayout* cornerLayout = new QHBoxLayout(cornerBtns);
+        cornerLayout->setContentsMargins(0, 0, 4, 0);
+        cornerLayout->setSpacing(4);
+        auto mkCornerBtn = [](const QString& text, const QString& tip) {
+            QPushButton* b = new QPushButton(text);
+            b->setFlat(true);
+            b->setToolTip(tip);
+            b->setStyleSheet(
+                "QPushButton{color:#ccc;background:transparent;border:1px solid #555;"
+                "border-radius:3px;padding:2px 8px;font-size:11px;}"
+                "QPushButton:hover{background:#3a3a3a;border-color:#888;}"
+                "QPushButton:pressed{background:#222;}");
+            return b;
+        };
+        QPushButton* refreshBtn = mkCornerBtn("\xf0\x9f\x94\x84 Refresh",
+            "Refresh the file tree from disk");
+        QPushButton* clearCacheBtn = mkCornerBtn("\xf0\x9f\x97\x91 Clear Cache",
+            "Clear temporary cache folder");
+        cornerLayout->addWidget(refreshBtn);
+        cornerLayout->addWidget(clearCacheBtn);
+        connect(refreshBtn, &QPushButton::clicked, this, [this]() {
+            // Refresh the file model from disk so newly-added / deleted
+            // files in the current folder appear in the tree.
+            QString currentRoot = fileModel->rootPath();
+            if (currentRoot.isEmpty()) currentRoot = QDir::currentPath();
+            fileModel->setRootPath("");
+            fileModel->setRootPath(currentRoot);
+            treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(currentRoot)));
+            logMessage("[INFO] Refreshed file list from " + currentRoot);
+        });
         connect(clearCacheBtn, &QPushButton::clicked, this, doClearCache);
-        menuBar()->setCornerWidget(clearCacheBtn, Qt::TopRightCorner);
+        menuBar()->setCornerWidget(cornerBtns, Qt::TopRightCorner);
 
         QMenu* logsMenu = settingsMenu->addMenu("&Logs");
         logsMenu->addAction("Enable Logs", this, [this, iniPath]() {
@@ -2635,6 +2954,10 @@ public:
         treeView->setDropIndicatorShown(true);
         treeView->setDragDropMode(QAbstractItemView::DragDrop);
         treeView->setDefaultDropAction(Qt::CopyAction);
+
+        // Refresh and Clear Cache buttons live in the menu-bar's
+        // top-right corner (cornerBtns widget created above), not in
+        // a per-tree toolbar, so the file-tree area is clean.
         leftLayout->addWidget(treeView);
 
         connect(treeView, &QTreeView::customContextMenuRequested, this, &MainWindow::showContextMenu);
@@ -2705,13 +3028,83 @@ public:
             }
         });
 
+        // ── Row 1: Mode selector (always on its own line at the top) ────────
         QHBoxLayout* viewModeLayout = new QHBoxLayout();
+        viewModeLayout->setContentsMargins(0, 0, 0, 0);
+        viewModeLayout->setSpacing(6);
         viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
         viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
+
+        // ── Row 2: Unified viewer toolbar (NEW LINE below "Mode: ...") ──────
+        // Every per-mode toolbar (graph buttons for graph.dat, IFF media
+        // bar for .iff, image editor buttons for .tex/.png/.tga) lives
+        // in this single row so the buttons sit at the same screen
+        // position regardless of the active view mode.  Each sub-widget
+        // is hidden by default and shown only when its matching file
+        // type is loaded.
+        QWidget* viewerToolbarRow = new QWidget();
+        viewerToolbarRow->setObjectName("viewerToolbarRow");
+        viewerToolbarRow->setStyleSheet(
+            "QWidget#viewerToolbarRow { background:#2a2a2a; border-bottom:1px solid #444; }"
+            "QPushButton { background:#3a3a3a; color:#ddd; border:1px solid #555;"
+            "  border-radius:3px; padding:3px 10px; font-size:12px; min-width:30px; }"
+            "QPushButton:hover { background:#4a4a4a; }"
+            "QPushButton:checked { background:#0066aa; border-color:#0088cc; }"
+            "QCheckBox { color:#ddd; font-family:Consolas; font-size:11px; spacing:4px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }"
+            "QLabel { color:#cfd; font-family:Consolas; font-size:11px;"
+            "  background:#333; border:1px solid #555; border-radius:3px;"
+            "  padding:2px 8px; }"
+        );
+        QHBoxLayout* viewerToolbarLayout = new QHBoxLayout(viewerToolbarRow);
+        viewerToolbarLayout->setContentsMargins(6, 4, 6, 4);
+        viewerToolbarLayout->setSpacing(6);
+        rightLayout->addWidget(viewerToolbarRow);
+
+        // ── 3D Graph Buttons (added to the unified viewer toolbar row) ──────
+        // Hidden by default; shown when a graph*.dat is loaded via the
+        // onGraphLoaded callback below.
+        graphToolbar = new QWidget();
+        graphToolbar->setObjectName("graphToolbarInline");
+        graphToolbar->setStyleSheet("background:transparent;");
+        QHBoxLayout* graphRow = new QHBoxLayout(graphToolbar);
+        graphRow->setContentsMargins(0, 0, 0, 0);
+        graphRow->setSpacing(6);
+
+        btnGraphNodePlus  = new QPushButton("+ Node");
+        btnGraphNodePlus->setToolTip("Increase node size");
+        btnGraphNodeMinus = new QPushButton("- Node");
+        btnGraphNodeMinus->setToolTip("Decrease node size");
+        chkGraphNodes     = new QCheckBox("Nodes");
+        chkGraphNodes->setChecked(true);
+        chkGraphNodes->setToolTip("Toggle node rendering");
+        chkGraphLinks     = new QCheckBox("Links");
+        chkGraphLinks->setChecked(true);
+        chkGraphLinks->setToolTip("Toggle link rendering");
+        lblGraphTotalNodes = new QLabel("Nodes: 0");
+        lblGraphTotalNodes->setToolTip("Number of nodes in the current graph");
+        lblGraphTotalLinks = new QLabel("Links: 0");
+        lblGraphTotalLinks->setToolTip("Number of links (edges) in the current graph");
+        btnGraphReset     = new QPushButton("Reset");
+        btnGraphReset->setToolTip("Reset node scale to default");
+
+        graphRow->addWidget(btnGraphNodePlus);
+        graphRow->addWidget(btnGraphNodeMinus);
+        graphRow->addSpacing(8);
+        graphRow->addWidget(chkGraphNodes);
+        graphRow->addWidget(chkGraphLinks);
+        graphRow->addSpacing(8);
+        graphRow->addWidget(lblGraphTotalNodes);
+        graphRow->addWidget(lblGraphTotalLinks);
+        graphRow->addSpacing(8);
+        graphRow->addWidget(btnGraphReset);
+
+        graphToolbar->hide();
+        viewerToolbarLayout->addWidget(graphToolbar);
 
         viewerEdit = new CodeEditor(this);
         viewerEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -2721,6 +3114,16 @@ public:
 
         imageEditor = new ImageEditor(this);
         imageEditor->hide();
+        // Reparent the ImageEditor's internal toolbar into the unified
+        // viewer toolbar row (Row 2) so the image buttons (Draw / Erase
+        // / Color / Fit / Zoom / Reset / Save) sit at the same screen
+        // position as the 3D graph buttons and the IFF media bar.
+        if (imageEditor->toolsWidget) {
+            imageEditor->toolsWidget->setParent(viewerToolbarRow);
+            imageEditor->toolsWidget->setStyleSheet("background:transparent;");
+            imageEditor->toolsWidget->hide();
+            viewerToolbarLayout->addWidget(imageEditor->toolsWidget);
+        }
 
         modelViewer = new ModelViewer();
         modelViewer->cacheDir = globalCacheDir;
@@ -2742,15 +3145,28 @@ public:
         rightLayout->addWidget(imageEditor, 3);
         rightLayout->addWidget(modelViewer, 3);
 
+        // Graph hex editor: read-only hex viewer with graph-specific
+        // info panel (Signature, Data-Type, Node #, Graph Data) used
+        // when the user opens a graph*.dat file in Hex mode.  Stays
+        // hidden unless a graph file is loaded.
+        graphHexEditor = new GraphHexEditor();
+        graphHexEditor->hide();
+        rightLayout->addWidget(graphHexEditor, 3);
+
         // Now that modelViewer exists, wire the graph toolbar buttons
         // to the modelViewer's state.  The toolbar widgets themselves
         // were created above (and added to rightLayout just below the
         // Mode row, so they sit on top of the 3D viewer), but the
         // lambdas can only be connected once modelViewer is alive.
+        // IMPORTANT: graphNodeScale and showGraphNodes/showGraphLinks
+        // are baked into the vertex buffers by generateGraphGeometry,
+        // so a button click must regenerate the geometry AND call
+        // update() for the change to be visible.
         if (btnGraphNodePlus) {
             connect(btnGraphNodePlus, &QPushButton::clicked, this, [this]() {
                 if (!modelViewer) return;
                 modelViewer->graphNodeScale *= 1.2f;
+                modelViewer->regenerateGraphGeometry();
                 modelViewer->update();
             });
         }
@@ -2759,6 +3175,7 @@ public:
                 if (!modelViewer) return;
                 modelViewer->graphNodeScale =
                     std::max(0.05f, modelViewer->graphNodeScale / 1.2f);
+                modelViewer->regenerateGraphGeometry();
                 modelViewer->update();
             });
         }
@@ -2766,6 +3183,7 @@ public:
             connect(btnGraphReset, &QPushButton::clicked, this, [this]() {
                 if (!modelViewer) return;
                 modelViewer->graphNodeScale = 1.0f;
+                modelViewer->regenerateGraphGeometry();
                 modelViewer->update();
             });
         }
@@ -2773,6 +3191,7 @@ public:
             connect(chkGraphNodes, &QCheckBox::toggled, this, [this](bool on) {
                 if (!modelViewer) return;
                 modelViewer->showGraphNodes = on;
+                modelViewer->regenerateGraphGeometry();
                 modelViewer->update();
             });
         }
@@ -2780,6 +3199,7 @@ public:
             connect(chkGraphLinks, &QCheckBox::toggled, this, [this](bool on) {
                 if (!modelViewer) return;
                 modelViewer->showGraphLinks = on;
+                modelViewer->regenerateGraphGeometry();
                 modelViewer->update();
             });
         }
@@ -2842,7 +3262,26 @@ public:
         mediaVLayout->addLayout(mediaBtnRow);
 
         iffMediaBar->hide();
-        rightLayout->addWidget(iffMediaBar);
+        // Add the IFF media bar to the unified viewer toolbar row
+        // (Row 2, below "Mode: ..."), so all view-mode buttons sit
+        // at the same screen position.  The IFF bar is hidden by
+        // default and shown only when an .iff file is loaded.
+        iffMediaBar->setStyleSheet(
+            "QWidget#iffMediaBar { background:transparent; }"
+            "QPushButton { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px;"
+            "  padding:3px 10px; font-size:12px; min-width:30px; }"
+            "QPushButton:hover { background:#4a4a4a; }"
+            "QPushButton#playBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:14px; }"
+            "QPushButton#playBtn:hover { background:#2a6a2a; }"
+            "QSlider::groove:horizontal { background:#333; height:6px; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#88f; width:14px; height:14px; margin:-4px 0;"
+            "  border-radius:7px; border:1px solid #66c; }"
+            "QSlider::sub-page:horizontal { background:#556; border-radius:3px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:11px; }"
+            "QComboBox { background:#333; color:#ddd; border:1px solid #555; border-radius:3px;"
+            "  padding:2px 6px; }"
+        );
+        viewerToolbarLayout->addWidget(iffMediaBar);
 
         // Wire media bar buttons
         connect(iffBtnPlay, &QPushButton::clicked, this, [this]() {
@@ -2909,71 +3348,12 @@ public:
             }
         };
 
-        // ── 3D Graph Toolbar (shows only when a graph.dat is loaded) ───────
-        // Sits at the TOP of the right pane, just below the view-mode
-        // row.  Provides + / - controls to resize the red node cubes,
-        // two check-box toggles to show / hide nodes and links, and
-        // two read-only labels with the total node / link count of
-        // the current graph.  Mirrors the layout used by the IFF
-        // media bar / image editor toolbar.
-        graphToolbar = new QWidget();
-        graphToolbar->setObjectName("graphToolbar");
-        graphToolbar->setStyleSheet(
-            "QWidget#graphToolbar { background:#1a1a2e; border-top:1px solid #444;"
-            "  border-bottom:1px solid #444; padding:4px; }"
-            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555;"
-            "  border-radius:4px; padding:4px 10px; font-size:13px; min-width:30px; }"
-            "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
-            "QPushButton:pressed { background:#1a1a4a; }"
-            "QCheckBox { color:#cfd; font-family:Consolas; font-size:11px; spacing:4px; }"
-            "QCheckBox::indicator { width:14px; height:14px; }"
-            "QLabel { color:#cfd; font-family:Consolas; font-size:11px;"
-            "  background:#252545; border:1px solid #555; border-radius:3px;"
-            "  padding:2px 8px; }"
-        );
-        QHBoxLayout* graphRow = new QHBoxLayout(graphToolbar);
-        graphRow->setContentsMargins(6, 4, 6, 4);
-        graphRow->setSpacing(6);
-
-        btnGraphNodePlus  = new QPushButton("+ Node");
-        btnGraphNodePlus->setToolTip("Increase node size");
-        btnGraphNodeMinus = new QPushButton("- Node");
-        btnGraphNodeMinus->setToolTip("Decrease node size");
-        chkGraphNodes     = new QCheckBox("Nodes");
-        chkGraphNodes->setChecked(true);
-        chkGraphNodes->setToolTip("Toggle node rendering");
-        chkGraphLinks     = new QCheckBox("Links");
-        chkGraphLinks->setChecked(true);
-        chkGraphLinks->setToolTip("Toggle link rendering");
-        lblGraphTotalNodes = new QLabel("Total Nodes: 0");
-        lblGraphTotalNodes->setToolTip("Number of nodes in the current graph");
-        lblGraphTotalLinks = new QLabel("Total Links: 0");
-        lblGraphTotalLinks->setToolTip("Number of links (edges) in the current graph");
-        btnGraphReset     = new QPushButton("Reset");
-        btnGraphReset->setToolTip("Reset node scale to default");
-
-        graphRow->addWidget(btnGraphNodePlus);
-        graphRow->addWidget(btnGraphNodeMinus);
-        graphRow->addSpacing(8);
-        graphRow->addWidget(chkGraphNodes);
-        graphRow->addWidget(chkGraphLinks);
-        graphRow->addSpacing(8);
-        graphRow->addWidget(lblGraphTotalNodes);
-        graphRow->addWidget(lblGraphTotalLinks);
-        graphRow->addStretch();
-        graphRow->addWidget(btnGraphReset);
-
-        graphToolbar->hide();
-        // Place the graph toolbar just below the Mode row and ABOVE
-        // the 3D viewer so the buttons sit on top of the rendering
-        // surface, matching how the IFF media bar / image editor
-        // toolbar sit on top of their respective viewers.
-        rightLayout->addWidget(graphToolbar);
-
-        // Wire graph toolbar buttons to the ModelViewer state.
-        // We must do this AFTER modelViewer is created, so the
-        // connect lambdas run after the modelViewer pointer is
-        // initialised.  See the second connect block below.
+        // ── 3D Graph Toolbar (inline with Mode row) ──────────────────────────
+        // The graph toolbar is now created ABOVE this point (in the
+        // viewModeLayout row, next to "Mode: 3D").  We only need to
+        // connect the button signals to the modelViewer state here,
+        // because the lambdas capture `modelViewer` which is only
+        // initialised below.
 
         // Debug Output
         QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
@@ -3095,6 +3475,7 @@ private:
     QLineEdit* textSearchBox;
     QComboBox* viewModeCombo;
     CodeEditor* viewerEdit;
+    GraphHexEditor* graphHexEditor = nullptr;  // shown only for graph*.dat in Hex mode
     ImageEditor* imageEditor;
     ModelViewer* modelViewer;
     QWidget* iffMediaBar = nullptr;
@@ -3134,6 +3515,8 @@ private:
         modelViewer->hide();
         if (iffMediaBar) iffMediaBar->hide();
         if (graphToolbar) graphToolbar->hide();
+        if (graphHexEditor) graphHexEditor->hide();
+        if (imageEditor && imageEditor->toolsWidget) imageEditor->toolsWidget->hide();
         // Stop animation and reset play button
         if (modelViewer) {
             modelViewer->iffPause();
@@ -3386,17 +3769,43 @@ private:
                         // the same code path as `igi1conv iff export-gif`.
                         int w = modelViewer->width()  > 0 ? modelViewer->width()  : 640;
                         int h = modelViewer->height() > 0 ? modelViewer->height() : 480;
+                        // Indeterminate progress dialog shown while the
+                        // CLI runs in the background.  The CLI's stdout
+                        // is captured so we can update the dialog with
+                        // per-frame progress if it emits it.
+                        QProgressDialog progress(
+                            QString("Exporting GIF from %1...").arg(QFileInfo(path).fileName()),
+                            "Cancel", 0, 0, this);
+                        progress.setWindowModality(Qt::WindowModal);
+                        progress.setMinimumDuration(0);
+                        progress.setAutoClose(false);
+                        progress.show();
+
                         QProcess proc;
                         proc.setProgram(qApp->applicationFilePath());
                         proc.setArguments({"iff", "export-gif", path, outPath,
                                           QString::number(w), QString::number(h), "15"});
                         proc.start();
-                        proc.waitForFinished(-1);
+                        // Pump events while waiting so the dialog repaints
+                        // and the Cancel button stays responsive.  The
+                        // CLI doesn't emit per-frame progress yet, so the
+                        // dialog is indeterminate (0/0).  When Cancel is
+                        // pressed, kill the CLI process.
+                        while (proc.state() != QProcess::NotRunning) {
+                            if (progress.wasCanceled()) {
+                                proc.kill();
+                                proc.waitForFinished(1000);
+                                break;
+                            }
+                            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                        }
                         if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                            progress.close();
                             logMessage("[SUCCESS] GIF written to " + outPath);
                             QMessageBox::information(this, "Success",
                                 "GIF written successfully to:\n" + outPath);
                         } else {
+                            progress.close();
                             QString err = proc.readAllStandardError();
                             logMessage("[ERROR] GIF export failed:\n" + err);
                             QMessageBox::critical(this, "Error", "GIF export failed:\n" + err);
@@ -3651,14 +4060,14 @@ private:
                                 datBase == "graph2" || datBase == "graph3" ||
                                 datBase.startsWith("graph"));
             if (isGraphDat) {
-                // graph.dat - dedicated context menu
-                menu.addAction("View Graph in 3D", [this, path]() {
-                    hideAllViewers();
-                    viewModeCombo->setCurrentIndex(4);
-                    modelViewer->show();
-                    modelViewer->setFocus();
-                    loadFile(path);
-                });
+                // graph.dat - dedicated context menu.  No "View Graph in
+                // 3D" action — the graph is opened automatically by the
+                // normal text-viewer flow (loadFile routes .dat to the
+                // 3D viewer because of the "graph" name heuristic in
+                // loadFile()), so an explicit 3D-view action is
+                // redundant.  The two structured export actions below
+                // give the user access to the graph in a portable
+                // JSON / Markdown form.
                 menu.addAction("Export to JSON", [this, path]() {
                     QString out = QFileDialog::getSaveFileName(this, "Export Graph to JSON",
                         path + ".json", "JSON Files (*.json)");
@@ -3678,33 +4087,21 @@ private:
                     QString out = QFileDialog::getSaveFileName(this, "Export Graph Table",
                         path + ".md", "Markdown Files (*.md)");
                     if (out.isEmpty()) return;
-                    // Capture graph info via "graph info" + "graph dump" and
-                    // assemble a structured Markdown table that lists
-                    // every node, every link, and aggregate stats.
-                    QProcess pInfo, pDump;
-                    pInfo.setProgram(qApp->applicationFilePath());
-                    pInfo.setArguments(QStringList() << "graph" << "info" << path);
-                    pInfo.start();
-                    pInfo.waitForFinished(-1);
-                    QString infoOut = QString::fromLocal8Bit(pInfo.readAllStandardOutput());
-                    pDump.setProgram(qApp->applicationFilePath());
-                    pDump.setArguments(QStringList() << "graph" << "dump" << path);
-                    pDump.start();
-                    pDump.waitForFinished(-1);
-                    QString dumpOut = QString::fromLocal8Bit(pDump.readAllStandardOutput());
-                    QFile f(out);
-                    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                        logMessage("[ERROR] Cannot open output: " + out);
-                        return;
+                    // Use the new "graph table" CLI subcommand which
+                    // emits a structured Markdown table with one row
+                    // per node, one row per link, and every field
+                    // (XYZ, gamma, radius, material, criteria, link1,
+                    // link2, legacy link targets/types, link type).
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments(QStringList() << "graph" << "table" << path << "--out" << out);
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Exported graph table: " + out);
+                    } else {
+                        logMessage("[ERROR] graph table failed: " + proc.readAllStandardError());
                     }
-                    QTextStream ts(&f);
-                    ts << "# IGI Graph: " << QFileInfo(path).fileName() << "\n\n";
-                    ts << "## Information\n\n";
-                    ts << "```\n" << infoOut.trimmed() << "\n```\n\n";
-                    ts << "## Nodes & Links\n\n";
-                    ts << "```\n" << dumpOut.trimmed() << "\n```\n";
-                    f.close();
-                    logMessage("[SUCCESS] Exported graph table: " + out);
                 });
                 menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("graph info"); });
                 menu.addAction("Dump", [this, path]() { loadFile(path); executeCommand("graph dump"); });
@@ -3786,38 +4183,56 @@ private:
             viewerEdit->setReadOnly(false);
             viewerEdit->show();
         } else if (mode == 2) { // Hex
-            QFile file(path);
-            if (file.open(QIODevice::ReadOnly)) {
-                QByteArray data = file.readAll();
-                QString hexView;
-                int lines = qMin(data.size() / 16 + 1, 4000);
-                for (int i = 0; i < lines; ++i) {
-                    int offset = i * 16;
-                    hexView += QString("%1: ").arg(offset, 8, 16, QChar('0')).toUpper();
-                    for (int n = 0; n < 16; n++) {
-                        if (offset + n < data.size()) {
-                            hexView += QString("%1 ").arg((quint8)data[offset + n], 2, 16, QChar('0')).toUpper();
-                        } else {
-                            hexView += "   ";
+            // If this is a graph*.dat file, use the specialised
+            // GraphHexEditor (16-byte-wide hex view + graph info
+            // panel: Signature, Max Nodes, Data-Type, Node #, Graph
+            // Data, plus an Item dropdown matching the legacy IGI
+            // Graph Editor's `graphHexItemsDD_SelectedIndexChanged`).
+            // For every other file, fall back to the plain hex dump
+            // in viewerEdit.
+            QString baseName = QFileInfo(path).completeBaseName().toLower();
+            bool isGraphHex = (baseName == "graph" || baseName == "graph1" ||
+                               baseName == "graph2" || baseName == "graph3" ||
+                               baseName.startsWith("graph"));
+            if (isGraphHex && graphHexEditor) {
+                graphHexEditor->loadFile(path);
+                graphHexEditor->show();
+                viewerEdit->hide();
+            } else {
+                if (graphHexEditor) graphHexEditor->hide();
+                QFile file(path);
+                if (file.open(QIODevice::ReadOnly)) {
+                    QByteArray data = file.readAll();
+                    QString hexView;
+                    int lines = qMin(data.size() / 16 + 1, 4000);
+                    for (int i = 0; i < lines; ++i) {
+                        int offset = i * 16;
+                        hexView += QString("%1: ").arg(offset, 8, 16, QChar('0')).toUpper();
+                        for (int n = 0; n < 16; n++) {
+                            if (offset + n < data.size()) {
+                                hexView += QString("%1 ").arg((quint8)data[offset + n], 2, 16, QChar('0')).toUpper();
+                            } else {
+                                hexView += "   ";
+                            }
                         }
-                    }
-                    hexView += "| ";
-                    for (int n = 0; n < 16; n++) {
-                        if (offset + n < data.size()) {
-                            char c = data[offset + n];
-                            hexView += (c >= 32 && c < 127) ? QChar(c) : QChar('.');
-                        } else {
-                            hexView += " ";
+                        hexView += "| ";
+                        for (int n = 0; n < 16; n++) {
+                            if (offset + n < data.size()) {
+                                char c = data[offset + n];
+                                hexView += (c >= 32 && c < 127) ? QChar(c) : QChar('.');
+                            } else {
+                                hexView += " ";
+                            }
                         }
+                        hexView += "\n";
                     }
-                    hexView += "\n";
+                    if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
+                    viewerEdit->setPlainText(hexView);
                 }
-                if (data.size() > 4000 * 16) hexView += "\n... (Truncated) ...";
-                viewerEdit->setPlainText(hexView);
+                viewerEdit->isHexMode = true;
+                viewerEdit->setReadOnly(false);
+                viewerEdit->show();
             }
-            viewerEdit->isHexMode = true;
-            viewerEdit->setReadOnly(false);
-            viewerEdit->show();
         } else if (mode == 3) { // Image
             if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
                 TEXFile tex = TEX_Parse(path.toStdString());
@@ -3857,6 +4272,7 @@ private:
                 }
             }
             imageEditor->show();
+            if (imageEditor->toolsWidget) imageEditor->toolsWidget->show();
         } else if (mode == 4 || mode == 5) { // 3D or Video
             modelViewer->loadModel(path);
             modelViewer->show();
