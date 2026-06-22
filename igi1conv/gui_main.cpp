@@ -5,6 +5,7 @@
 #include <QSplitter>
 #include <QFileSystemModel>
 #include <QTreeView>
+#include <QCheckBox>
 #include <QTextEdit>
 #include <QLabel>
 #include <QPushButton>
@@ -375,6 +376,11 @@ public:
 
     // Callback so MainWindow media bar can react to time changes
     std::function<void(float time, float duration, int clip, int clipCount)> onIffTimeChanged;
+
+    // Callback so MainWindow can update the 3D-view graph toolbar
+    // (Total Nodes / Total Links labels and the Nodes/Links toggles)
+    // every time a new graph is loaded.
+    std::function<void(int nodeCount, int linkCount)> onGraphLoaded;
 
     // ── Public animation control API ─────────────────────────────────────────
     void iffPlay() {
@@ -885,6 +891,10 @@ protected:
         statsOverlay->setText(QString("Graph loaded: %1 nodes, %2 edges")
                               .arg(currentGraph.nodes.size())
                               .arg(currentGraph.edges.size()));
+        if (onGraphLoaded) {
+            onGraphLoaded((int)currentGraph.nodes.size(),
+                          (int)currentGraph.edges.size());
+        }
 
         if (!currentGraph.nodes.empty()) {
             float minX = currentGraph.nodes[0].x, maxX = minX;
@@ -1518,15 +1528,27 @@ public:
 
     
     bool saveAsTex(const QImage& img, const QString& outPath) {
+        if (img.isNull()) return false;
         // Write a valid LOOP v11 TEX file: 32-byte header + ARGB8888 pixels
         // Header layout: sig(4s) version(I) mode(I) multi(I) _0(I) _1(H) _2(H) _3(H) width(H) height(H) depth(H)
+        if (img.width() > 65535 || img.height() > 65535) {
+            // TEX v11 header stores width/height as uint16 - reject early
+            return false;
+        }
+
+        // Make sure the destination directory exists.
+        QFileInfo outInfo(outPath);
+        QDir().mkpath(outInfo.absolutePath());
+
         QFile f(outPath);
-        if (!f.open(QIODevice::WriteOnly)) return false;
-        
+        if (!f.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+
         QImage texImg = img.convertToFormat(QImage::Format_ARGB32);
         uint16_t w = (uint16_t)texImg.width();
         uint16_t h = (uint16_t)texImg.height();
-        
+
         bool isArgb = outPath.toLower().contains("argb8888");
         uint32_t mode = isArgb ? 3 : 2; // 3=ARGB8888, 2=RGB565
         
@@ -2702,6 +2724,19 @@ public:
 
         modelViewer = new ModelViewer();
         modelViewer->cacheDir = globalCacheDir;
+        // Wire ModelViewer's graph-load callback to MainWindow so
+        // the 3D-view graph toolbar (Total Nodes / Total Links /
+        // Nodes / Links toggles) is updated every time a new
+        // graph.dat is opened.
+        modelViewer->onGraphLoaded = [this](int nodeCount, int linkCount) {
+            if (lblGraphTotalNodes) lblGraphTotalNodes->setText(
+                QString("Total Nodes: %1").arg(nodeCount));
+            if (lblGraphTotalLinks) lblGraphTotalLinks->setText(
+                QString("Total Links: %1").arg(linkCount));
+            if (chkGraphNodes)  chkGraphNodes->setChecked(modelViewer->showGraphNodes);
+            if (chkGraphLinks)  chkGraphLinks->setChecked(modelViewer->showGraphLinks);
+            if (graphToolbar)   graphToolbar->show();
+        };
 
         rightLayout->addWidget(viewerEdit, 3);
         rightLayout->addWidget(imageEditor, 3);
@@ -2831,6 +2866,86 @@ public:
                 iffClipCombo->blockSignals(false);
             }
         };
+
+        // ── 3D Graph Toolbar (shows only when a graph.dat is loaded) ───────
+        // This sits below the 3D viewer and provides + / - controls to
+        // resize the red node cubes, two check-box toggles to show /
+        // hide nodes and links, and two read-only labels with the
+        // total node / link count of the current graph.
+        graphToolbar = new QWidget();
+        graphToolbar->setObjectName("graphToolbar");
+        graphToolbar->setStyleSheet(
+            "QWidget#graphToolbar { background:#1a1a2e; border-top:1px solid #444; padding:4px; }"
+            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:4px 10px; font-size:13px; min-width:30px; }"
+            "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
+            "QPushButton:pressed { background:#1a1a4a; }"
+            "QCheckBox { color:#cfd; font-family:Consolas; font-size:11px; spacing:4px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }"
+            "QLabel { color:#cfd; font-family:Consolas; font-size:11px;"
+            "  background:#252545; border:1px solid #555; border-radius:3px; padding:2px 8px; }"
+        );
+        QHBoxLayout* graphRow = new QHBoxLayout(graphToolbar);
+        graphRow->setContentsMargins(6, 4, 6, 4);
+        graphRow->setSpacing(6);
+
+        btnGraphNodePlus  = new QPushButton("+ Node");
+        btnGraphNodePlus->setToolTip("Increase node size");
+        btnGraphNodeMinus = new QPushButton("- Node");
+        btnGraphNodeMinus->setToolTip("Decrease node size");
+        chkGraphNodes     = new QCheckBox("Nodes");
+        chkGraphNodes->setChecked(true);
+        chkGraphNodes->setToolTip("Toggle node rendering");
+        chkGraphLinks     = new QCheckBox("Links");
+        chkGraphLinks->setChecked(true);
+        chkGraphLinks->setToolTip("Toggle link rendering");
+        lblGraphTotalNodes = new QLabel("Total Nodes: 0");
+        lblGraphTotalNodes->setToolTip("Number of nodes in the current graph");
+        lblGraphTotalLinks = new QLabel("Total Links: 0");
+        lblGraphTotalLinks->setToolTip("Number of links (edges) in the current graph");
+        btnGraphReset     = new QPushButton("Reset");
+        btnGraphReset->setToolTip("Reset node scale to default");
+
+        graphRow->addWidget(btnGraphNodePlus);
+        graphRow->addWidget(btnGraphNodeMinus);
+        graphRow->addSpacing(8);
+        graphRow->addWidget(chkGraphNodes);
+        graphRow->addWidget(chkGraphLinks);
+        graphRow->addSpacing(8);
+        graphRow->addWidget(lblGraphTotalNodes);
+        graphRow->addWidget(lblGraphTotalLinks);
+        graphRow->addStretch();
+        graphRow->addWidget(btnGraphReset);
+
+        graphToolbar->hide();
+        rightLayout->addWidget(graphToolbar);
+
+        // Wire graph toolbar buttons to the ModelViewer state.
+        connect(btnGraphNodePlus, &QPushButton::clicked, this, [this]() {
+            if (!modelViewer) return;
+            modelViewer->graphNodeScale *= 1.2f;
+            modelViewer->update();
+        });
+        connect(btnGraphNodeMinus, &QPushButton::clicked, this, [this]() {
+            if (!modelViewer) return;
+            modelViewer->graphNodeScale = std::max(0.05f, modelViewer->graphNodeScale / 1.2f);
+            modelViewer->update();
+        });
+        connect(btnGraphReset, &QPushButton::clicked, this, [this]() {
+            if (!modelViewer) return;
+            modelViewer->graphNodeScale = 1.0f;
+            modelViewer->update();
+        });
+        connect(chkGraphNodes, &QCheckBox::toggled, this, [this](bool on) {
+            if (!modelViewer) return;
+            modelViewer->showGraphNodes = on;
+            modelViewer->update();
+        });
+        connect(chkGraphLinks, &QCheckBox::toggled, this, [this](bool on) {
+            if (!modelViewer) return;
+            modelViewer->showGraphLinks = on;
+            modelViewer->update();
+        });
 
         // Debug Output
         QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
@@ -2962,6 +3077,16 @@ private:
     QPushButton* iffBtnNext = nullptr;
     QSlider* iffScrubber = nullptr;
     QLabel* iffTimeLabel = nullptr;
+
+    // ── 3D Graph toolbar (shows when a graph.dat is loaded) ────────────────
+    QWidget* graphToolbar = nullptr;
+    QPushButton* btnGraphNodePlus = nullptr;
+    QPushButton* btnGraphNodeMinus = nullptr;
+    QCheckBox*   chkGraphNodes = nullptr;
+    QCheckBox*   chkGraphLinks = nullptr;
+    QLabel*      lblGraphTotalNodes = nullptr;
+    QLabel*      lblGraphTotalLinks = nullptr;
+    QPushButton* btnGraphReset = nullptr;
     QComboBox* iffClipCombo = nullptr;
     bool iffScrubbing = false;
     QTextEdit* consoleEdit;
@@ -2980,6 +3105,7 @@ private:
         imageEditor->hide();
         modelViewer->hide();
         if (iffMediaBar) iffMediaBar->hide();
+        if (graphToolbar) graphToolbar->hide();
         // Stop animation and reset play button
         if (modelViewer) {
             modelViewer->iffPause();
@@ -3131,17 +3257,22 @@ private:
             }
 
             QString folderName = QFileInfo(path).fileName();
-            menu.addAction("Pack to .res archive", [this, path, folderName]() {
+            menu.addAction("Pack to Archive", [this, path, folderName]() {
+                // Auto-Save: if a sibling .RES exists with the same
+                // name as the folder (level1/textures/ -> level1.res),
+                // pack to it directly.  Otherwise ask the user.
                 QString defaultOut = path + "/" + folderName + ".res";
-                QString outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
-                    defaultOut, "Resource Archive (*.res)");
-                if (outRes.isEmpty()) return;
+                QString outRes;
+                if (QFileInfo::exists(defaultOut)) {
+                    outRes = defaultOut;
+                } else {
+                    outRes = QFileDialog::getSaveFileName(this, "Save Resource Archive",
+                        defaultOut, "Resource Archive (*.res)");
+                    if (outRes.isEmpty()) return;
+                }
 
-                QString prefix = QInputDialog::getText(this, "Archive Prefix",
-                    "Enter the internal folder prefix (e.g. 'textures/').\n"
-                    "The tool will automatically add 'LOCAL:' for the external path.",
-                    QLineEdit::Normal, folderName + "/");
-                
+                QString prefix = folderName + "/";
+
                 QProcess proc;
                 proc.setProgram(qApp->applicationFilePath());
                 QStringList args;
@@ -3357,11 +3488,20 @@ private:
             menu.addAction("Convert to TEX", [this, path]() {
                 QString newPath = path.left(path.lastIndexOf('.')) + ".tex";
                 QImage img(path);
-                if (!img.isNull() && imageEditor->saveAsTex(img, newPath)) {
+                if (img.isNull()) {
+                    QString err = QString("Could not load image: %1").arg(path);
+                    logMessage("[ERROR] " + err);
+                    QMessageBox::critical(this, "Convert Failed", err);
+                    return;
+                }
+                if (imageEditor->saveAsTex(img, newPath)) {
                     logMessage("[INFO] Converted image to TEX: " + newPath);
                     QMessageBox::information(this, "Success", "Converted to " + newPath);
                 } else {
-                    logMessage("[ERROR] Failed to convert image to TEX: " + path);
+                    QString err = QString("Failed to convert image to TEX: %1 -> %2")
+                                       .arg(path, newPath);
+                    logMessage("[ERROR] " + err);
+                    QMessageBox::critical(this, "Convert Failed", err);
                 }
             });
         } else if (ext == "qsc" || ext == "qas") {
@@ -3473,9 +3613,79 @@ private:
             menu.addAction("Dump",          [this, path]() { loadFile(path); executeCommand("mtp dump"); });
             menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("mtp info"); });
         } else if (ext == "dat") {
-            menu.addAction("Convert",       [this, path]() { loadFile(path); executeCommand("dat to-mtp"); });
-            menu.addAction("Export",        [this, path]() { loadFile(path); executeCommand("dat export"); });
-            menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("dat info"); });
+            // Detect the AI navigation graph file.  IGI 1 stores the
+            // AI graph in a file named "graph.dat" (sometimes "graph1.dat"
+            // or a level-specific variant).  This is a different format
+            // from the level DAT (which lists model/texture bindings) and
+            // requires a dedicated graph parser, not dat_parser.
+            QString datBase = QFileInfo(path).completeBaseName().toLower();
+            bool isGraphDat = (datBase == "graph" || datBase == "graph1" ||
+                                datBase == "graph2" || datBase == "graph3" ||
+                                datBase.startsWith("graph"));
+            if (isGraphDat) {
+                // graph.dat - dedicated context menu
+                menu.addAction("View Graph in 3D", [this, path]() {
+                    hideAllViewers();
+                    viewModeCombo->setCurrentIndex(4);
+                    modelViewer->show();
+                    modelViewer->setFocus();
+                    loadFile(path);
+                });
+                menu.addAction("Export to JSON", [this, path]() {
+                    QString out = QFileDialog::getSaveFileName(this, "Export Graph to JSON",
+                        path + ".json", "JSON Files (*.json)");
+                    if (out.isEmpty()) return;
+                    QProcess proc;
+                    proc.setProgram(qApp->applicationFilePath());
+                    proc.setArguments(QStringList() << "graph" << "export" << path << "--out" << out);
+                    proc.start();
+                    proc.waitForFinished(-1);
+                    if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                        logMessage("[SUCCESS] Exported graph to JSON: " + out);
+                    } else {
+                        logMessage("[ERROR] graph export failed: " + proc.readAllStandardError());
+                    }
+                });
+                menu.addAction("Export to Table (.md)", [this, path]() {
+                    QString out = QFileDialog::getSaveFileName(this, "Export Graph Table",
+                        path + ".md", "Markdown Files (*.md)");
+                    if (out.isEmpty()) return;
+                    // Capture graph info via "graph info" + "graph dump" and
+                    // assemble a structured Markdown table that lists
+                    // every node, every link, and aggregate stats.
+                    QProcess pInfo, pDump;
+                    pInfo.setProgram(qApp->applicationFilePath());
+                    pInfo.setArguments(QStringList() << "graph" << "info" << path);
+                    pInfo.start();
+                    pInfo.waitForFinished(-1);
+                    QString infoOut = QString::fromLocal8Bit(pInfo.readAllStandardOutput());
+                    pDump.setProgram(qApp->applicationFilePath());
+                    pDump.setArguments(QStringList() << "graph" << "dump" << path);
+                    pDump.start();
+                    pDump.waitForFinished(-1);
+                    QString dumpOut = QString::fromLocal8Bit(pDump.readAllStandardOutput());
+                    QFile f(out);
+                    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        logMessage("[ERROR] Cannot open output: " + out);
+                        return;
+                    }
+                    QTextStream ts(&f);
+                    ts << "# IGI Graph: " << QFileInfo(path).fileName() << "\n\n";
+                    ts << "## Information\n\n";
+                    ts << "```\n" << infoOut.trimmed() << "\n```\n\n";
+                    ts << "## Nodes & Links\n\n";
+                    ts << "```\n" << dumpOut.trimmed() << "\n```\n";
+                    f.close();
+                    logMessage("[SUCCESS] Exported graph table: " + out);
+                });
+                menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("graph info"); });
+                menu.addAction("Dump", [this, path]() { loadFile(path); executeCommand("graph dump"); });
+            } else {
+                // Regular level DAT (model/texture bindings)
+                menu.addAction("Convert",       [this, path]() { loadFile(path); executeCommand("dat to-mtp"); });
+                menu.addAction("Export",        [this, path]() { loadFile(path); executeCommand("dat export"); });
+                menu.addAction("Info",          [this, path]() { loadFile(path); executeCommand("dat info"); });
+            }
         } else if (ext == "fnt") {
             menu.addAction("Export PNG", [this, path]() { loadFile(path); executeCommand("fnt export"); });
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
