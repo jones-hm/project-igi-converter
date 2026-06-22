@@ -411,6 +411,10 @@ public:
     // Add bone dots/lines as an overlay on top of the deformed MEF mesh.
     // Called when showBonesOverlay is true and hasRestMesh is true.
     // rootOffset shifts IFF-space bone positions back into the MEF viewer frame.
+    // Bone vertices are pushed in RAW MEF-space coordinates; the normalisation
+    // loop in updateIffSkeleton() converts them to the viewer's [-1,1] frame
+    // using the same modelCx/modelScale as the mesh, so bones and mesh stay
+    // perfectly aligned.
     void addBonesOverlay(const std::vector<QMatrix4x4>& transforms,
                          const IffSkeleton& skel,
                          const QVector3D& rootOffset) {
@@ -418,7 +422,11 @@ public:
         for (int i = 0; i < skel.bone_count; ++i)
             bonePos[i] = transforms[i].map(QVector3D(0,0,0)) + rootOffset;
 
-        float cx = modelCx, cy = modelCy, cz = modelCz, ext = modelScale;
+        float ext = modelScale;
+        // Joint radius expressed in normalised viewer space; multiplied by
+        // modelScale to keep the on-screen size constant regardless of the
+        // model's physical extent.
+        float r = 0.025f * ext;
 
         // ── Bone lines ────────────────────────────────────────────────────
         int boneStart = vertices.size() / 3;
@@ -428,9 +436,9 @@ public:
             if (parent >= 0 && parent < i) {
                 for (int v = 0; v < 2; v++) {
                     QVector3D p = (v == 0) ? bonePos[parent] : bonePos[i];
-                    vertices.push_back((p.x()-cx)/ext);
-                    vertices.push_back((p.y()-cy)/ext);
-                    vertices.push_back((p.z()-cz)/ext);
+                    vertices.push_back(p.x());
+                    vertices.push_back(p.y());
+                    vertices.push_back(p.z());
                     uvs.push_back(0); uvs.push_back(0);
                     normals.push_back(0); normals.push_back(1); normals.push_back(0);
                 }
@@ -450,12 +458,8 @@ public:
 
         // ── Joint dots (small cubes as GL_TRIANGLES) ──────────────────────
         int jointStart = vertices.size() / 3;
-        float r = 0.03f; // larger joint radius so dots are visible
         for (int i = 0; i < skel.bone_count; ++i) {
-            float jx = (bonePos[i].x()-cx)/ext;
-            float jy = (bonePos[i].y()-cy)/ext;
-            float jz = (bonePos[i].z()-cz)/ext;
-            QVector3D o(jx, jy, jz);
+            QVector3D o(bonePos[i].x(), bonePos[i].y(), bonePos[i].z());
             QVector3D corner[8] = {
                 o+QVector3D(-r,-r,-r), o+QVector3D(r,-r,-r),
                 o+QVector3D(r, r,-r),  o+QVector3D(-r, r,-r),
@@ -2665,10 +2669,12 @@ public:
         fileModel = new QFileSystemModel(this);
         fileModel->setReadOnly(false);
         QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
-        QString defaultFolder = "D:/Software/IGI-Game";
+        // Fall back to the user's home directory; the previous
+        // default was a machine-specific absolute path.
+        QString defaultFolder = QDir::homePath();
         QString lastFolder = QSettings(iniPath, QSettings::IniFormat).value("LastFolder", defaultFolder).toString();
         if (!QDir(lastFolder).exists()) {
-            lastFolder = QDir(defaultFolder).exists() ? defaultFolder : QCoreApplication::applicationDirPath();
+            lastFolder = defaultFolder;
         }
         fileModel->setRootPath(lastFolder);
         
@@ -3115,7 +3121,7 @@ public:
 
         animSettingsMenu->addAction("Set ANIMS Source Folder...", this, [this, iniPath]() {
             QString dir = QFileDialog::getExistingDirectory(
-                this, "Select COMMON/ANIMS folder (e.g. D:\\Software\\IGI-Game\\COMMON\\ANIMS)",
+                this, "Select COMMON/ANIMS folder (the game's IFF animation source)",
                 globalAnimsSourceDir.isEmpty() ? QDir::homePath() : globalAnimsSourceDir);
             if (dir.isEmpty()) return;
             globalAnimsSourceDir = dir;
@@ -3166,7 +3172,7 @@ public:
 
         QMenu* levelMenu = settingsMenu->addMenu("&Level");
         levelMenu->addAction("Set Level...", this, [this, iniPath]() {
-            QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? "D:/Software/IGI-Game" : QFileInfo(globalLevelDatPath).absolutePath());
+            QString levelDir = QFileDialog::getExistingDirectory(this, "Select Level Folder (e.g. LEVEL8)", globalLevelDatPath.isEmpty() ? QDir::homePath() : QFileInfo(globalLevelDatPath).absolutePath());
             if (levelDir.isEmpty()) return;
             
             // Auto-resolve DAT, MTP, Textures from the level folder
@@ -3926,11 +3932,6 @@ public:
         animFpsInput->setToolTip("Animation playback FPS (1-120)");
         animLayout->addWidget(animFpsInput);
 
-        animFpsLabel = new QLabel("FPS");
-        animFpsLabel->setToolTip("Animation playback frames per second");
-        animFpsLabel->setMaximumHeight(18);
-        animLayout->addWidget(animFpsLabel);
-
         animStatusLabel = new QLabel("");
         animStatusLabel->setToolTip("Status of the last Animation operation");
         animLayout->addWidget(animStatusLabel);
@@ -4216,13 +4217,12 @@ private:
     QPushButton* animPlayBtn       = nullptr;
     QCheckBox*  animLoopChk        = nullptr;
     QLineEdit*  animFpsInput       = nullptr;
-    QLabel*     animFpsLabel       = nullptr;
     QLabel*     animStatusLabel    = nullptr;
 
     QTimer*     anim30FpsTimer     = nullptr; // 30 FPS step driver
     bool        globalAnimationModeEnabled = false;
     QString     globalObjectsQscPath;        // path to decompiled objects.qsc
-    QString     globalAnimsSourceDir;        // original D:\Software\IGI-Game\COMMON\ANIMS
+    QString     globalAnimsSourceDir;        // user-selected ANIMS source folder
     QString     globalAnimsCacheDir;         // <CacheDir>/animation_anims
     QString     globalModelsDir;             // LEVEL1\models
     igi1conv::QscObjectSet animationSet;     // parsed HumanSoldier entries

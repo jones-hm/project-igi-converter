@@ -1,5 +1,5 @@
 // test_qsc_object_parser_realfiles.cpp - integration test that runs
-// the parser against the real objects.qsc on disk.  Skipped when the
+// the parser against a real objects.qsc on disk.  Skipped when the
 // corpus is not present (see igi1conv_test_util.h).
 
 #include "igi1conv_test_util.h"
@@ -13,23 +13,33 @@
 #include <string>
 
 using igi1conv::QscObjectSet;
+using igi1conv_test::Corpus;
+using igi1conv_test::CorpusDir;
 
 TEST(QscObjectParser, RealLevel1ObjectsQsc) {
-    // Real path on the user's IGI1 install: D:/IGI1/missions/location0/level1/objects.qsc.
-    // We try a few common layouts so the test runs on different
-    // installations and on CI.
-    const char* candidates[] = {
-        "D:/IGI1/missions/location0/level1/objects.qsc",
-        "C:/IGI1/missions/location0/level1/objects.qsc",
-        "../missions/location0/level1/objects.qsc",
+    // Resolve the corpus root from the IGI_GAME_PATH env var (or the
+    // --game-path CLI flag) so the test is portable.  No machine-
+    // specific paths are hardcoded; the test skips cleanly if the
+    // corpus is absent.
+    if (CorpusDir().empty()) {
+        GTEST_SKIP() << "IGI_GAME_PATH not set and --game-path not provided";
+    }
+    // Look under <IGI_GAME_PATH>/missions/location0/level1/objects.qsc
+    // first; fall back to a sibling "objects.qsc" at the corpus root
+    // so the test also runs on installs that put the mission data
+    // somewhere else.
+    const std::string candidates[3] = {
+        Corpus("missions/location0/level1/objects.qsc"),
+        Corpus("level1/objects.qsc"),
+        Corpus("objects.qsc"),
     };
     std::ifstream f;
-    for (const char* p : candidates) {
+    for (const std::string& p : candidates) {
         f.open(p);
         if (f) break;
     }
     if (!f.is_open()) {
-        GTEST_SKIP() << "no real objects.qsc found in known locations";
+        GTEST_SKIP() << "no real objects.qsc found under " << CorpusDir();
     }
     std::stringstream ss; ss << f.rdbuf();
     std::string text = ss.str();
