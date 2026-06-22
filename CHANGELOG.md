@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.2] - 2026-06-22
+
+### Added
+- **3D graph toolbar**: New toolbar under the 3D viewer, shown only when a `graph*.dat` file is loaded. Mirrors the layout pattern used by the IFF media bar / image editor toolbar. Includes:
+  - **+ Node / - Node** buttons to resize the red node cubes from the GUI (no keyboard shortcuts required).
+  - **Reset** button to restore the default node scale.
+  - **Nodes** and **Links** check-box toggles to show or hide the corresponding layer.
+  - **Total Nodes: N** and **Total Links: N** read-only labels that update automatically every time a graph is loaded. Wired through a new `ModelViewer::onGraphLoaded` callback so the toolbar (in `MainWindow`) stays in sync with the `GraphFile` state (in `ModelViewer`).
+
+### Changed
+- **.DAT context menu** now detects `graph*.dat` (graph.dat, graph1.dat, graph2.dat, graph3.dat, and any filename starting with "graph") by base name and presents a dedicated context menu instead of the regular level-DAT (model/texture bindings) menu. The new graph menu offers: **View Graph in 3D**, **Export to JSON**, **Export to Table (.md)**, **Info**, **Dump**. All other `.dat` files (level1.dat, levelX.dat) keep the existing Convert / Export / Info options.
+- **Export to Table (.md)** captures both `graph info` and `graph dump` into a structured Markdown report that lists every node, every link, and aggregate stats in fenced code blocks - a single human-readable summary of the entire AI navigation graph.
+- **"Pack to .res archive"** renamed to **"Pack to Archive"** and now auto-saves to a sibling `<folder>.res` when one exists, without prompting the user with a save dialog. The folder's prefix is always `folderName/` (no more QInputDialog prompt), which matches how the IGI engine indexes texture resources.
+
+### Fixed
+- **Image-to-TEX conversion error** used to log the INPUT path on error (`Failed to convert image to TEX: <input>`), which was misleading - the conversion writes to a sibling `.tex` file. Now logs `input -> output` and shows a `QMessageBox::critical` with the actual error. `saveAsTex()` now also early-rejects images larger than 65535 px on either axis (the TEX v11 header stores width/height as `uint16`) and ensures the destination directory exists before opening the file.
+
 ## [1.9.1] - 2026-06-22
 
 ### Fixed
