@@ -2742,6 +2742,48 @@ public:
         rightLayout->addWidget(imageEditor, 3);
         rightLayout->addWidget(modelViewer, 3);
 
+        // Now that modelViewer exists, wire the graph toolbar buttons
+        // to the modelViewer's state.  The toolbar widgets themselves
+        // were created above (and added to rightLayout just below the
+        // Mode row, so they sit on top of the 3D viewer), but the
+        // lambdas can only be connected once modelViewer is alive.
+        if (btnGraphNodePlus) {
+            connect(btnGraphNodePlus, &QPushButton::clicked, this, [this]() {
+                if (!modelViewer) return;
+                modelViewer->graphNodeScale *= 1.2f;
+                modelViewer->update();
+            });
+        }
+        if (btnGraphNodeMinus) {
+            connect(btnGraphNodeMinus, &QPushButton::clicked, this, [this]() {
+                if (!modelViewer) return;
+                modelViewer->graphNodeScale =
+                    std::max(0.05f, modelViewer->graphNodeScale / 1.2f);
+                modelViewer->update();
+            });
+        }
+        if (btnGraphReset) {
+            connect(btnGraphReset, &QPushButton::clicked, this, [this]() {
+                if (!modelViewer) return;
+                modelViewer->graphNodeScale = 1.0f;
+                modelViewer->update();
+            });
+        }
+        if (chkGraphNodes) {
+            connect(chkGraphNodes, &QCheckBox::toggled, this, [this](bool on) {
+                if (!modelViewer) return;
+                modelViewer->showGraphNodes = on;
+                modelViewer->update();
+            });
+        }
+        if (chkGraphLinks) {
+            connect(chkGraphLinks, &QCheckBox::toggled, this, [this](bool on) {
+                if (!modelViewer) return;
+                modelViewer->showGraphLinks = on;
+                modelViewer->update();
+            });
+        }
+
         // ── IFF Media Player Bar ──────────────────────────────────────────────
         iffMediaBar = new QWidget();
         iffMediaBar->setObjectName("iffMediaBar");
@@ -2868,22 +2910,26 @@ public:
         };
 
         // ── 3D Graph Toolbar (shows only when a graph.dat is loaded) ───────
-        // This sits below the 3D viewer and provides + / - controls to
-        // resize the red node cubes, two check-box toggles to show /
-        // hide nodes and links, and two read-only labels with the
-        // total node / link count of the current graph.
+        // Sits at the TOP of the right pane, just below the view-mode
+        // row.  Provides + / - controls to resize the red node cubes,
+        // two check-box toggles to show / hide nodes and links, and
+        // two read-only labels with the total node / link count of
+        // the current graph.  Mirrors the layout used by the IFF
+        // media bar / image editor toolbar.
         graphToolbar = new QWidget();
         graphToolbar->setObjectName("graphToolbar");
         graphToolbar->setStyleSheet(
-            "QWidget#graphToolbar { background:#1a1a2e; border-top:1px solid #444; padding:4px; }"
-            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
-            "  padding:4px 10px; font-size:13px; min-width:30px; }"
+            "QWidget#graphToolbar { background:#1a1a2e; border-top:1px solid #444;"
+            "  border-bottom:1px solid #444; padding:4px; }"
+            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555;"
+            "  border-radius:4px; padding:4px 10px; font-size:13px; min-width:30px; }"
             "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
             "QPushButton:pressed { background:#1a1a4a; }"
             "QCheckBox { color:#cfd; font-family:Consolas; font-size:11px; spacing:4px; }"
             "QCheckBox::indicator { width:14px; height:14px; }"
             "QLabel { color:#cfd; font-family:Consolas; font-size:11px;"
-            "  background:#252545; border:1px solid #555; border-radius:3px; padding:2px 8px; }"
+            "  background:#252545; border:1px solid #555; border-radius:3px;"
+            "  padding:2px 8px; }"
         );
         QHBoxLayout* graphRow = new QHBoxLayout(graphToolbar);
         graphRow->setContentsMargins(6, 4, 6, 4);
@@ -2918,34 +2964,16 @@ public:
         graphRow->addWidget(btnGraphReset);
 
         graphToolbar->hide();
+        // Place the graph toolbar just below the Mode row and ABOVE
+        // the 3D viewer so the buttons sit on top of the rendering
+        // surface, matching how the IFF media bar / image editor
+        // toolbar sit on top of their respective viewers.
         rightLayout->addWidget(graphToolbar);
 
         // Wire graph toolbar buttons to the ModelViewer state.
-        connect(btnGraphNodePlus, &QPushButton::clicked, this, [this]() {
-            if (!modelViewer) return;
-            modelViewer->graphNodeScale *= 1.2f;
-            modelViewer->update();
-        });
-        connect(btnGraphNodeMinus, &QPushButton::clicked, this, [this]() {
-            if (!modelViewer) return;
-            modelViewer->graphNodeScale = std::max(0.05f, modelViewer->graphNodeScale / 1.2f);
-            modelViewer->update();
-        });
-        connect(btnGraphReset, &QPushButton::clicked, this, [this]() {
-            if (!modelViewer) return;
-            modelViewer->graphNodeScale = 1.0f;
-            modelViewer->update();
-        });
-        connect(chkGraphNodes, &QCheckBox::toggled, this, [this](bool on) {
-            if (!modelViewer) return;
-            modelViewer->showGraphNodes = on;
-            modelViewer->update();
-        });
-        connect(chkGraphLinks, &QCheckBox::toggled, this, [this](bool on) {
-            if (!modelViewer) return;
-            modelViewer->showGraphLinks = on;
-            modelViewer->update();
-        });
+        // We must do this AFTER modelViewer is created, so the
+        // connect lambdas run after the modelViewer pointer is
+        // initialised.  See the second connect block below.
 
         // Debug Output
         QGroupBox* debugGroup = new QGroupBox("Conversion Debug Output");
