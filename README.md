@@ -19,26 +19,14 @@ An interactive workspace designed for visual inspection, navigation, and quick a
 > To use **Apply Textures** on 3D models in the GUI, you must first select the active level folder from the **Settings** menu to resolve the correct texture mappings.
 
 > [!NOTE]
-> **AI Models / Characters Support**: As of v1.7.0, AI character bone models, parsing (DNER), and textures (including upside-down mapping fixes) are now fully supported.
+> **Latest: v1.9.4 (June 2026) — Animation mode with skeletal skinning**:
+> - **Animation mode (Mode 6)**: New GUI mode that plays IFF bone animations on textured 3D MEF models. Toggle via **Settings > Animation**. Includes a Model dropdown, Animations listbox, Play button, Loop checkbox, and a configurable **FPS input textbox (1–120)**.
+> - **Skeletal skinning**: The textured 3D MEF mesh is deformed each frame using the IFF bone transforms — you see the actual animated character, not skeleton dots. Press `P` to toggle rest-pose skinning for debugging; press `B` to toggle the bone skeleton overlay (now depth-test disabled so it renders on top of the model at the correct scale).
+> - **Auto-setup**: Selecting a level from **Settings > Level** auto-detects `objects.qsc`, the `common/ANIMS` folder, and the level `models/` folder, so Animation mode is one click away.
+> - **Root-offset fix**: The MEF↔IFF coordinate mismatch (root at `(0,0,3990.4)` vs `(0,0,0)`) is handled, so body parts no longer detach during animation.
+> - **All hardcoded paths removed** from the source tree — GUI falls back to the user's home directory, and the corpus is resolved via the `IGI_GAME_PATH` env var or `--game-path` flag.
 
-> [!NOTE]
-> **v1.9.1 Updates (June 2026)**:
-> - **MEF texture-orientation bug fixed**: The `.mef → .obj` and `.mef → .mef` (via `mef build-rigid`) export paths now preserve V verbatim for every model type, matching the orientation the IGI engine and the GUI 3D viewer use. The 82% of MEFs that are Type 3 (lightmap) no longer come out flipped, and bone-model face textures are no longer upside down. The 3D viewer and the exported files now render identically.
-> - **Centralised V-flip decision**: replaced per-call-site `1.0f - v.uv.y` literals with a single `MefVToObjV(v, modelType)` helper in `source/parsers/mef_exporter.cpp`. The GUI 3D viewer reads `v.uv.y` directly with no V-flip helper.
-> - **Removed hardcoded `D:\IGI1` path** from the test suite. The corpus location is now user-controlled via the new `--game-path=PATH` / `--corpus=PATH` CLI flag or the `IGI_GAME_PATH` env var. Tests `GTEST_SKIP()` cleanly when no corpus is provided.
-> - **Comprehensive MEF V-flip regression suite** (8 new tests in `tests/test_igi1conv_commands.cpp`): per-type V checks (Type 0 rigid, Type 1 bone, Type 3 lightmap), a sweep across the corpus, a binary-vs-text agreement check, and structural tests that pin the formula in `MefVToObjV` and forbid V-flip helpers in the GUI viewer.
-
-> [!NOTE]
-> **v1.9.0 Updates (June 2026)**:
-> - **Fully standalone `igi1conv.exe`** - the legacy `tools/dconv` (Python) and `tools/gconv` (3DS Max plugin) folders have been **removed entirely**. Every conversion, including IFF animation handling, is now native C++.
-> - **New IFF subcommands**: `iff decompile` (binary → text + per-anim IFFs), `iff create` (BEF dir or decompile output → IFF), `iff rebuild` (one-shot round trip), `iff emit-qsc`, `iff export-gif` (headless GIF renderer).
-> - **GUI IFF menu**: right-click any IFF file for "Decompile to text + per-anim IFFs" or "Export Animation as GIF..." (now uses the same headless renderer as the CLI - no OpenGL viewport required).
-
-> [!NOTE]
-> **v1.7.0 Updates**:
-> - The GUI "Export to Obj" now intuitively prompts for a destination folder when exporting both **binary** and **ASCII/text** `MEF/MEX` models. All textures and `.mtl` materials are generated in [...]
-> - **Recursive ATTA Support**: Both "Export to Obj" and "Build Rigid Model" now walk the full attachment hierarchy, merging all sub-models and resolving their textures automatically from the leve[...]
-> - **Fixed Bone Model Rendering**: Character bone models (type1) now render correctly in the GUI with proper world-space positioning.
+For the full version history see [**CHANGELOG.md**](./CHANGELOG.md).
 
 
 ### GUI Screenshots
