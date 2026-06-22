@@ -546,18 +546,8 @@ std::vector<BoneInfo> ParseBoneHierarchy(const std::vector<uint8_t>& bytes, cons
 // ---------------------------------------------------------------------------
 // Helper: compute world positions from BoneInfo (for vertex baking)
 // ---------------------------------------------------------------------------
-
-std::vector<glm::vec3> ComputeBoneWorldPositions(const std::vector<BoneInfo>& bones) {
-    const size_t numBones = bones.size();
-    std::vector<glm::vec3> worldPos(numBones);
-    for (size_t i = 0; i < numBones; ++i) {
-        glm::vec3 acc = bones[i].pivot;
-        int p = bones[i].parent;
-        while (p != -1 && p < static_cast<int>(numBones)) { acc += bones[p].pivot; p = bones[p].parent; }
-        worldPos[i] = acc;
-    }
-    return worldPos;
-}
+// Bone hierarchy parser (used internally)
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // MANB bone names
@@ -1057,6 +1047,18 @@ ParsedGeometry ParseMefGeometry(const std::vector<uint8_t>& bytes, const std::ve
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+std::vector<glm::vec3> ComputeBoneWorldPositions(const std::vector<BoneInfo>& bones) {
+    const size_t numBones = bones.size();
+    std::vector<glm::vec3> worldPos(numBones);
+    for (size_t i = 0; i < numBones; ++i) {
+        glm::vec3 acc = bones[i].pivot;
+        int p = bones[i].parent;
+        while (p != -1 && p < static_cast<int>(numBones)) { acc += bones[p].pivot; p = bones[p].parent; }
+        worldPos[i] = acc;
+    }
+    return worldPos;
+}
 
 ParsedGeometry ParseMefFile(const std::string& filepath) {
     const std::vector<uint8_t> bytes  = ReadWholeFile(filepath);

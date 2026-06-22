@@ -66,6 +66,7 @@ static std::function<void(const QString&, LogLevel)> g_logger;
 #include <QPainter>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QListWidget>
 #include <QColorDialog>
 #include <QUuid>
 #include "graph_parser.h"
@@ -80,6 +81,7 @@ static std::function<void(const QString&, LogLevel)> g_logger;
 #include "tex_parser.h"
 #include "mef_parser.h"
 #include "mef_native.h"
+#include "qsc_object_parser.h"
 
 #include "../../third_party/tinygltf/stb_image.h"
 
@@ -139,19 +141,14 @@ public:
         const auto& clip  = currentIff.clips[currentClipIndex];
         const auto& skel  = currentIff.skeleton;
 
-        std::vector<QMatrix4x4> globalTransforms(skel.bone_count);
-
-        vertices.clear(); uvs.clear(); normals.clear();
-        submeshes.clear();
-
-        // ── 1. Compute global bone positions ─────────────────────────────────
-        const float IGI_SCALE = 40.96f; // IGI uses 40.96 units = 1 m
+        // ── 1. Compute animated global bone transforms ────────────────────
+        const float IGI_SCALE = 40.96f;
+        animBoneTransforms.assign(skel.bone_count, QMatrix4x4());
 
         for (int i = 0; i < skel.bone_count; ++i) {
             QMatrix4x4 localMat;
             localMat.setToIdentity();
 
-            // Rest-pose translation (from TLST) — already in IGI units
             QVector3D trans(0, 0, 0);
             if (i * 3 + 2 < (int)skel.translations.size())
                 trans = QVector3D(skel.translations[i*3],
@@ -209,22 +206,94 @@ public:
                 rot = QQuaternion::slerp(q1, q2, t);
             }
 
-            localMat.translate(trans / IGI_SCALE); // normalise to meters
+            localMat.translate(trans / IGI_SCALE);
             localMat.rotate(rot);
 
             int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
             if (parent >= 0 && parent < i)
-                globalTransforms[i] = globalTransforms[parent] * localMat;
+                animBoneTransforms[i] = animBoneTransforms[parent] * localMat;
             else
-                globalTransforms[i] = localMat;
+                animBoneTransforms[i] = localMat;
         }
 
-        // ── 2. Collect bone positions ────────────────────────────────────────
+        // ── 2. If we have a rest mesh (MEF bone model loaded), deform it ─
+        if (hasRestMesh && !restMesh.empty() && !mefBoneWorldPos.empty()) {
+            vertices.clear(); normals.clear();
+            // uvs are already set from the MEF load and don't change
+            // submeshes are already set from the MEF load
+
+            const float IGI_SCALE = 40.96f;
+            // MEF and IFF skeletons share the same bone local structure but
+            // the IFF places the root at (0,0,0) while the MEF places it at
+            // mefBoneWorldPos[0].  Add this offset after animating so the
+            // deformed model stays in the MEF viewer's coordinate frame.
+            QVector3D rootOffset(
+                mefBoneWorldPos[0].x / IGI_SCALE,
+                mefBoneWorldPos[0].y / IGI_SCALE,
+                mefBoneWorldPos[0].z / IGI_SCALE
+            );
+            const auto& transforms = showRestPose ? iffRestBoneMats : animBoneTransforms;
+
+            for (const auto& rv : restMesh) {
+                uint16_t b = rv.boneIndex;
+                if (b >= mefBoneWorldPos.size() || b >= transforms.size()) {
+                    // Fallback: no deformation
+                    vertices.push_back(rv.pos[0]); vertices.push_back(rv.pos[1]); vertices.push_back(rv.pos[2]);
+                    normals.push_back(rv.normal[0]); normals.push_back(rv.normal[1]); normals.push_back(rv.normal[2]);
+                    continue;
+                }
+                // MEF vertices are baked in MEF world space:
+                //   rv.pos = (localVert + mefBoneWorldPos[b]) / IGI_SCALE
+                // The local offset is identical in MEF and IFF bone-local space
+                // because the two skeletons only differ by the root translation.
+                glm::vec3 mefBwp = mefBoneWorldPos[b];
+                QVector3D localOffset(
+                    rv.pos[0] - mefBwp.x / IGI_SCALE,
+                    rv.pos[1] - mefBwp.y / IGI_SCALE,
+                    rv.pos[2] - mefBwp.z / IGI_SCALE
+                );
+
+                // Apply the bone transform in IFF space, then shift back to MEF space.
+                QVector3D animatedPos = transforms[b].map(localOffset) + rootOffset;
+
+                // Deform normal the same way (rotation only, no translation).
+                QVector3D animNormal = transforms[b].mapVector(QVector3D(rv.normal[0], rv.normal[1], rv.normal[2]));
+
+                vertices.push_back(animatedPos.x()); vertices.push_back(animatedPos.y()); vertices.push_back(animatedPos.z());
+                normals.push_back(animNormal.x()); normals.push_back(animNormal.y()); normals.push_back(animNormal.z());
+            }
+
+            // Optionally add bone dots/lines as overlay
+            if (showBonesOverlay) {
+                addBonesOverlay(transforms, skel, rootOffset);
+            }
+
+            // Re-normalize deformed vertices using the SAME center/scale
+            // that centerModel() computed during the original MEF load.
+            // The rest mesh stores pre-normalized positions (IGI/40.96
+            // units), so the deformed vertices are also in those units.
+            // Without this step the model appears huge because the
+            // viewer's camera transform expects normalized [-1,1] coords.
+            for (int i = 0; i < (int)vertices.size(); i += 3) {
+                vertices[i]   = (vertices[i]   - modelCx) / modelScale;
+                vertices[i+1] = (vertices[i+1] - modelCy) / modelScale;
+                vertices[i+2] = (vertices[i+2] - modelCz) / modelScale;
+            }
+
+            iffBuffersDirty = true;
+            setupBuffers();
+            return;
+        }
+
+        // ── 3. No rest mesh: show skeleton dots/lines (old behavior) ─────
+        vertices.clear(); uvs.clear(); normals.clear();
+        submeshes.clear();
+
         QVector<QVector3D> bonePos(skel.bone_count);
         for (int i = 0; i < skel.bone_count; ++i)
-            bonePos[i] = globalTransforms[i].map(QVector3D(0,0,0));
+            bonePos[i] = animBoneTransforms[i].map(QVector3D(0,0,0));
 
-        // ── 3. Auto-fit camera: find bounding box ────────────────────────────
+        // Auto-fit camera
         QVector3D bbMin = bonePos.isEmpty() ? QVector3D(-1,-1,-1) : bonePos[0];
         QVector3D bbMax = bonePos.isEmpty() ? QVector3D( 1, 1, 1) : bonePos[0];
         for (const auto& p : bonePos) {
@@ -239,11 +308,9 @@ public:
         float extent = std::max({(bbMax - bbMin).x(),
                                  (bbMax - bbMin).y(),
                                  (bbMax - bbMin).z(), 0.01f});
-        // Store for camera — reuse modelCx/y/z and modelScale
         modelCx = center.x(); modelCy = center.y(); modelCz = center.z();
         modelScale = extent;
 
-        // Helper: add a vertex in normalised space
         auto addV = [&](const QVector3D& p, const QVector3D& n) {
             float nx = (p.x() - center.x()) / extent;
             float ny = (p.y() - center.y()) / extent;
@@ -253,7 +320,7 @@ public:
             normals.push_back(n.x()); normals.push_back(n.y()); normals.push_back(n.z());
         };
 
-        // ── 4. Draw bones as LINES ───────────────────────────────────────────
+        // Bones as LINES
         int boneLineStart = 0;
         int boneLineCount = 0;
         for (int i = 0; i < skel.bone_count; ++i) {
@@ -270,19 +337,17 @@ public:
             sm.count = boneLineCount;
             sm.drawMode = 0x0001; // GL_LINES
             sm.useOverrideColor = true;
-            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 1.0f); // orange bones
+            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 1.0f);
             submeshes.push_back(sm);
         }
 
-        // ── 5. Draw joint DOTS as tiny cubes (8 triangles = 12 verts each) ──
-        // We emulate spheres as small cubes rendered as GL_TRIANGLES
+        // Joint DOTS as tiny cubes
         int jointStart = vertices.size() / 3;
-        float r = 0.012f; // joint radius in normalised space
+        float r = 0.012f;
         for (int i = 0; i < skel.bone_count; ++i) {
             float cx = (bonePos[i].x()-center.x())/extent;
             float cy = (bonePos[i].y()-center.y())/extent;
             float cz = (bonePos[i].z()-center.z())/extent;
-            // 6 faces × 2 triangles × 3 verts = 36 verts per joint
             QVector3D o(cx, cy, cz);
             QVector3D verts[8] = {
                 o+QVector3D(-r,-r,-r), o+QVector3D(r,-r,-r),
@@ -308,40 +373,75 @@ public:
             SubMesh jsm;
             jsm.startIndex = jointStart;
             jsm.count = skel.bone_count * 36;
-            jsm.drawMode = 0x0004; // GL_TRIANGLES
+            jsm.drawMode = 0x0004;
             jsm.useOverrideColor = true;
-            // Root bone white, others cyan
             jsm.overrideColor = QVector4D(0.3f, 0.9f, 1.0f, 1.0f);
             submeshes.push_back(jsm);
         }
 
-        // ── 6. Draw XYZ axis cross at root ───────────────────────────────────
+        // XYZ axis cross at root
         {
             float ax = (bonePos[0].x()-center.x())/extent;
             float ay = (bonePos[0].y()-center.y())/extent;
             float az = (bonePos[0].z()-center.z())/extent;
             float al = 0.08f;
             int axStart = vertices.size() / 3;
-            // X=red Y=green Z=blue — we'll draw all 3 in one mesh, color orange
-            // X axis
             vertices<<ax<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
             vertices<<ax+al<<ay<<az; uvs<<0<<0; normals<<1<<0<<0;
-            // Y axis
             vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<1<<0;
             vertices<<ax<<ay+al<<az; uvs<<0<<0; normals<<0<<1<<0;
-            // Z axis
             vertices<<ax<<ay<<az; uvs<<0<<0; normals<<0<<0<<1;
             vertices<<ax<<ay<<az+al; uvs<<0<<0; normals<<0<<0<<1;
             SubMesh xsm;
             xsm.startIndex = axStart;
             xsm.count = 6;
-            xsm.drawMode = 0x0001; // GL_LINES
+            xsm.drawMode = 0x0001;
             xsm.useOverrideColor = true;
-            xsm.overrideColor = QVector4D(1.0f, 1.0f, 0.2f, 1.0f); // yellow
+            xsm.overrideColor = QVector4D(1.0f, 1.0f, 0.2f, 1.0f);
             submeshes.push_back(xsm);
         }
 
         iffBuffersDirty = true;
+    }
+
+    // Add bone dots/lines as an overlay on top of the deformed MEF mesh.
+    // Called when showBonesOverlay is true and hasRestMesh is true.
+    // rootOffset shifts IFF-space bone positions back into the MEF viewer frame.
+    void addBonesOverlay(const std::vector<QMatrix4x4>& transforms,
+                         const IffSkeleton& skel,
+                         const QVector3D& rootOffset) {
+        QVector<QVector3D> bonePos(skel.bone_count);
+        for (int i = 0; i < skel.bone_count; ++i)
+            bonePos[i] = transforms[i].map(QVector3D(0,0,0)) + rootOffset;
+
+        // Find bounding box for normalization (use the MEF's existing center/scale)
+        float cx = modelCx, cy = modelCy, cz = modelCz, ext = modelScale;
+
+        int boneStart = vertices.size() / 3;
+        int boneLineCount = 0;
+        for (int i = 0; i < skel.bone_count; ++i) {
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i) {
+                for (int v = 0; v < 2; v++) {
+                    QVector3D p = (v == 0) ? bonePos[parent] : bonePos[i];
+                    vertices.push_back((p.x()-cx)/ext);
+                    vertices.push_back((p.y()-cy)/ext);
+                    vertices.push_back((p.z()-cz)/ext);
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(0); normals.push_back(1); normals.push_back(0);
+                }
+                boneLineCount += 2;
+            }
+        }
+        if (boneLineCount > 0) {
+            SubMesh sm;
+            sm.startIndex = boneStart;
+            sm.count = boneLineCount;
+            sm.drawMode = 0x0001; // GL_LINES
+            sm.useOverrideColor = true;
+            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 0.7f);
+            submeshes.push_back(sm);
+        }
     }
 
     QTextEdit* infoOverlay;
@@ -373,6 +473,30 @@ public:
     float animTime = 0.0f;
     int currentClipIndex = 0;
     bool iffPlaying = false;
+
+    // ── Skeletal skinning state ────────────────────────────────────────
+    // When a MEF bone model (type1) is loaded and an IFF is loaded on
+    // top, we deform the MEF mesh each frame using the IFF bone
+    // transforms instead of replacing it with bone dots/lines.
+    // `restMesh` holds the MEF vertices in rest pose (with bone
+    // indices), `iffRestBonePos` holds the IFF's OWN rest-pose bone
+    // world positions (computed from TLST), and `showBonesOverlay`
+    // toggles the skeleton visualization on top of the deformed mesh.
+    struct RestVertex {
+        float pos[3];      // rest-pose position (same units as `vertices`)
+        float normal[3];   // rest-pose normal
+        float uv[2];       // UV (unchanged by animation)
+        uint16_t boneIndex; // which bone this vertex belongs to
+        float weight;       // skinning weight (usually 1.0)
+    };
+    std::vector<RestVertex> restMesh;          // MEF mesh in rest pose
+    std::vector<SubMesh>    restSubmeshes;     // submesh info for the MEF
+    std::vector<glm::vec3>  mefBoneWorldPos;   // MEF's own bone world positions (IGI units)
+    std::vector<QMatrix4x4> iffRestBoneMats;   // IFF rest-pose bone world transforms (4x4)
+    std::vector<QMatrix4x4> animBoneTransforms; // animated bone world transforms from IFF
+    bool hasRestMesh = false;       // true when MEF bone model is loaded
+    bool showBonesOverlay = false;  // toggle skeleton dots/lines (key 'B')
+    bool showRestPose = false;      // toggle rest-pose skinning (key 'P')
 
     // Callback so MainWindow media bar can react to time changes
     std::function<void(float time, float duration, int clip, int clipCount)> onIffTimeChanged;
@@ -432,6 +556,114 @@ public:
     float iffGetTime() const { return animTime; }
     int iffGetClipCount() const { return (int)currentIff.clips.size(); }
     int iffGetClipIndex() const { return currentClipIndex; }
+    int iffGetClipAnimId(int idx) const {
+        if (idx < 0 || idx >= (int)currentIff.clips.size()) return -1;
+        return (int)currentIff.clips[idx].animation_id;
+    }
+
+    // ── Public IFF API for the Animation mode panel ──────────────────────────
+    //
+    // `loadIffForAnimation` is the entry point used when the user clicks
+    // the green Play button in the new "Animation" toolbar.  It:
+    //   1. Decompiles the IFF bone-hierarchy file to a temp directory,
+    //      then loads it through the existing `loadModel` path so the
+    //      MEF body is rendered with the 3D viewer machinery.
+    //   2. Re-loads the IFF itself so the skeleton + animation clips are
+    //      parsed and `isIffAnimation` is set to true.
+    //   3. Seeks to the requested clip and starts the play timer.
+    //
+    // We can't take both a MEF path AND an IFF path through a single
+    // `loadModel` call because `loadModel` only supports one file at a
+    // time.  The MEF is loaded first (so the body is on screen), then
+    // the IFF is loaded and replaces the MEF geometry with the
+    // animated skeleton + bones; the body still shows because the
+    // IFF viewer paints both the bones AND the underlying MEF mesh
+    // (see `updateIffSkeleton` / `loadMefRecursive` paths).  The
+    // `playClip` method below then drives the timer.
+    void playClip(int clipIndex) {
+        if (!isIffAnimation || currentIff.clips.empty()) return;
+        int idx = clipIndex;
+        if (idx < 0) idx = 0;
+        if (idx >= (int)currentIff.clips.size()) idx = (int)currentIff.clips.size() - 1;
+        currentClipIndex = idx;
+        animTime = 0.0f;
+        updateIffSkeleton();
+        update();
+        iffPlaying = true;
+        if (animTimer) animTimer->start(33); // ~30 FPS for smooth playback
+        if (onIffTimeChanged)
+            onIffTimeChanged(0.0f, currentIff.clips[idx].duration, idx, (int)currentIff.clips.size());
+    }
+
+    // Load a fresh IFF (called by Animation mode after switching
+    // bone-hierarchy files or model).
+    void loadIff(const QString& path) {
+        if (animTimer) animTimer->stop();
+        makeCurrent();
+        isIffAnimation = false;
+        iffBuffersDirty = false;
+        // NOTE: Do NOT clear restMesh/restSubmeshes/textureCache here.
+        // When a MEF is loaded first and an IFF is loaded on top, we
+        // need the rest-pose mesh to deform it with the IFF bones.
+        // Only clear the dynamic vertex/normal arrays (they'll be
+        // rebuilt by updateIffSkeleton).  Keep uvs and submeshes from
+        // the MEF load so textures still render.
+        vertices.clear(); normals.clear();
+        // Don't clear uvs or submeshes - they come from the MEF
+        // and are reused during skinning.
+
+        currentIff = IFF_Parse(path.toStdString(), [](int level, const std::string& msg) {
+            if (g_logger) g_logger(QString::fromStdString(msg), static_cast<LogLevel>(level));
+        });
+        if (currentIff.valid) {
+            isIffAnimation = true;
+            currentClipIndex = 0;
+            animTime = 0.0f;
+            // Compute the IFF's OWN rest-pose bone world positions.
+            // These are used as the reference for skinning so that
+            // at rest pose the deformed position == original position.
+            computeIffRestBonePos();
+            updateIffSkeleton();
+            iffPlaying = true;
+            if (animTimer) animTimer->start(33); // 30 FPS
+            if (!currentIff.clips.empty() && onIffTimeChanged)
+                onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
+        } else {
+            isIffAnimation = false;
+        }
+        // Only recenter if we don't have a rest mesh (otherwise the
+        // MEF's centering should be kept).
+        if (!hasRestMesh) centerModel();
+        setupBuffers();
+        update();
+    }
+
+    // Compute the IFF's OWN rest-pose bone world transforms from the
+    // TLST chunk (no animation applied).  These are 4x4 matrices in
+    // viewer units (IGI / 40.96).  Used for matrix-palette skinning:
+    //   delta = animTransform * restTransform.inverted()
+    //   animatedPos = delta * restVertPos
+    // At rest pose delta == identity so animatedPos == restVertPos.
+    void computeIffRestBonePos() {
+        const auto& skel = currentIff.skeleton;
+        iffRestBoneMats.assign(skel.bone_count, QMatrix4x4());
+        const float IGI_SCALE = 40.96f;
+        for (int i = 0; i < skel.bone_count; ++i) {
+            QMatrix4x4 localMat;
+            localMat.setToIdentity();
+            QVector3D trans(0, 0, 0);
+            if (i * 3 + 2 < (int)skel.translations.size())
+                trans = QVector3D(skel.translations[i*3],
+                                  skel.translations[i*3+1],
+                                  skel.translations[i*3+2]);
+            localMat.translate(trans / IGI_SCALE);
+            int parent = (i < (int)skel.parents.size()) ? (int)skel.parents[i] : -1;
+            if (parent >= 0 && parent < i)
+                iffRestBoneMats[i] = iffRestBoneMats[parent] * localMat;
+            else
+                iffRestBoneMats[i] = localMat;
+        }
+    }
 
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
@@ -479,6 +711,14 @@ public:
         addKey(Qt::Key_G, [this]() { showGrid = !showGrid; update(); });
         addKey(Qt::Key_R, [this]() { rotX=rotY=rotZ=0; transX=transY=0; zoom=3.0f; update(); updateCoordsOverlay(); });
         addKey(Qt::Key_I, [this]() { infoOverlay->setVisible(!infoOverlay->isVisible()); });
+        addKey(Qt::Key_B, [this]() { showBonesOverlay = !showBonesOverlay; update(); });
+        addKey(Qt::Key_P, [this]() {
+            showRestPose = !showRestPose;
+            updateIffSkeleton();
+            update();
+            if (g_logger)
+                g_logger(QString("[INFO] Rest-pose skinning %1").arg(showRestPose ? "enabled" : "disabled"), LOG_INFO);
+        });
     }
     
     ~ModelViewer() {
@@ -524,7 +764,7 @@ public:
         coordsOverlay->setText(QString(
             "Model: %1 (%2)\n"
             "Cam: X%3 Y%4 Z%5 | Rot: X%6 Y%7 Z%8\n"
-            "[W]ire [G]rid [R]eset [I]nfo | LMB=Rotate RMB=Pan Wheel=Zoom")
+            "[W]ire [G]rid [R]eset [I]nfo [B]ones [P]ose | LMB=Rotate RMB=Pan Wheel=Zoom")
             .arg(currentModelName).arg(currentModelId)
             .arg(transX, 0,'f',2).arg(transY, 0,'f',2).arg(-zoom, 0,'f',2)
             .arg(rotX, 0,'f',0).arg(rotY, 0,'f',0).arg(rotZ, 0,'f',0));
@@ -540,6 +780,13 @@ public:
         try {
             geo = ParseMefFile(path.toStdString());
         } catch(...) { return; }
+
+        // Store the MEF's own bone world positions for skinning.
+        // These are in IGI world units and match the bone indices
+        // stored in each vertex's boneIndex field.
+        if (geo.modelType == 1 && !geo.bones.empty() && mefBoneWorldPos.empty()) {
+            mefBoneWorldPos = ComputeBoneWorldPositions(geo.bones);
+        }
         
         std::vector<std::shared_ptr<QOpenGLTexture>> loadedMaterials;
         if (!geo.pmtlTextures.empty()) {
@@ -589,7 +836,8 @@ public:
                             // Other XTRV models: use rawPos (raw game units). Collision fallback: v.pos * 40.96f.
                             glm::vec3 p = (isBoneModel || !hasRawPos) ? (v.pos * 40.96f) : v.rawPos;
                             QVector4D tp = transform * QVector4D(p.x, p.y, p.z, 1.0f);
-                            vertices.push_back(tp.x() / 40.96f); vertices.push_back(tp.y() / 40.96f); vertices.push_back(tp.z() / 40.96f);
+                            float vx = tp.x() / 40.96f, vy = tp.y() / 40.96f, vz = tp.z() / 40.96f;
+                            vertices.push_back(vx); vertices.push_back(vy); vertices.push_back(vz);
 
                             QVector4D tn = transform * QVector4D(v.normal.x, v.normal.y, v.normal.z, 0.0f);
                             QVector3D norm(tn.x(), tn.y(), tn.z());
@@ -610,6 +858,20 @@ public:
                             // MefViewerDoesNotFlipV regression test.
                             uvs.push_back(v.uv.x);
                             uvs.push_back(v.uv.y);
+
+                            // Store rest-pose vertex for skeletal skinning.
+                            // Only bone models (type1) have meaningful
+                            // boneIndex/weight; for rigid models we
+                            // store boneIndex=0 so skinning is a no-op.
+                            if (isBoneModel) {
+                                RestVertex rv;
+                                rv.pos[0] = vx; rv.pos[1] = vy; rv.pos[2] = vz;
+                                rv.normal[0] = norm.x(); rv.normal[1] = norm.y(); rv.normal[2] = norm.z();
+                                rv.uv[0] = v.uv.x; rv.uv[1] = v.uv.y;
+                                rv.boneIndex = v.boneIndex;
+                                rv.weight = v.weight;
+                                restMesh.push_back(rv);
+                            }
                         } else {
                             vertices.push_back(0); vertices.push_back(0); vertices.push_back(0);
                             normals.push_back(0); normals.push_back(0); normals.push_back(0);
@@ -624,7 +886,17 @@ public:
             if (block.materialSlot >= 0 && block.materialSlot < loadedMaterials.size()) {
                 sm.texture = loadedMaterials[block.materialSlot];
             }
-            if (sm.count > 0) submeshes.push_back(sm);
+            if (sm.count > 0) {
+                submeshes.push_back(sm);
+                if (isBoneModel) {
+                    restSubmeshes.push_back(sm);
+                }
+            }
+        }
+
+        // Mark that we have a rest mesh for skinning
+        if (isBoneModel && !restMesh.empty()) {
+            hasRestMesh = true;
         }
 
         for (const auto& atta : geo.mefAttachments) {
@@ -711,10 +983,15 @@ public:
         if (animTimer) animTimer->stop();
         isIffAnimation = false;
         iffBuffersDirty = false;
+        hasRestMesh = false;
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
         textureCache.clear();
+        restMesh.clear();
+        restSubmeshes.clear();
+        mefBoneWorldPos.clear();
+        animBoneTransforms.clear();
         currentModelPath = path;
         
         QFileInfo info(path);
@@ -2618,6 +2895,11 @@ public:
         viewMenu->addAction("Image", [this]() { viewModeCombo->setCurrentIndex(3); });
         viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(4); });
         viewMenu->addAction("Video", [this]() { viewModeCombo->setCurrentIndex(5); });
+        // Animation (index 6) is only registered when the mode toggle
+        // is on; rebuildModeCombo() adds/removes it in lock-step.
+        if (globalAnimationModeEnabled) {
+            viewMenu->addAction("Animation", [this]() { viewModeCombo->setCurrentIndex(6); });
+        }
         viewMenu->addSeparator();
         auto applyMenuTheme = [iniPath](const QString& name) {
             QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
@@ -2715,7 +2997,108 @@ public:
         QString logLevel = settings.value("LOGS_LEVEL", "INFO").toString();
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
-        
+
+        // ── Animation submenu (Mode 6) ──────────────────────────────────────
+        // The new "Animation" mode is gated by this menu: the Mode
+        // combo only shows the "Animation" entry when at least one of
+        // the four prerequisites is true.  All entries persist into
+        // igi1conv.ini via the standard QSettings flow.
+        QMenu* animSettingsMenu = settingsMenu->addMenu("Animation");
+        globalAnimationModeEnabled = settings.value("AnimationModeEnabled", false).toBool();
+        globalObjectsQscPath       = settings.value("ObjectsQscPath", "").toString();
+        globalAnimsSourceDir       = settings.value("AnimsSourceDir", "").toString();
+        globalModelsDir            = settings.value("ModelsDir", "").toString();
+        globalAnimsCacheDir        = settings.value("AnimsCacheDir",
+            globalCacheDir + "/animation_anims").toString();
+
+        QAction* animModeAction = animSettingsMenu->addAction("Enable Animation Mode");
+        animModeAction->setCheckable(true);
+        animModeAction->setChecked(globalAnimationModeEnabled);
+        connect(animModeAction, &QAction::toggled, this,
+            [this, iniPath](bool checked) {
+                globalAnimationModeEnabled = checked;
+                QSettings(iniPath, QSettings::IniFormat).setValue("AnimationModeEnabled", checked);
+                if (viewModeCombo) {
+                    // Re-sync the mode combo so "Animation" appears /
+                    // disappears in lock-step with the toggle.
+                    int curIdx = viewModeCombo->currentIndex();
+                    rebuildModeCombo();
+                    int newIdx = checked ? 6 : qMin(curIdx, 5);
+                    viewModeCombo->setCurrentIndex(newIdx);
+                }
+                logMessage(QString("[INFO] Animation mode is now %1")
+                    .arg(checked ? "ENABLED" : "DISABLED"));
+                // When the user enables the mode, eagerly auto-detect
+                // the objects.qsc / ANIMS / models folders from the
+                // currently configured LevelPath so the dropdown
+                // populates immediately and the Play button lights up
+                // without further user action.
+                if (checked) {
+                    autoDetectAnimationFolders();
+                    loadAnimationSetFromQsc();
+                }
+            });
+
+        animSettingsMenu->addSeparator();
+
+        animSettingsMenu->addAction("Set Objects.qsc...", this, [this, iniPath]() {
+            QString path = QFileDialog::getOpenFileName(
+                this, "Select decompiled objects.qsc (run 'qvm decompile' first)",
+                globalObjectsQscPath.isEmpty()
+                    ? QDir::homePath()
+                    : QFileInfo(globalObjectsQscPath).absolutePath(),
+                "QScript (*.qsc);;All files (*)");
+            if (path.isEmpty()) return;
+            globalObjectsQscPath = path;
+            QSettings(iniPath, QSettings::IniFormat).setValue("ObjectsQscPath", path);
+            logMessage("[INFO] Objects.qsc set: " + path);
+            // Eagerly parse so the dropdown is populated the moment
+            // the user enables the mode.
+            loadAnimationSetFromQsc();
+        });
+
+        animSettingsMenu->addAction("Set ANIMS Source Folder...", this, [this, iniPath]() {
+            QString dir = QFileDialog::getExistingDirectory(
+                this, "Select COMMON/ANIMS folder (e.g. D:\\Software\\IGI-Game\\COMMON\\ANIMS)",
+                globalAnimsSourceDir.isEmpty() ? QDir::homePath() : globalAnimsSourceDir);
+            if (dir.isEmpty()) return;
+            globalAnimsSourceDir = dir;
+            QSettings(iniPath, QSettings::IniFormat).setValue("AnimsSourceDir", dir);
+            logMessage("[INFO] ANIMS source folder set: " + dir);
+        });
+
+        animSettingsMenu->addAction("Set LEVEL Models Folder...", this, [this, iniPath]() {
+            QString dir = QFileDialog::getExistingDirectory(
+                this, "Select LEVEL1/models folder",
+                globalModelsDir.isEmpty() ? QDir::homePath() : globalModelsDir);
+            if (dir.isEmpty()) return;
+            globalModelsDir = dir;
+            QSettings(iniPath, QSettings::IniFormat).setValue("ModelsDir", dir);
+            logMessage("[INFO] Models folder set: " + dir);
+        });
+
+        animSettingsMenu->addSeparator();
+
+        animSettingsMenu->addAction("Pre-Extract All ANIMS to Cache", this, [this]() {
+            preExtractAllAnims();
+        });
+
+        animSettingsMenu->addAction("Clear Animation Cache", this, [this]() {
+            if (globalAnimsCacheDir.isEmpty()) return;
+            QDir d(globalAnimsCacheDir);
+            if (!d.exists()) {
+                logMessage("[INFO] Animation cache does not exist: " + globalAnimsCacheDir);
+                return;
+            }
+            int n = d.removeRecursively() ? 1 : 0;
+            logMessage(QString("[INFO] Animation cache cleared (%1)").arg(globalAnimsCacheDir));
+        });
+
+        animSettingsMenu->addAction("Reload Animation Set", this, [this]() {
+            loadAnimationSetFromQsc();
+        });
+
+        // ── Auto Save on RES (unchanged) ─────────────────────────────────────
         QAction* autoSaveResAction = settingsMenu->addAction("Auto Save on RES");
         autoSaveResAction->setCheckable(true);
         autoSaveResAction->setChecked(globalAutoSaveRes);
@@ -2784,9 +3167,149 @@ public:
                 }
             }
             QSettings(iniPath, QSettings::IniFormat).setValue("LevelPath", levelDir);
+            
+            // ── Auto-setup Animation mode paths ──────────────────────────────
+            // When the user picks a level, automatically:
+            //   1. Find & decompile objects.qvm → objects.qsc
+            //   2. Find the ANIMS folder (walk up to common/ANIMS)
+            //   3. Find the models folder (level/models or level/models/unpacked)
+            //   4. Pre-extract all ANIMS to cache
+            //   5. Enable Animation mode + load the set
+            // All paths are persisted to igi1conv.ini.
+            logMessage("[INFO] Auto-setting up Animation mode paths...");
+            QString animsDir, modelsDir, objectsQsc;
+
+            // 1. Find objects.qvm in this level folder (or sibling folders)
+            QStringList qvmCandidates;
+            {
+                QDir d(levelDir);
+                // Check this level folder
+                QStringList qvms = d.entryList(QStringList() << "objects.qvm" << "OBJECTS.QVM", QDir::Files);
+                for (const auto& q : qvms) qvmCandidates << (levelDir + "/" + q);
+                // Check sibling level folders (objects.qvm might be in level1 only)
+                if (d.cdUp()) {
+                    QDirIterator it(d.absolutePath(),
+                                    QStringList() << "objects.qvm" << "OBJECTS.QVM",
+                                    QDir::Files, QDirIterator::Subdirectories);
+                    while (it.hasNext()) {
+                        QString p = it.next();
+                        if (!qvmCandidates.contains(p)) qvmCandidates << p;
+                    }
+                }
+            }
+            // Also check if objects.qsc already exists
+            for (const auto& q : qvmCandidates) {
+                QString qscPath = QFileInfo(q).absolutePath() + "/objects.qsc";
+                if (QFile::exists(qscPath)) {
+                    objectsQsc = qscPath;
+                    logMessage("[INFO] Animation: found existing objects.qsc: " + qscPath);
+                    break;
+                }
+            }
+            if (objectsQsc.isEmpty() && !qvmCandidates.isEmpty()) {
+                // Decompile objects.qvm → objects.qsc
+                QString qvmPath = qvmCandidates.first();
+                objectsQsc = QFileInfo(qvmPath).absolutePath() + "/objects.qsc";
+                logMessage("[INFO] Animation: decompiling " + qvmPath + " -> " + objectsQsc);
+                QProcess::execute(qApp->applicationFilePath(),
+                    QStringList() << "qvm" << "decompile" << qvmPath << "-o" << objectsQsc);
+            }
+            if (!objectsQsc.isEmpty() && QFile::exists(objectsQsc)) {
+                globalObjectsQscPath = objectsQsc;
+                QSettings(iniPath, QSettings::IniFormat).setValue("ObjectsQscPath", objectsQsc);
+                logMessage("[INFO] Animation: objects.qsc set: " + objectsQsc);
+            }
+
+            // 2. Find ANIMS folder (walk up to find common/ANIMS)
+            {
+                QDir d(levelDir);
+                for (int i = 0; i < 6 && d.cdUp(); ++i) {
+                    QStringList tryNames = {"common/ANIMS", "Common/ANIMS", "COMMON/ANIMS", "common/anims", "ANIMS"};
+                    for (const QString& n : tryNames) {
+                        QString c = d.absoluteFilePath(n);
+                        if (QDir(c).exists()) { animsDir = c; break; }
+                    }
+                    if (!animsDir.isEmpty()) break;
+                }
+            }
+            if (!animsDir.isEmpty()) {
+                globalAnimsSourceDir = animsDir;
+                QSettings(iniPath, QSettings::IniFormat).setValue("AnimsSourceDir", animsDir);
+                logMessage("[INFO] Animation: ANIMS folder set: " + animsDir);
+            }
+
+            // 3. Find models folder
+            {
+                QStringList modelCands;
+                modelCands << (levelDir + "/models")
+                           << (levelDir + "/MODELS")
+                           << (levelDir + "/Models");
+                // Also check for unpacked models
+                QDir md(levelDir + "/models");
+                if (md.exists()) {
+                    QStringList subs = md.entryList(QStringList() << "*unpacked*", QDir::Dirs);
+                    for (const auto& s : subs) modelCands << (levelDir + "/models/" + s);
+                }
+                for (const auto& c : modelCands) {
+                    if (QDir(c).exists() && !QDir(c).entryList(QStringList() << "*.mef" << "*.MEF", QDir::Files).isEmpty()) {
+                        modelsDir = c;
+                        break;
+                    }
+                }
+                // If no .mef files found directly, check for .res to unpack
+                if (modelsDir.isEmpty()) {
+                    QString resPath = levelDir + "/models/" + levelName + ".res";
+                    if (!QFile::exists(resPath)) {
+                        QStringList resList = QDir(levelDir + "/models").entryList(QStringList() << "*.res" << "*.RES", QDir::Files);
+                        if (!resList.isEmpty()) resPath = levelDir + "/models/" + resList.first();
+                    }
+                    if (QFile::exists(resPath)) {
+                        modelsDir = levelDir + "/models/" + levelName + "_unpacked";
+                        QDir().mkpath(modelsDir);
+                        logMessage("[INFO] Animation: unpacking models from " + resPath + " -> " + modelsDir);
+                        QProcess::execute(qApp->applicationFilePath(),
+                            QStringList() << "res" << "unpack" << resPath << modelsDir);
+                    }
+                }
+            }
+            if (!modelsDir.isEmpty()) {
+                globalModelsDir = modelsDir;
+                QSettings(iniPath, QSettings::IniFormat).setValue("ModelsDir", modelsDir);
+                logMessage("[INFO] Animation: models folder set: " + modelsDir);
+            }
+
+            // 4. Set cache dir for ANIMS
+            globalAnimsCacheDir = globalCacheDir + "/animation_anims";
+            QSettings(iniPath, QSettings::IniFormat).setValue("AnimsCacheDir", globalAnimsCacheDir);
+
+            // 5. Pre-extract all ANIMS
+            if (!animsDir.isEmpty()) {
+                QDir().mkpath(globalAnimsCacheDir);
+                QDir srcDir(animsDir);
+                QStringList filters; filters << "*.IFF" << "*.iff" << "*.BFF" << "*.bff";
+                int copied = 0;
+                for (const QFileInfo& fi : srcDir.entryInfoList(filters, QDir::Files)) {
+                    QString dst = globalAnimsCacheDir + "/" + fi.fileName();
+                    if (!QFile::exists(dst)) {
+                        if (QFile::copy(fi.absoluteFilePath(), dst)) ++copied;
+                    }
+                }
+                logMessage(QString("[INFO] Animation: pre-extracted %1 ANIMS files to cache").arg(copied));
+            }
+
+            // 6. Enable Animation mode + load set
+            if (!objectsQsc.isEmpty()) {
+                globalAnimationModeEnabled = true;
+                QSettings(iniPath, QSettings::IniFormat).setValue("AnimationModeEnabled", true);
+                rebuildModeCombo();
+                loadAnimationSetFromQsc();
+                logMessage("[INFO] Animation mode auto-enabled with all paths configured.");
+            }
+
             QMessageBox::information(this, "Level Set",
-                QString("Level: %1\nDAT: %2\nMTP: %3\nTextures: %4")
-                .arg(levelDir, globalLevelDatPath, globalLevelMtpPath, globalTextureDir));
+                QString("Level: %1\nDAT: %2\nMTP: %3\nTextures: %4\n\nAnimation Mode:\nobjects.qsc: %5\nANIMS: %6\nModels: %7")
+                .arg(levelDir, globalLevelDatPath, globalLevelMtpPath, globalTextureDir,
+                     objectsQsc, animsDir, modelsDir));
         });
 
         settingsMenu->addAction("Cache Folder...", this, [this, iniPath]() {
@@ -3034,7 +3557,7 @@ public:
         viewModeLayout->setSpacing(6);
         viewModeLayout->addWidget(new QLabel("Mode:"));
         viewModeCombo = new QComboBox();
-        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
+        rebuildModeCombo(); // populates the entries; "Animation" only if enabled
         viewModeLayout->addWidget(viewModeCombo);
         viewModeLayout->addStretch();
         rightLayout->addLayout(viewModeLayout);
@@ -3281,6 +3804,86 @@ public:
             "QComboBox { background:#333; color:#ddd; border:1px solid #555; border-radius:3px;"
             "  padding:2px 6px; }"
         );
+        // ── Animation Panel (Mode 6) ──────────────────────────────────────────
+        // Shows when the Mode combo is set to "Animation".  Combines the
+        // 3D MEF viewer with the IFF animation timeline.  Layout:
+        //   [Model: dropdown] [Animations: listbox] [▶ Play]  [loop] [fps 30]
+        // The dropdown is populated with every ModelId found in the
+        // decompiled objects.qsc; the listbox is populated with the
+        // (boneHierarchy, standAnimation) pairs that belong to the
+        // currently selected model.
+        animationPanel = new QWidget();
+        animationPanel->setObjectName("animationPanel");
+        animationPanel->setStyleSheet(
+            "QWidget#animationPanel { background:transparent; }"
+            "QPushButton { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px;"
+            "  padding:1px 8px; font-size:11px; min-width:30px; max-height:20px; }"
+            "QPushButton:hover { background:#4a4a4a; }"
+            "QPushButton#animPlayBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:12px; min-width:48px; max-height:22px; }"
+            "QPushButton#animPlayBtn:hover { background:#2a6a2a; }"
+            "QPushButton#animPlayBtn:disabled { background:#333; color:#666; border-color:#444; }"
+            "QComboBox { background:#333; color:#ddd; border:1px solid #555; border-radius:3px; padding:1px 4px; max-height:20px; }"
+            "QListWidget { background:#222; color:#ddd; border:1px solid #555; border-radius:3px;"
+            "  font-family:Consolas; font-size:10px; padding:1px; max-height:60px; }"
+            "QListWidget::item:selected { background:#0066aa; color:#fff; }"
+            "QCheckBox { color:#ddd; font-family:Consolas; font-size:10px; spacing:3px; max-height:18px; }"
+            "QCheckBox::indicator { width:12px; height:12px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:10px; max-height:16px; }"
+        );
+        QHBoxLayout* animLayout = new QHBoxLayout(animationPanel);
+        animLayout->setContentsMargins(0, 0, 0, 0);
+        animLayout->setSpacing(4);
+
+        animLayout->addWidget(new QLabel("Model:"));
+        animModelCombo = new QComboBox();
+        animModelCombo->setMinimumWidth(140);
+        animModelCombo->setMaximumHeight(22);
+        animModelCombo->setToolTip("Model IDs parsed from objects.qsc HumanSoldier Task_New calls");
+        animLayout->addWidget(animModelCombo);
+
+        animLayout->addSpacing(4);
+        animLayout->addWidget(new QLabel("Anims:"));
+        animAnimList = new QListWidget();
+        animAnimList->setMinimumWidth(200);
+        animAnimList->setMaximumHeight(60);
+        animAnimList->setToolTip("Available (boneHierarchy, animation) pairs for the selected model");
+        animLayout->addWidget(animAnimList);
+
+        animPlayBtn = new QPushButton("\u25b6 Play");
+        animPlayBtn->setObjectName("animPlayBtn");
+        animPlayBtn->setToolTip("Load MEF + IFF and start playback at 30 FPS");
+        animPlayBtn->setEnabled(false);
+        animPlayBtn->setMaximumHeight(22);
+        animLayout->addWidget(animPlayBtn);
+
+        animLoopChk = new QCheckBox("Loop");
+        animLoopChk->setChecked(true);
+        animLoopChk->setMaximumHeight(20);
+        animLayout->addWidget(animLoopChk);
+
+        animFpsLabel = new QLabel("30 FPS");
+        animFpsLabel->setToolTip("Animation playback is locked to 30 FPS for smooth display");
+        animFpsLabel->setMaximumHeight(18);
+        animLayout->addWidget(animFpsLabel);
+
+        animStatusLabel = new QLabel("");
+        animStatusLabel->setToolTip("Status of the last Animation operation");
+        animLayout->addWidget(animStatusLabel);
+
+        animLayout->addStretch();
+        animationPanel->hide();
+        viewerToolbarLayout->addWidget(animationPanel);
+
+        // Wire the Animation panel signals.  The handlers live as member
+        // methods on MainWindow so they can access the cached object set,
+        // the temp ANIMS directory, and the modelViewer.
+        connect(animModelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &MainWindow::onAnimationModelChanged);
+        connect(animPlayBtn, &QPushButton::clicked,
+                this, &MainWindow::onAnimationPlayClicked);
+        connect(animAnimList, &QListWidget::itemDoubleClicked,
+                this, &MainWindow::onAnimationPlayClicked);
+
         viewerToolbarLayout->addWidget(iffMediaBar);
 
         // Wire media bar buttons
@@ -3337,8 +3940,12 @@ public:
             if (iffClipCombo && iffClipCombo->count() != clipCount) {
                 iffClipCombo->blockSignals(true);
                 iffClipCombo->clear();
-                for (int i = 0; i < clipCount; i++)
-                    iffClipCombo->addItem(QString("Clip %1").arg(i + 1));
+                for (int i = 0; i < clipCount; i++) {
+                    int animId = modelViewer->iffGetClipAnimId(i);
+                    iffClipCombo->addItem(animId >= 0
+                        ? QString("Clip %1  (anim #%2)").arg(i + 1).arg(animId)
+                        : QString("Clip %1").arg(i + 1));
+                }
                 iffClipCombo->blockSignals(false);
             }
             if (iffClipCombo && iffClipCombo->currentIndex() != clip) {
@@ -3417,11 +4024,34 @@ public:
         });
 
         connect(viewModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-            if (!currentFile.isEmpty()) {
+            // Always reload currentFile on a mode change so the new
+            // mode's hideAllViewers()/toolbar rules apply.  For Mode
+            // 6 (Animation) we render the panel + the 3D viewport
+            // together; the actual MEF/IFF load happens via the
+            // panel's Play button, not here.
+            if (index == 6) {
+                if (animationSet.entries.empty()) {
+                    // Either no path is set, or no entries loaded.
+                    // loadAnimationSetFromQsc handles both cases and
+                    // falls back to auto-detection from LevelPath.
+                    loadAnimationSetFromQsc();
+                }
+                loadFile(currentFile.isEmpty() ? QString() : currentFile, 6);
+            } else if (!currentFile.isEmpty()) {
                 loadFile(currentFile, index);
             }
         });
-        
+
+        // Lazily load the animation set on startup if a path was saved.
+        // loadAnimationSetFromQsc() is robust to a missing path - it
+        // auto-detects from LevelPath - so we just call it
+        // unconditionally on startup when the mode is on.  This is
+        // what populates the dropdown even when the user never opened
+        // Settings > Animation explicitly.
+        if (globalAnimationModeEnabled) {
+            loadAnimationSetFromQsc();
+        }
+
         hideAllViewers();
     }
 
@@ -3498,6 +4128,29 @@ private:
     QPushButton* btnGraphReset = nullptr;
     QComboBox* iffClipCombo = nullptr;
     bool iffScrubbing = false;
+
+    // ── Animation mode state (Mode 6) ──────────────────────────────────────
+    // Gated by the Settings > Animation toggle (`globalAnimationModeEnabled`).
+    // The QscObjectSet is the parsed view of the level's objects.qsc.
+    // The temp directory under `globalCacheDir` holds the extracted
+    // 000.IFF..006.IFF bones files so the playback hot path doesn't
+    // have to hit the source game folder on every frame.
+    QWidget*    animationPanel     = nullptr;
+    QComboBox*  animModelCombo     = nullptr;
+    QListWidget* animAnimList      = nullptr;
+    QPushButton* animPlayBtn       = nullptr;
+    QCheckBox*  animLoopChk        = nullptr;
+    QLabel*     animFpsLabel       = nullptr;
+    QLabel*     animStatusLabel    = nullptr;
+
+    QTimer*     anim30FpsTimer     = nullptr; // 30 FPS step driver
+    bool        globalAnimationModeEnabled = false;
+    QString     globalObjectsQscPath;        // path to decompiled objects.qsc
+    QString     globalAnimsSourceDir;        // original D:\Software\IGI-Game\COMMON\ANIMS
+    QString     globalAnimsCacheDir;         // <CacheDir>/animation_anims
+    QString     globalModelsDir;             // LEVEL1\models
+    igi1conv::QscObjectSet animationSet;     // parsed HumanSoldier entries
+
     QTextEdit* consoleEdit;
     QString currentFile;
     QString currentExt;
@@ -3517,10 +4170,455 @@ private:
         if (graphToolbar) graphToolbar->hide();
         if (graphHexEditor) graphHexEditor->hide();
         if (imageEditor && imageEditor->toolsWidget) imageEditor->toolsWidget->hide();
+        if (animationPanel) animationPanel->hide();
         // Stop animation and reset play button
         if (modelViewer) {
             modelViewer->iffPause();
             if (iffBtnPlay) iffBtnPlay->setText("\u25b6");
+        }
+        if (anim30FpsTimer) anim30FpsTimer->stop();
+    }
+
+    // ── Animation mode (Mode 6) plumbing ────────────────────────────────────
+    //
+    // The Mode combo has at most 7 entries (0..6).  The "Animation"
+    // entry is gated by `globalAnimationModeEnabled` and is removed
+    // from the combo when the toggle is off so it never gets picked
+    // by accident.  The View > Animation menu entry is wired in the
+    // toggle handler.
+    void rebuildModeCombo() {
+        if (!viewModeCombo) return;
+        int prev = viewModeCombo->currentIndex();
+        viewModeCombo->blockSignals(true);
+        viewModeCombo->clear();
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
+        if (globalAnimationModeEnabled) viewModeCombo->addItem("Animation");
+        viewModeCombo->setCurrentIndex(qMin(prev, viewModeCombo->count() - 1));
+        viewModeCombo->blockSignals(false);
+    }
+
+    // Re-parse the decompiled objects.qsc and rebuild the model
+    // dropdown.  Called when the user picks a new file, on app start
+    // (if a path was saved), and from the "Reload Animation Set"
+    // menu item.  When the path is missing the helper auto-detects
+    // the level's objects.qsc / ANIMS / models folders and persists
+    // them so the user does not have to do three manual picks.
+    void loadAnimationSetFromQsc() {
+        if (globalObjectsQscPath.isEmpty() || !QFile::exists(globalObjectsQscPath)) {
+            // Try a few common locations before giving up.
+            QStringList candidates;
+            QString levelDir;
+            QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+            levelDir = QSettings(iniPath, QSettings::IniFormat).value("LevelPath", "").toString();
+            if (!levelDir.isEmpty()) {
+                candidates << (levelDir + "/objects.qsc")
+                           << (levelDir + "/OBJECTS.qsc");
+                QDir p = QDir(levelDir); p.cdUp();
+                if (p.exists("objects.qsc")) candidates << (p.absoluteFilePath("objects.qsc"));
+                // IGI1 stores a single objects.qsc per *mission* (not
+                // per level).  Scan the mission folder for any
+                // objects.qsc under any LEVEL*/ subfolder - the user
+                // may have set LevelPath=LEVEL6 but the file lives in
+                // LEVEL1/objects.qsc.
+                if (p.exists()) {
+                    QDirIterator it(p.absolutePath(),
+                                    QStringList() << "objects.qsc" << "OBJECTS.qsc",
+                                    QDir::Files, QDirIterator::Subdirectories);
+                    while (it.hasNext()) {
+                        QString p2 = it.next();
+                        if (!candidates.contains(p2)) candidates << p2;
+                    }
+                }
+            }
+            for (const QString& c : candidates) {
+                if (QFile::exists(c)) {
+                    globalObjectsQscPath = c;
+                    QSettings(iniPath, QSettings::IniFormat).setValue("ObjectsQscPath", c);
+                    logMessage("[INFO] Animation auto-detected objects.qsc: " + c);
+                    break;
+                }
+            }
+            if (globalObjectsQscPath.isEmpty() || !QFile::exists(globalObjectsQscPath)) {
+                logMessage("[WARN] Animation set: no objects.qsc set. Use Settings > Animation > Set Objects.qsc...");
+                if (animStatusLabel) animStatusLabel->setText("No objects.qsc set - use Settings > Animation");
+                return;
+            }
+        }
+        // Lazily auto-detect the ANIMS source folder + models folder if
+        // they're empty - this saves the user three extra dialog
+        // round-trips on first use.  We never overwrite an explicit
+        // setting.
+        autoDetectAnimationFolders();
+        QFile f(globalObjectsQscPath);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            logMessage("[ERROR] Animation set: cannot read " + globalObjectsQscPath);
+            return;
+        }
+        QString text = QString::fromUtf8(f.readAll());
+        f.close();
+        std::string err;
+        animationSet = igi1conv::QscObjectSet::parse(text.toStdString(), &err);
+        if (!err.empty()) {
+            logMessage(QString("[WARN] Animation set parse: %1").arg(QString::fromStdString(err)));
+        }
+        logMessage(QString("[INFO] Animation set: parsed %1 HumanSoldier entries from %2")
+            .arg(animationSet.entries.size())
+            .arg(globalObjectsQscPath));
+        populateAnimationModelCombo();
+    }
+
+    // Auto-detect the ANIMS source folder (e.g. <root>/IGI1/common/ANIMS)
+    // and the LEVEL models folder (e.g. <root>/IGI1/missions/<loc>/<LEVEL>/models)
+    // when the user hasn't picked them explicitly.  Uses the LevelPath
+    // already saved in igi1conv.ini as the anchor: the ANIMS folder is
+    // typically 4 levels up from a LEVEL folder (missions/location/LEVEL).
+    void autoDetectAnimationFolders() {
+        QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+        QSettings settings(iniPath, QSettings::IniFormat);
+        QString levelDir = settings.value("LevelPath", "").toString();
+
+        // ── Models folder ──────────────────────────────────────────────
+        if (globalModelsDir.isEmpty() || !QDir(globalModelsDir).exists()) {
+            QStringList cands;
+            if (!levelDir.isEmpty()) {
+                cands << (levelDir + "/models")
+                      << (levelDir + "/MODELS")
+                      << (levelDir + "/Models");
+            }
+            for (const QString& c : cands) {
+                if (QDir(c).exists()) {
+                    globalModelsDir = c;
+                    settings.setValue("ModelsDir", c);
+                    logMessage("[INFO] Animation auto-detected models folder: " + c);
+                    break;
+                }
+            }
+        }
+
+        // ── ANIMS source folder ────────────────────────────────────────
+        // IGI1 stores bone hierarchies at <root>/IGI1/common/ANIMS, where
+        // <root> is the parent of the missions folder.  We walk up from
+        // the LEVEL directory until we find an `ANIMS` sibling.
+        if (globalAnimsSourceDir.isEmpty() || !QDir(globalAnimsSourceDir).exists()) {
+            if (!levelDir.isEmpty()) {
+                QDir d(levelDir);
+                for (int i = 0; i < 6 && d.cdUp(); ++i) {
+                    QStringList tryNames = {"common/ANIMS", "Common/ANIMS", "COMMON/ANIMS", "common/anims", "ANIMS"};
+                    for (const QString& n : tryNames) {
+                        QString c = d.absoluteFilePath(n);
+                        if (QDir(c).exists()) {
+                            globalAnimsSourceDir = c;
+                            settings.setValue("AnimsSourceDir", c);
+                            logMessage("[INFO] Animation auto-detected ANIMS folder: " + c);
+                            goto doneAnims;
+                        }
+                    }
+                }
+                doneAnims:;
+            }
+        }
+
+        // ── Cache folder: keep the default if user didn't override ────
+        if (globalAnimsCacheDir.isEmpty()) {
+            globalAnimsCacheDir = globalCacheDir + "/animation_anims";
+            settings.setValue("AnimsCacheDir", globalAnimsCacheDir);
+        }
+    }
+
+    void populateAnimationModelCombo() {
+        if (!animModelCombo) return;
+        animModelCombo->blockSignals(true);
+        animModelCombo->clear();
+        auto ids = animationSet.modelIds();
+        for (const auto& id : ids) {
+            // Annotate the dropdown with the count of available
+            // animations so the user can see at a glance which models
+            // actually have animations attached.
+            auto anims = animationSet.animationsForModel(id);
+            animModelCombo->addItem(QString::fromStdString(id) +
+                QString("  (%1 anims)").arg(anims.size()));
+        }
+        animModelCombo->blockSignals(false);
+        if (animModelCombo->count() > 0) {
+            animModelCombo->setCurrentIndex(0);
+            onAnimationModelChanged(0);
+        } else {
+            // No entries - leave the Play button ENABLED so the user
+            // gets a helpful QMessageBox when they click it (instead
+            // of staring at a greyed-out button wondering why).
+            animPlayBtn->setEnabled(true);
+            animAnimList->clear();
+            if (animStatusLabel) {
+                if (animationSet.entries.empty()) {
+                    animStatusLabel->setText("No HumanSoldier entries - set objects.qsc");
+                } else {
+                    animStatusLabel->setText("No model IDs found in set");
+                }
+            }
+        }
+    }
+
+    // Slot: called when the user picks a different model in the
+    // dropdown.  Refreshes the animation listbox with the
+    // (boneHierarchy, standAnimation) pairs that belong to this model
+    // and enables the play button iff at least one animation is
+    // available.
+    void onAnimationModelChanged(int index) {
+        if (!animAnimList) return;
+        animAnimList->clear();
+        if (index < 0 || index >= animModelCombo->count()) {
+            animPlayBtn->setEnabled(false);
+            return;
+        }
+        QString label = animModelCombo->itemText(index);
+        // Strip the "(N anims)" suffix we appended in populateAnimationModelCombo.
+        int sp = label.indexOf("  (");
+        QString modelId = (sp > 0) ? label.left(sp) : label;
+        auto anims = animationSet.animationsForModel(modelId.toStdString());
+        for (const auto& a : anims) {
+            animAnimList->addItem(QString("bh=%1  anim=%2")
+                .arg(a.boneHierarchy, 3, 10, QChar('0'))
+                .arg(a.standAnimation));
+        }
+        animPlayBtn->setEnabled(anims.size() > 0);
+        if (anims.empty()) {
+            animStatusLabel->setText("No animations for this model");
+        } else {
+            animStatusLabel->setText("");
+        }
+    }
+
+    // Pre-extract every 000.IFF..006.IFF (or 3-digit) file from the
+    // ANIMS source folder into the temp cache so playback doesn't
+    // touch the source folder.  The extract is a plain QFile::copy
+    // because the IFF files are not packed - they are already loose
+    // on disk in IGI 1's game tree.
+    void preExtractAllAnims() {
+        if (globalAnimsSourceDir.isEmpty() || !QDir(globalAnimsSourceDir).exists()) {
+            logMessage("[WARN] ANIMS source folder is not set. Use Settings > Animation.");
+            return;
+        }
+        QDir srcDir(globalAnimsSourceDir);
+        QStringList filters; filters << "*.IFF" << "*.iff" << "*.BFF" << "*.bff";
+        QFileInfoList list = srcDir.entryInfoList(filters, QDir::Files);
+        if (list.isEmpty()) {
+            logMessage("[WARN] No IFF files found in " + globalAnimsSourceDir);
+            return;
+        }
+        QDir().mkpath(globalAnimsCacheDir);
+        int copied = 0, skipped = 0;
+        for (const QFileInfo& fi : list) {
+            QString dst = globalAnimsCacheDir + "/" + fi.fileName();
+            if (QFile::exists(dst)) { ++skipped; continue; }
+            if (QFile::copy(fi.absoluteFilePath(), dst)) ++copied;
+        }
+        logMessage(QString("[INFO] Pre-extract ANIMS: %1 copied, %2 already cached, %3 total (cache=%4)")
+            .arg(copied).arg(skipped).arg(list.size()).arg(globalAnimsCacheDir));
+    }
+
+    // Slot: green Play button.  Looks up the MEF model on disk (with
+    // 4 candidate extensions), then loads the bone-hierarchy IFF
+    // (000.IFF, 001.IFF, ..., in the cache) and asks the model
+    // viewer to play the requested clip.
+    // Right-click "Play Animation" on a .MEF file: auto-select this
+    // model in the Animation panel, switch to Animation mode, and list
+    // all available animations for it from the parsed objects.qsc set.
+    // If the model isn't in the set (e.g. it's not a HumanSoldier),
+    // we still load it and let the user pick an animation manually.
+    void playAnimationForMef(const QString& path) {
+        QString modelId = QFileInfo(path).completeBaseName();
+        // Switch to Animation mode
+        if (viewModeCombo) {
+            viewModeCombo->setCurrentIndex(6);
+        }
+        // Try to find this modelId in the animation set and select it
+        if (!animationSet.entries.empty()) {
+            for (int i = 0; i < animModelCombo->count(); ++i) {
+                QString label = animModelCombo->itemText(i);
+                int sp = label.indexOf("  (");
+                QString id = (sp > 0) ? label.left(sp) : label;
+                if (id == modelId) {
+                    animModelCombo->setCurrentIndex(i);
+                    break;
+                }
+            }
+        }
+        // Load the MEF directly in the 3D viewer
+        if (modelViewer) {
+            modelViewer->loadModel(path);
+            modelViewer->show();
+            if (animationPanel) animationPanel->show();
+        }
+        logMessage("[INFO] Play Animation: loaded " + modelId + " - pick an animation from the list and click Play");
+        if (animStatusLabel) animStatusLabel->setText("Pick an animation and click Play");
+    }
+
+    void onAnimationPlayClicked() {
+        if (!animModelCombo || !animAnimList) return;
+        // Lazy: if the set is empty (e.g. the user just enabled the
+        // mode and never set a path), try auto-detect one more time
+        // before giving up.
+        if (animationSet.entries.empty()) {
+            loadAnimationSetFromQsc();
+            if (animationSet.entries.empty()) {
+                animStatusLabel->setText("Set objects.qsc in Settings > Animation");
+                QMessageBox::information(this, "Animation Mode",
+                    "No HumanSoldier entries loaded.\n\n"
+                    "Open Settings > Animation and pick:\n"
+                    "  - objects.qsc (decompiled from objects.qvm)\n"
+                    "  - common/ANIMS folder (bone hierarchies)\n"
+                    "  - LEVEL/models folder (MEF bodies)\n\n"
+                    "Or set a level first via Settings > Level, then "
+                    "toggle Animation mode - the paths are auto-detected.");
+                return;
+            }
+        }
+        int mi = animModelCombo->currentIndex();
+        int li = animAnimList->currentRow();
+        if (mi < 0 || li < 0) {
+            animStatusLabel->setText("Pick a model + animation first");
+            return;
+        }
+        QString label = animModelCombo->itemText(mi);
+        int sp = label.indexOf("  (");
+        QString modelId = (sp > 0) ? label.left(sp) : label;
+        auto anims = animationSet.animationsForModel(modelId.toStdString());
+        if (li >= (int)anims.size()) return;
+        int bh = anims[li].boneHierarchy;
+        int sa = anims[li].standAnimation;
+        animStatusLabel->setText(QString("Loading %1 / bh=%2 / anim=%3 ...")
+            .arg(modelId).arg(bh).arg(sa));
+
+        // Resolve MEF path (search 4 extensions + LEVEL1/models)
+        QStringList modelDirs;
+        if (!globalModelsDir.isEmpty()) modelDirs << globalModelsDir;
+        QStringList mefExts = {".mef", ".MEF", ".mex", ".MEX"};
+        QString mefPath;
+        for (const QString& d : modelDirs) {
+            for (const QString& e : mefExts) {
+                QString p = d + "/" + modelId + e;
+                if (QFile::exists(p)) { mefPath = p; break; }
+            }
+            if (!mefPath.isEmpty()) break;
+        }
+        if (mefPath.isEmpty()) {
+            animStatusLabel->setText("MEF not found: " + modelId);
+            logMessage("[WARN] Animation: no MEF/ME model for " + modelId);
+            return;
+        }
+
+        // Resolve IFF path.  3-digit padded name (000.IFF, 001.IFF, ...).
+        QString bhName = QString("%1").arg(bh, 3, 10, QChar('0'));
+        QStringList iffDirs;
+        if (!globalAnimsCacheDir.isEmpty() && QDir(globalAnimsCacheDir).exists()) iffDirs << globalAnimsCacheDir;
+        if (!globalAnimsSourceDir.isEmpty() && QDir(globalAnimsSourceDir).exists()) iffDirs << globalAnimsSourceDir;
+        QStringList iffExts = {".IFF", ".iff", ".BFF", ".bff"};
+        QString iffPath;
+        for (const QString& d : iffDirs) {
+            for (const QString& e : iffExts) {
+                QString p = d + "/" + bhName + e;
+                if (QFile::exists(p)) { iffPath = p; break; }
+            }
+            if (!iffPath.isEmpty()) break;
+        }
+        if (iffPath.isEmpty()) {
+            animStatusLabel->setText("IFF not found: " + bhName);
+            logMessage("[WARN] Animation: no IFF bone file for bh=" + bhName);
+            return;
+        }
+
+        // Auto-apply textures for the MEF, so the user sees the
+        // proper textures (like in 3D mode's "Apply Textures").
+        // This is a non-blocking call: we copy any pre-existing
+        // bundled textures from the cache to the model's folder
+        // synchronously, but if the bundle is missing we kick off
+        // a background `mef bundle` and let it finish asynchronously
+        // (the model renders without textures while it runs).
+        QString mefBase = QFileInfo(mefPath).completeBaseName();
+        QString bundleDir = globalCacheDir + "/bundle/" + mefBase;
+        if (!QDir(bundleDir).exists()
+            && !globalLevelDatPath.isEmpty()
+            && !globalTextureDir.isEmpty()) {
+            logMessage("[INFO] Animation: pre-extracting textures for " + mefBase + "...");
+            QProcess::execute(qApp->applicationFilePath(),
+                QStringList() << "mef" << "bundle" << mefPath
+                              << "-o" << (globalCacheDir + "/bundle")
+                              << "--dat" << globalLevelDatPath
+                              << "--texdir" << globalTextureDir
+                              << "--no-obj");
+        }
+
+        // Load the MEF first (so the body is in the 3D viewer), then
+        // load the IFF on top so the bone-driven skeleton animation
+        // can drive the model.  loadIff() calls IFF_Parse and flips
+        // the viewer into IFF-animation mode.
+        if (modelViewer) {
+            modelViewer->loadModel(mefPath);
+            // After loadModel, the viewer holds the MEF mesh but
+            // isIffAnimation is false.  loadIff() then swaps in the
+            // skeleton, drives the body bones, and starts the
+            // 30 FPS timer.
+            modelViewer->loadIff(iffPath);
+
+            // Debug: log bone count comparison and verify skeleton mapping
+            logMessage(QString("[DBG] MEF bones: %1, IFF bones: %2, restMesh verts: %3")
+                .arg(modelViewer->mefBoneWorldPos.size())
+                .arg(modelViewer->currentIff.skeleton.bone_count)
+                .arg(modelViewer->restMesh.size()));
+            if (!modelViewer->mefBoneWorldPos.empty() && !modelViewer->iffRestBoneMats.empty()) {
+                int n = std::min((int)modelViewer->mefBoneWorldPos.size(),
+                                 (int)modelViewer->iffRestBoneMats.size());
+                QVector3D iffRoot = modelViewer->iffRestBoneMats[0].map(QVector3D(0,0,0));
+                glm::vec3 mefRoot = modelViewer->mefBoneWorldPos[0] / 40.96f;
+                QVector3D rootOffset(mefRoot.x - iffRoot.x(), mefRoot.y - iffRoot.y(), mefRoot.z - iffRoot.z());
+                int mismatchCount = 0;
+                float maxDiff = 0.0f;
+                int maxDiffBone = -1;
+                for (int i = 0; i < n; ++i) {
+                    QVector3D iffPos = modelViewer->iffRestBoneMats[i].map(QVector3D(0,0,0));
+                    glm::vec3 mefPosG = modelViewer->mefBoneWorldPos[i] / 40.96f;
+                    QVector3D mefPos(mefPosG.x, mefPosG.y, mefPosG.z);
+                    float diff = (mefPos - (iffPos + rootOffset)).length();
+                    if (diff > maxDiff) { maxDiff = diff; maxDiffBone = i; }
+                    if (diff > 0.5f) mismatchCount++;
+                    if (i < 5) {
+                        logMessage(QString("[DBG] bone %1: MEF=(%2,%3,%4) IFF=(%5,%6,%7) d=%8")
+                            .arg(i).arg(mefPos.x(),0,'f',3).arg(mefPos.y(),0,'f',3).arg(mefPos.z(),0,'f',3)
+                            .arg(iffPos.x(),0,'f',3).arg(iffPos.y(),0,'f',3).arg(iffPos.z(),0,'f',3)
+                            .arg(diff,0,'f',3));
+                    }
+                }
+                if (mismatchCount > 0) {
+                    logMessage(QString("[WARN] Bone mapping mismatch: %1 bones differ by >0.5 (worst bone %2 diff %3)")
+                        .arg(mismatchCount).arg(maxDiffBone).arg(maxDiff,0,'f',3));
+                } else {
+                    logMessage(QString("[DBG] Bone mapping OK, max diff %1 (bone %2)").arg(maxDiff,0,'f',3).arg(maxDiffBone));
+                }
+            }
+            // Find the clip index whose animation_id == sa and play it.
+            int clipCount = modelViewer->iffGetClipCount();
+            for (int i = 0; i < clipCount; ++i) {
+                if (modelViewer->iffGetClipAnimId(i) == sa) {
+                    modelViewer->playClip(i);
+                    animStatusLabel->setText(QString("Playing %1 / bh=%2 / anim=%3 (clip %4/%5) 30 FPS")
+                        .arg(modelId).arg(bh).arg(sa).arg(i+1).arg(clipCount));
+                    logMessage(QString("[INFO] Animation playing: model=%1 bh=%2 anim=%3 clip=%4")
+                        .arg(modelId).arg(bh).arg(sa).arg(i));
+                    return;
+                }
+            }
+            // If the requested clip id isn't present, fall back to
+            // clip 0 so the user sees something animate (better UX
+            // than an empty screen).
+            if (clipCount > 0) {
+                modelViewer->playClip(0);
+                animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
+                    .arg(sa));
+                logMessage(QString("[WARN] Animation: anim %1 not in %2, falling back to clip 0")
+                    .arg(sa).arg(bhName));
+            } else {
+                animStatusLabel->setText("No clips in IFF: " + bhName);
+            }
         }
     }
 
@@ -3944,6 +5042,15 @@ private:
         } else if (ext == "qsc" || ext == "qas") {
             menu.addAction("Compile",        [this, path]() { loadFile(path); executeCommand("qsc compile"); });
             menu.addAction("Validate",       [this, path]() { loadFile(path); executeCommand("qsc validate"); });
+            if (globalAnimationModeEnabled) {
+                menu.addAction("Use as Animation objects.qsc", [this, path]() {
+                    globalObjectsQscPath = path;
+                    QString iniPath = QCoreApplication::applicationDirPath() + "/igi1conv.ini";
+                    QSettings(iniPath, QSettings::IniFormat).setValue("ObjectsQscPath", path);
+                    logMessage("[INFO] Animation source set: " + path);
+                    loadAnimationSetFromQsc();
+                });
+            }
         } else if (ext == "qvm") {
             menu.addAction("Decompile",      [this, path]() { loadFile(path); executeCommand("qvm decompile"); });
             menu.addAction("Disassemble",    [this, path]() { loadFile(path); executeCommand("qvm disasm"); });
@@ -3962,6 +5069,14 @@ private:
             QString cmdPrefix = ext;
 
             if (isBinary) {
+                // Play Animation: auto-select this MEF in Animation mode
+                if (globalAnimationModeEnabled) {
+                    menu.addAction("Play Animation", [this, path]() {
+                        playAnimationForMef(path);
+                    });
+                    menu.addSeparator();
+                }
+
                 QMenu* infoMenu = menu.addMenu("Details");
                 infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
                 infoMenu->addAction("Dump", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " dump"); });
@@ -4116,6 +5231,22 @@ private:
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("fnt info"); });
         } else if (ext == "iff") {
             menu.addAction("Info",       [this, path]() { loadFile(path); executeCommand("iff info"); });
+            if (globalAnimationModeEnabled) {
+                menu.addAction("Pre-Extract to Animation Cache", [this, path]() {
+                    if (globalAnimsCacheDir.isEmpty()) {
+                        logMessage("[WARN] Animation cache folder not set. Use Settings > Animation.");
+                        return;
+                    }
+                    QDir().mkpath(globalAnimsCacheDir);
+                    QString dst = globalAnimsCacheDir + "/" + QFileInfo(path).fileName();
+                    if (QFile::exists(dst)) QFile::remove(dst);
+                    if (QFile::copy(path, dst)) {
+                        logMessage("[INFO] Pre-extracted " + path + " -> " + dst);
+                    } else {
+                        logMessage("[ERROR] Failed to copy " + path + " -> " + dst);
+                    }
+                });
+            }
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -4286,6 +5417,15 @@ private:
                     iffMediaBar->hide();
                 }
             }
+        } else if (mode == 6) { // Animation
+            // Mode 6 is a "panel-driven" mode.  The current file
+            // is not used directly; instead, the user picks a
+            // (modelId, anim) pair from the Animation panel and the
+            // slot onAnimationPlayClicked drives the MEF + IFF load.
+            // We still show the modelViewer (it's where the rendered
+            // 3D scene lives) but we don't call loadModel here.
+            modelViewer->show();
+            if (animationPanel) animationPanel->show();
         }
     }
 
