@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.4] - 2026-06-22
+
+### Added
+- **Animation mode (Mode 6)**: New GUI mode that plays IFF bone animations on textured 3D MEF models. Gated by Settings > Animation toggle. Includes:
+  - QSC object parser (`qsc_object_parser.*`) that reverse-engineers decompiled `objects.qsc` to extract HumanSoldier Task_New entries with model ID, bone hierarchy, and stand animation.
+  - Auto-detection of `objects.qsc`, `common/ANIMS` folder, and `LEVEL/models` folder when a level is selected (Settings > Level).
+  - Animation panel with Model dropdown, Animations listbox, Play button, Loop checkbox, and FPS input textbox (configurable 1-120 FPS).
+  - Skeletal skinning that deforms the textured MEF mesh using IFF bone transforms each frame (30+ FPS).
+  - Right-click "Play Animation" on binary .MEF/.MEX files.
+  - `P` key to toggle rest-pose skinning for debugging; `B` key to toggle bone skeleton overlay.
+  - Full 33-bone mapping verification logged to detect MEF/IFF skeleton mismatches.
+- **`ComputeBoneWorldPositions()`** exposed in `mef_native.h` for GUI skinning.
+
+### Fixed
+- **Animation root-offset mismatch**: IFF places root at (0,0,0) but MEF mesh uses (0,0,3990.4). The skinning now adds the root translation back so the deformed model stays in the MEF viewer frame, preventing detached body parts.
+- **Animation playback speed**: Timer increment was hardcoded at 16ms per tick regardless of actual timer interval (33ms). Now uses `1000.0f / fps` for correct speed at any FPS.
+- **Bone overlay visibility**: Bone skeleton now renders on top of the 3D model (depth test disabled) with larger joint dots (radius 0.03 vs 0.012). B key now also calls `updateIffSkeleton()` so overlay appears immediately.
+
+### Changed
+- **Version bumped to 1.9.4**.
+- **Animation FPS** now configurable via a QLineEdit in the Animation panel (default 30).
+
 ## [1.9.3] - 2026-06-22
 
 ### Changed

@@ -132,6 +132,7 @@ public:
         std::shared_ptr<QOpenGLTexture> texture;
         unsigned int drawMode = 0x0004; // GL_TRIANGLES
         bool useOverrideColor = false;
+        bool disableDepthTest = false; // render on top (bones overlay)
         QVector4D overrideColor = QVector4D(1, 1, 1, 1);
     };
 
@@ -337,13 +338,14 @@ public:
             sm.count = boneLineCount;
             sm.drawMode = 0x0001; // GL_LINES
             sm.useOverrideColor = true;
+            sm.disableDepthTest = true;
             sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 1.0f);
             submeshes.push_back(sm);
         }
 
         // Joint DOTS as tiny cubes
         int jointStart = vertices.size() / 3;
-        float r = 0.012f;
+        float r = 0.03f;
         for (int i = 0; i < skel.bone_count; ++i) {
             float cx = (bonePos[i].x()-center.x())/extent;
             float cy = (bonePos[i].y()-center.y())/extent;
@@ -375,6 +377,7 @@ public:
             jsm.count = skel.bone_count * 36;
             jsm.drawMode = 0x0004;
             jsm.useOverrideColor = true;
+            jsm.disableDepthTest = true;
             jsm.overrideColor = QVector4D(0.3f, 0.9f, 1.0f, 1.0f);
             submeshes.push_back(jsm);
         }
@@ -397,6 +400,7 @@ public:
             xsm.count = 6;
             xsm.drawMode = 0x0001;
             xsm.useOverrideColor = true;
+            xsm.disableDepthTest = true;
             xsm.overrideColor = QVector4D(1.0f, 1.0f, 0.2f, 1.0f);
             submeshes.push_back(xsm);
         }
@@ -414,9 +418,9 @@ public:
         for (int i = 0; i < skel.bone_count; ++i)
             bonePos[i] = transforms[i].map(QVector3D(0,0,0)) + rootOffset;
 
-        // Find bounding box for normalization (use the MEF's existing center/scale)
         float cx = modelCx, cy = modelCy, cz = modelCz, ext = modelScale;
 
+        // ── Bone lines ────────────────────────────────────────────────────
         int boneStart = vertices.size() / 3;
         int boneLineCount = 0;
         for (int i = 0; i < skel.bone_count; ++i) {
@@ -439,9 +443,47 @@ public:
             sm.count = boneLineCount;
             sm.drawMode = 0x0001; // GL_LINES
             sm.useOverrideColor = true;
-            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 0.7f);
+            sm.disableDepthTest = true;
+            sm.overrideColor = QVector4D(1.0f, 0.55f, 0.0f, 0.9f);
             submeshes.push_back(sm);
         }
+
+        // ── Joint dots (small cubes as GL_TRIANGLES) ──────────────────────
+        int jointStart = vertices.size() / 3;
+        float r = 0.03f; // larger joint radius so dots are visible
+        for (int i = 0; i < skel.bone_count; ++i) {
+            float jx = (bonePos[i].x()-cx)/ext;
+            float jy = (bonePos[i].y()-cy)/ext;
+            float jz = (bonePos[i].z()-cz)/ext;
+            QVector3D o(jx, jy, jz);
+            QVector3D corner[8] = {
+                o+QVector3D(-r,-r,-r), o+QVector3D(r,-r,-r),
+                o+QVector3D(r, r,-r),  o+QVector3D(-r, r,-r),
+                o+QVector3D(-r,-r, r), o+QVector3D(r,-r, r),
+                o+QVector3D(r, r, r),  o+QVector3D(-r, r, r)
+            };
+            int idx[36] = {0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1,
+                           1,5,6,1,6,2, 2,6,7,2,7,3, 0,3,7,0,7,4};
+            QVector3D fn[6] = {
+                {0,0,-1},{0,0,1},{0,-1,0},{1,0,0},{0,1,0},{-1,0,0}};
+            for (int f = 0; f < 6; ++f) {
+                for (int t = 0; t < 6; ++t) {
+                    int vi = idx[f*6+t];
+                    QVector3D p = corner[vi];
+                    vertices.push_back(p.x()); vertices.push_back(p.y()); vertices.push_back(p.z());
+                    uvs.push_back(0); uvs.push_back(0);
+                    normals.push_back(fn[f].x()); normals.push_back(fn[f].y()); normals.push_back(fn[f].z());
+                }
+            }
+        }
+        SubMesh jsm;
+        jsm.startIndex = jointStart;
+        jsm.count = skel.bone_count * 36;
+        jsm.drawMode = 0x0004; // GL_TRIANGLES
+        jsm.useOverrideColor = true;
+        jsm.disableDepthTest = true;
+        jsm.overrideColor = QVector4D(0.3f, 0.9f, 1.0f, 1.0f);
+        submeshes.push_back(jsm);
     }
 
     QTextEdit* infoOverlay;
@@ -473,6 +515,7 @@ public:
     float animTime = 0.0f;
     int currentClipIndex = 0;
     bool iffPlaying = false;
+    int animationFps = 30;       // configurable playback FPS (1-120)
 
     // ── Skeletal skinning state ────────────────────────────────────────
     // When a MEF bone model (type1) is loaded and an IFF is loaded on
@@ -510,7 +553,7 @@ public:
     void iffPlay() {
         if (!isIffAnimation || currentIff.clips.empty()) return;
         iffPlaying = true;
-        animTimer->start(16);
+        animTimer->start(1000 / animationFps);
     }
     void iffPause() {
         iffPlaying = false;
@@ -590,7 +633,7 @@ public:
         updateIffSkeleton();
         update();
         iffPlaying = true;
-        if (animTimer) animTimer->start(33); // ~30 FPS for smooth playback
+        if (animTimer) animTimer->start(1000 / animationFps); // ~30 FPS for smooth playback
         if (onIffTimeChanged)
             onIffTimeChanged(0.0f, currentIff.clips[idx].duration, idx, (int)currentIff.clips.size());
     }
@@ -625,7 +668,7 @@ public:
             computeIffRestBonePos();
             updateIffSkeleton();
             iffPlaying = true;
-            if (animTimer) animTimer->start(33); // 30 FPS
+            if (animTimer) animTimer->start(1000 / animationFps); // 30 FPS
             if (!currentIff.clips.empty() && onIffTimeChanged)
                 onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
         } else {
@@ -668,6 +711,15 @@ public:
     QVector3D worldToNormalized(float x, float y, float z) {
         return QVector3D((x - modelCx)/modelScale, (y - modelCy)/modelScale, (z - modelCz)/modelScale);
     }
+
+    void setAnimationFps(int fps) {
+        fps = std::clamp(fps, 1, 120);
+        if (animationFps == fps) return;
+        animationFps = fps;
+        if (animTimer && animTimer->isActive()) {
+            animTimer->start(1000 / animationFps);
+        }
+    }
     
     ModelViewer(QWidget* parent = nullptr) : QOpenGLWidget(parent) {
         setFocusPolicy(Qt::StrongFocus);
@@ -676,7 +728,7 @@ public:
         connect(animTimer, &QTimer::timeout, this, [this]() {
             if (isIffAnimation && currentIff.valid && !currentIff.clips.empty()) {
                 const auto& clip = currentIff.clips[currentClipIndex];
-                animTime += 16.0f; // timer ticks every 16ms
+                animTime += 1000.0f / animationFps; // advance one frame's worth of time
                 if (animTime >= clip.duration) {
                     animTime = 0.0f;
                     currentClipIndex = (currentClipIndex + 1) % currentIff.clips.size();
@@ -711,7 +763,7 @@ public:
         addKey(Qt::Key_G, [this]() { showGrid = !showGrid; update(); });
         addKey(Qt::Key_R, [this]() { rotX=rotY=rotZ=0; transX=transY=0; zoom=3.0f; update(); updateCoordsOverlay(); });
         addKey(Qt::Key_I, [this]() { infoOverlay->setVisible(!infoOverlay->isVisible()); });
-        addKey(Qt::Key_B, [this]() { showBonesOverlay = !showBonesOverlay; update(); });
+        addKey(Qt::Key_B, [this]() { showBonesOverlay = !showBonesOverlay; updateIffSkeleton(); update(); });
         addKey(Qt::Key_P, [this]() {
             showRestPose = !showRestPose;
             updateIffSkeleton();
@@ -1019,7 +1071,7 @@ public:
 
                 if (!currentIff.clips.empty()) {
                     iffPlaying = true;
-                    animTimer->start(16);
+                    animTimer->start(1000 / animationFps);
                     if (onIffTimeChanged) onIffTimeChanged(0.0f, currentIff.clips[0].duration, 0, (int)currentIff.clips.size());
                 }
             }
@@ -1485,6 +1537,8 @@ protected:
         } else {
             for (const auto& sm : submeshes) {
                 if (sm.count == 0) continue;
+                if (sm.disableDepthTest)
+                    glDisable(GL_DEPTH_TEST);
                 if (sm.texture && sm.texture->isCreated()) {
                     sm.texture->bind();
                     program.setUniformValue("hasTexture", true);
@@ -1500,6 +1554,8 @@ protected:
                     program.setUniformValue("useOverrideColor", false);
                 }
                 glDrawArrays(sm.drawMode, sm.startIndex, sm.count);
+                if (sm.disableDepthTest)
+                    glEnable(GL_DEPTH_TEST);
             }
         }
 
@@ -3414,7 +3470,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.9.3\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.9.4\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
@@ -3861,8 +3917,17 @@ public:
         animLoopChk->setMaximumHeight(20);
         animLayout->addWidget(animLoopChk);
 
-        animFpsLabel = new QLabel("30 FPS");
-        animFpsLabel->setToolTip("Animation playback is locked to 30 FPS for smooth display");
+        animLayout->addWidget(new QLabel("FPS:"));
+        animFpsInput = new QLineEdit("30");
+        animFpsInput->setMaximumWidth(40);
+        animFpsInput->setMaximumHeight(20);
+        animFpsInput->setAlignment(Qt::AlignCenter);
+        animFpsInput->setStyleSheet("QLineEdit { background:#333; color:#ddd; border:1px solid #555; border-radius:3px; padding:1px 2px; font-family:Consolas; font-size:10px; }");
+        animFpsInput->setToolTip("Animation playback FPS (1-120)");
+        animLayout->addWidget(animFpsInput);
+
+        animFpsLabel = new QLabel("FPS");
+        animFpsLabel->setToolTip("Animation playback frames per second");
         animFpsLabel->setMaximumHeight(18);
         animLayout->addWidget(animFpsLabel);
 
@@ -3883,6 +3948,16 @@ public:
                 this, &MainWindow::onAnimationPlayClicked);
         connect(animAnimList, &QListWidget::itemDoubleClicked,
                 this, &MainWindow::onAnimationPlayClicked);
+        connect(animFpsInput, &QLineEdit::editingFinished, this, [this]() {
+            bool ok = false;
+            int fps = animFpsInput->text().toInt(&ok);
+            if (ok && modelViewer) {
+                modelViewer->setAnimationFps(fps);
+                animFpsInput->setText(QString::number(modelViewer->animationFps));
+                if (g_logger)
+                    g_logger(QString("[INFO] Animation FPS set to %1").arg(modelViewer->animationFps), LOG_INFO);
+            }
+        });
 
         viewerToolbarLayout->addWidget(iffMediaBar);
 
@@ -4140,6 +4215,7 @@ private:
     QListWidget* animAnimList      = nullptr;
     QPushButton* animPlayBtn       = nullptr;
     QCheckBox*  animLoopChk        = nullptr;
+    QLineEdit*  animFpsInput       = nullptr;
     QLabel*     animFpsLabel       = nullptr;
     QLabel*     animStatusLabel    = nullptr;
 
@@ -4600,8 +4676,8 @@ private:
             for (int i = 0; i < clipCount; ++i) {
                 if (modelViewer->iffGetClipAnimId(i) == sa) {
                     modelViewer->playClip(i);
-                    animStatusLabel->setText(QString("Playing %1 / bh=%2 / anim=%3 (clip %4/%5) 30 FPS")
-                        .arg(modelId).arg(bh).arg(sa).arg(i+1).arg(clipCount));
+                    animStatusLabel->setText(QString("Playing %1 / bh=%2 / anim=%3 (clip %4/%5) %6 FPS")
+                        .arg(modelId).arg(bh).arg(sa).arg(i+1).arg(clipCount).arg(modelViewer->animationFps));
                     logMessage(QString("[INFO] Animation playing: model=%1 bh=%2 anim=%3 clip=%4")
                         .arg(modelId).arg(bh).arg(sa).arg(i));
                     return;
