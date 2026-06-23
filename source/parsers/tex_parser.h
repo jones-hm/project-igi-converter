@@ -44,3 +44,18 @@ int TEX_ExportTGA(const TEXFile& tex, const std::string& filepath, const std::st
 // Write a single TEXImage as a TGA file to an explicit path.
 // Returns true on success.
 bool TEX_WriteTGA(const std::string& path, const TEXImage& img);
+
+// Write a 32-byte LOOP container (.tex / .spr / .pic) from raw RGBA8888
+// pixels.  `mode` selects the pixel format:
+//   2 = RGB565 / ARGB1555 (2 bytes/pixel - typical for in-game .tex)
+//   3 = ARGB8888          (4 bytes/pixel - typical for in-game .spr/.pic)
+// `version` defaults to 11 which is the modern mipmap-chain variant.
+// Width and height are stored as uint16 in the header, so anything
+// larger than 65535 is rejected.  Returns true on success.
+//
+// This is the shared encoder used by the GUI ("Convert to TEX" / "Convert
+// to .spr" right-click entries) and the `tex to-spr` CLI subcommand, so
+// both paths produce bit-identical files from the same RGBA input.
+bool TEX_WriteLOOP(const std::string& path,
+                   const uint8_t* rgba, int width, int height,
+                   int mode = 2, int version = 11);

@@ -14,9 +14,12 @@
 #include "tex_parser.h"
 #include "../logger.h"
 
-#include <fstream>
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Constants (match Python DEPTH / ALPHA dicts)
@@ -365,4 +368,100 @@ int TEX_ExportTGA(const TEXFile& tex, const std::string& filepath,
 
 bool TEX_WriteTGA(const std::string& path, const TEXImage& img) {
     return WriteTGA(path, img);
+}
+
+bool TEX_WriteLOOP(const std::string& path,
+                   const uint8_t* rgba, int width, int height,
+                   int mode, int version)
+{
+    if (!rgba || width <= 0 || height <= 0) return false;
+    if (width > 65535 || height > 65535) return false;  // header is uint16
+    if (mode != 2 && mode != 3) return false;          // only 16/32 bpp supported
+
+    // 32-byte LOOP header (matches the layout the game reads):
+    //   off  0 : 4s  signature "LOOP"
+    //   off  4 : I   version
+    //   off  8 : I   mode      (2 = RGB565/ARGB1555, 3 = ARGB8888)
+    //   off 12 : I   multi     (0 for single image)
+    //   off 16 : I   reserved  (0)
+    //   off 20 : H   _1        (5 in every original game file)
+    //   off 22 : H   _2        (redundant width copy)
+    //   off 24 : H   _3        (redundant height copy)
+    //   off 26 : H   width
+    //   off 28 : H   height
+    //   off 30 : H   depthBytes(2 for mode 2, 4 for mode 3)
+    uint8_t hdr[32] = {0};
+    hdr[0] = 'L'; hdr[1] = 'O'; hdr[2] = 'O'; hdr[3] = 'P';
+    uint32_t v = static_cast<uint32_t>(version);
+    uint32_t m = static_cast<uint32_t>(mode);
+    uint32_t zero = 0;
+    uint16_t w16 = static_cast<uint16_t>(width);
+    uint16_t h16 = static_cast<uint16_t>(height);
+    uint16_t one = 5;
+    uint16_t depthBytes = (mode == 3) ? 4 : 2;
+    std::memcpy(hdr +  4, &v, 4);
+    std::memcpy(hdr +  8, &m, 4);
+    std::memcpy(hdr + 12, &zero, 4);
+    std::memcpy(hdr + 16, &zero, 4);
+    std::memcpy(hdr + 20, &one, 2);
+    std::memcpy(hdr + 22, &w16, 2);
+    std::memcpy(hdr + 24, &h16, 2);
+    std::memcpy(hdr + 26, &w16, 2);
+    std::memcpy(hdr + 28, &h16, 2);
+    std::memcpy(hdr + 30, &depthBytes, 2);
+
+    // Open output.  We do a single buffered write so a partial failure
+    // leaves either a complete file or none at all (no half-written
+    // corrupt LOOPs on disk).
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+    if (!out) return false;
+
+    if (mode == 3) {
+        // ARGB8888 - LOOP stores BGRA byte order (R and B swapped vs Qt's
+        // Format_ARGB32), matching what the game reads on little-endian
+        // Windows.
+        std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                size_t i = (static_cast<size_t>(y) * width + x) * 4;
+                uint8_t r = rgba[i + 0];
+                uint8_t g = rgba[i + 1];
+                uint8_t b = rgba[i + 2];
+                uint8_t a = rgba[i + 3];
+                pixels[i + 0] = b;
+                pixels[i + 1] = g;
+                pixels[i + 2] = r;
+                pixels[i + 3] = a;
+            }
+        }
+        out.write(reinterpret_cast<const char*>(pixels.data()),
+                  static_cast<std::streamsize>(pixels.size()));
+    } else {
+        // ARGB1555 - 2 bytes per pixel: bit15 = alpha (1 = opaque),
+        // bits 14-10 = R5, 9-5 = G5, 4-0 = B5.
+        std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 2);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                size_t i = (static_cast<size_t>(y) * width + x) * 4;
+                uint8_t r = rgba[i + 0];
+                uint8_t g = rgba[i + 1];
+                uint8_t b = rgba[i + 2];
+                uint8_t a = rgba[i + 3];
+                uint16_t r5 = (r >> 3) & 0x1F;
+                uint16_t g5 = (g >> 3) & 0x1F;
+                uint16_t b5 = (b >> 3) & 0x1F;
+                uint16_t v16 = static_cast<uint16_t>(0x8000u |
+                                (a >= 128 ? 0x8000u : 0) |
+                                (r5 << 10) | (g5 << 5) | b5);
+                size_t o = (static_cast<size_t>(y) * width + x) * 2;
+                pixels[o + 0] = static_cast<uint8_t>(v16 & 0xFF);
+                pixels[o + 1] = static_cast<uint8_t>((v16 >> 8) & 0xFF);
+            }
+        }
+        out.write(reinterpret_cast<const char*>(pixels.data()),
+                  static_cast<std::streamsize>(pixels.size()));
+    }
+    return out.good();
 }

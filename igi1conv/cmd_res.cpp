@@ -163,18 +163,25 @@ int cmd_res(int argc, char** argv)
         }
         std::string dir     = argv[2];
         std::string out_res = argv[3];
-        
-        const char* prefix_c = opt_val(argc, argv, "--prefix");
-        std::string prefix = prefix_c ? prefix_c : "";
-
-        // Normalize separators for RES_GenerateQSC
-        for (auto& c : out_res) if (c == '\\') c = '/';
 
         if (!std::filesystem::is_directory(dir))
         {
             std::cerr << "res pack: not a directory: " << dir << "\n";
             return 2;
         }
+
+        // If no prefix is supplied, default to the input directory name.
+        // RES_Compile resolves LOCAL:prefix/file relative to the QSC's parent
+        // directory, so the prefix must match the folder name on disk or the
+        // compiler will skip every file and produce an empty 20-byte ILFF header.
+        const char* prefix_c = opt_val(argc, argv, "--prefix");
+        std::string prefix = prefix_c ? prefix_c : "";
+        if (prefix.empty()) {
+            prefix = std::filesystem::path(dir).filename().string() + "/";
+        }
+
+        // Normalize separators for RES_GenerateQSC
+        for (auto& c : out_res) if (c == '\\') c = '/';
 
         // QSC lives at the parent of inputDir so that LOCAL:prefix/file resolves
         // as parent_dir/prefix/file (e.g. level1/textures/foo.tex), matching the

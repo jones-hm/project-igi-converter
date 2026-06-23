@@ -168,16 +168,16 @@ TEST_F(IGI1ConvTest, MefSidecarCompileRejectsVertexCountEdits) {
 
 // ─── version reporting (regression: used to print 3.0) ───────────────────────
 
-TEST_F(IGI1ConvTest, VersionFlagReportsOneNineFour) {
+TEST_F(IGI1ConvTest, VersionFlagReportsOneNineSeven) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--version", &out), 0);
-    EXPECT_NE(out.find("1.9.4"), std::string::npos) << "got: " << out;
+    EXPECT_NE(out.find("1.9.7"), std::string::npos) << "got: " << out;
 }
 
-TEST_F(IGI1ConvTest, HelpReportsOneNineFour) {
+TEST_F(IGI1ConvTest, HelpReportsOneNineSeven) {
     std::string out;
     EXPECT_EQ(RunIGI1Conv("--help", &out), 0);
-    EXPECT_NE(out.find("v1.9.4"), std::string::npos) << "got: " << out;
+    EXPECT_NE(out.find("v1.9.7"), std::string::npos) << "got: " << out;
 }
 
 // ─── error handling ──────────────────────────────────────────────────────────

@@ -174,6 +174,20 @@ inline std::string FindCorpusFileByRegex(const std::string& pattern_str) {
         
         std::string filename = entry.path().filename().string();
         if (std::regex_search(filename, pattern)) {
+            // Skip text-based .IFF files (decompiled output, not binary).
+            // Binary IFF files never start with \r\n\\  while decompiled
+            // text IFF files do (they begin with a human-readable header).
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".iff" || ext == ".bff") {
+                // Read the first 4 bytes; if they look like text content
+                // (\r\n\\ or \n\\  etc.) skip this candidate.
+                std::ifstream f(entry.path().string(), std::ios::binary);
+                char hdr[4] = {};
+                if (f.read(hdr, 4) && (hdr[0] == '\r' || hdr[0] == '\n')) {
+                    continue;
+                }
+            }
             return entry.path().string();
         }
     }

@@ -3,7 +3,9 @@
 #include "igi1conv_test_util.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -65,6 +67,89 @@ TEST_F(IGI1ConvTest, TexToPngResize) {
     EXPECT_EQ(RunIGI1Conv("tex to-png " + Q(f) + " -o " + Q(out) + " --resize 16 16"), 0);
     EXPECT_TRUE(NonEmptyFile(out));
 }
+TEST_F(IGI1ConvTest, TexToSprFromTex) {
+    // Round-trip a real .tex from the corpus to .spr via the new
+    // `tex to-spr` subcommand.  The output must be a valid LOOP v11
+    // container with mode 3 (ARGB8888) and the same dimensions as the
+    // source's first image.  No corpus dependency on a .spr file
+    // because the converter goes the other way too.
+    IGI1CONV_NEED(f, "\\.tex$");
+    TempDir tmp;
+    std::string out = tmp / "out.spr";
+    ASSERT_EQ(RunIGI1Conv("tex to-spr " + Q(f) + " -o " + Q(out)), 0);
+    ASSERT_TRUE(NonEmptyFile(out));
+
+    // Parse the SPR header manually: 32 bytes, "LOOP" sig, version
+    // (uint32), mode (uint32), width (uint16 at +26), height (+28),
+    // depthBytes (+30).  For SPR we expect version 11, mode 3,
+    // depthBytes 4.
+    std::ifstream in(out, std::ios::binary);
+    ASSERT_TRUE(in.is_open());
+    char sig[4]; in.read(sig, 4);
+    EXPECT_EQ(std::string(sig, 4), "LOOP");
+    uint32_t version = 0, mode = 0;
+    in.read(reinterpret_cast<char*>(&version), 4);  // native LE on x64
+    in.read(reinterpret_cast<char*>(&mode), 4);
+    // Skip multi(4) + reserved(4) + _1(2) + _2(2) + _3(2)  -> +14
+    in.seekg(14, std::ios::cur);
+    uint16_t w = 0, h = 0, depth = 0;
+    in.read(reinterpret_cast<char*>(&w), 2);
+    in.read(reinterpret_cast<char*>(&h), 2);
+    in.read(reinterpret_cast<char*>(&depth), 2);
+    EXPECT_EQ(version, 11u);
+    EXPECT_EQ(mode, 3u);   // ARGB8888
+    EXPECT_EQ(depth, 4u);
+    EXPECT_GT(w, 0u);
+    EXPECT_GT(h, 0u);
+}
+TEST_F(IGI1ConvTest, TexToSprFromSynthesizedTga) {
+    // Corpus-free smoke test: synthesise a tiny 4x4 TGA (all red),
+    // run `tex to-spr`, and verify the LOOP header + the file size
+    // (32-byte header + 16 pixels * 4 bytes ARGB8888 = 96 bytes).
+    TempDir tmp;
+    {
+        std::ofstream f(tmp / "red.tga", std::ios::binary);
+        // 18-byte TGA header, no image ID / colormap.
+        unsigned char hdr[18] = {0};
+        hdr[2]  = 2;             // image type: uncompressed true-color
+        hdr[12] = 4 & 0xFF;      // width  low
+        hdr[13] = (4 >> 8) & 0xFF;
+        hdr[14] = 4 & 0xFF;      // height low
+        hdr[15] = (4 >> 8) & 0xFF;
+        hdr[16] = 32;            // 32 bpp
+        hdr[17] = 0x20;          // top-to-bottom rows (no mirror)
+        f.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+        // 16 BGRA pixels, all red, fully opaque.
+        for (int i = 0; i < 16; ++i) {
+            char px[4] = { 0, 0, (char)0xFF, (char)0xFF };
+            f.write(px, 4);
+        }
+    }
+
+    std::string spr = tmp / "red.spr";
+    ASSERT_EQ(RunIGI1Conv("tex to-spr " + Q(tmp / "red.tga") + " -o " + Q(spr)), 0);
+
+    std::ifstream in(spr, std::ios::binary);
+    ASSERT_TRUE(in.is_open());
+    char sig[4]; in.read(sig, 4);
+    EXPECT_EQ(std::string(sig, 4), "LOOP");
+    uint32_t version = 0, mode = 0;
+    in.read(reinterpret_cast<char*>(&version), 4);
+    in.read(reinterpret_cast<char*>(&mode), 4);
+    in.seekg(14, std::ios::cur);
+    uint16_t w = 0, h = 0, depth = 0;
+    in.read(reinterpret_cast<char*>(&w), 2);
+    in.read(reinterpret_cast<char*>(&h), 2);
+    in.read(reinterpret_cast<char*>(&depth), 2);
+    EXPECT_EQ(version, 11u);
+    EXPECT_EQ(mode, 3u);
+    EXPECT_EQ(w, 4u);
+    EXPECT_EQ(h, 4u);
+    EXPECT_EQ(depth, 4u);
+    std::error_code ec;
+    EXPECT_EQ(static_cast<size_t>(w) * h * 4 + 32u,
+              std::filesystem::file_size(spr, ec));
+}
 
 // ─── mef ─────────────────────────────────────────────────────────────────────
 TEST_F(IGI1ConvTest, MefInfo) {
@@ -91,7 +176,11 @@ TEST_F(IGI1ConvTest, MefExportObjHasRealUvs) {
     // non-bone models).  We parse the OBJ `vt` lines and require at
     // least one non-(0,0) entry, and the V range must be strictly
     // between 0 and 1 (not all clamped to the flip extremes).
-    IGI1CONV_NEED(f, "\\.mef$");
+    // Use a Type 0 or Type 1 model — Type 3 (lightmap) UVs can span
+    // the entire level (e.g. V=-11..1) and are not relevant here.
+    std::string f = FindCorpusMefOfModelType(1, "\\.mef$");
+    if (f.empty()) f = FindCorpusMefOfModelType(0, "\\.mef$");
+    if (f.empty()) GTEST_SKIP() << "no Type 0 or Type 1 MEF in corpus";
     TempDir tmp;
     std::string out = tmp / "model.obj";
     EXPECT_EQ(RunIGI1Conv("mef export " + Q(f) + " -o " + Q(out)), 0);
@@ -166,7 +255,11 @@ TEST_F(IGI1ConvTest, MefExportVFlipMatchesModelType) {
     //                              orientation; 03642a7 missed this
     //                              category and caused 82% of MEFs
     //                              to be upside-down)
-    IGI1CONV_NEED(f, "\\.mef$");
+    // Use a Type 0 or Type 1 model — Type 3 (lightmap) UVs can span
+    // the entire level and fail V-range sanity checks.
+    std::string f = FindCorpusMefOfModelType(1, "\\.mef$");
+    if (f.empty()) f = FindCorpusMefOfModelType(0, "\\.mef$");
+    if (f.empty()) GTEST_SKIP() << "no Type 0 or Type 1 MEF in corpus";
     TempDir tmp;
     std::string out = tmp / "model.obj";
     EXPECT_EQ(RunIGI1Conv("mef export " + Q(f) + " -o " + Q(out)), 0);

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(igi1conv
-  VERSION 1.9.4
+  VERSION 1.9.7
   DESCRIPTION "Project IGI 1 Game Convertor"
   LANGUAGES CXX C)
 

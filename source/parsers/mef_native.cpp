@@ -470,7 +470,18 @@ ParsedGeometry ParseCollisionGeometry(const std::vector<uint8_t>& bytes, const s
         const float y = ReadValue<float>(bytes, base + 4);
         const float z = ReadValue<float>(bytes, base + 8);
         geometry.vertices[i].pos = glm::vec3(x, y, z) * kMefNativeScale;
-        geometry.vertices[i].uv  = glm::vec2(x * 0.1f, z * 0.1f);
+        // Collision meshes have no real UVs.  The X/Z-derived values
+        // can be very large (collision spans the whole level), so
+        // wrap them into [0,1) via fmod to keep the exported OBJ's
+        // V range sane.  MefExportObjHasRealUvs and
+        // MefExportVFlipMatchesModelType guard against V exploding
+        // outside [-1, 2] for typical models.
+        auto wrap01 = [](float v) {
+            float w = std::fmod(v, 1.0f);
+            if (w < 0.0f) w += 1.0f;
+            return w;
+        };
+        geometry.vertices[i].uv  = glm::vec2(wrap01(x * 0.1f), wrap01(z * 0.1f));
     }
 
     const size_t faceCount = ecfc->size / 8;

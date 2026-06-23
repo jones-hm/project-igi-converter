@@ -20,8 +20,9 @@ static void print_tex_help()
         "  info   <input.tex|.spr|.pic>\n"
         "  to-png <input> [-o <out.png>] [--resize <W> <H>]\n"
         "  to-tga <input> [-o <out.tga>] [--resize <W> <H>]\n"
+        "  to-spr <input> [-o <out.spr]                    (PNG / TGA / BMP / JPG -> .spr ARGB8888)\n"
         "\n"
-        "  <input> for to-png/to-tga: .tex .spr .pic .tga .png .bmp .jpg .jpeg\n"
+        "  <input> for to-png/to-tga/to-spr: .tex .spr .pic .tga .png .bmp .jpg .jpeg\n"
         "  -o is optional; default: same directory as input, same base name\n"
         "  --resize W H: scale the output to W x H pixels\n"
         "\n"
@@ -183,7 +184,7 @@ int cmd_tex(int argc, char** argv)
         }
     }
 
-    if (subcmd == "to-png" || subcmd == "to-tga")
+    if (subcmd == "to-png" || subcmd == "to-tga" || subcmd == "to-spr")
     {
         if (argc < 3)
         {
@@ -215,7 +216,9 @@ int cmd_tex(int argc, char** argv)
         if (outpath.empty())
         {
             fs::path p(input);
-            std::string new_ext = (subcmd == "to-png") ? ".png" : ".tga";
+            std::string new_ext = ".png";
+            if (subcmd == "to-tga") new_ext = ".tga";
+            else if (subcmd == "to-spr") new_ext = ".spr";
             outpath = (p.parent_path() / (p.stem().string() + new_ext)).string();
         }
 
@@ -293,17 +296,29 @@ int cmd_tex(int argc, char** argv)
         }
 
         // Write output
-        int rc = 0;
-        if (subcmd == "to-png")
-            rc = stbi_write_png(outpath.c_str(), w, h, 4, pixels.data(), w * 4);
-        else
-            rc = stbi_write_tga(outpath.c_str(), w, h, 4, pixels.data());
-
-        if (!rc)
+        if (subcmd == "to-spr")
         {
-            std::cerr << "tex " << subcmd << ": failed to write: " << outpath << "\n";
-            return 4;
+            // .spr is a LOOP v11 container with mode 3 (ARGB8888) -
+            // same encoder the GUI uses for "Convert to .spr" and
+            // "Save" of a .spr file.
+            if (!TEX_WriteLOOP(outpath, pixels.data(), w, h, /*mode=*/3, /*version=*/11))
+            {
+                std::cerr << "tex " << subcmd << ": failed to write: " << outpath << "\n";
+                return 4;
+            }
         }
+        else
+        {
+            int rc = (subcmd == "to-png")
+                ? stbi_write_png(outpath.c_str(), w, h, 4, pixels.data(), w * 4)
+                : stbi_write_tga(outpath.c_str(), w, h, 4, pixels.data());
+            if (!rc)
+            {
+                std::cerr << "tex " << subcmd << ": failed to write: " << outpath << "\n";
+                return 4;
+            }
+        }
+
         std::cout << "tex: converted " << input << " -> " << outpath << "\n";
         return 0;
     }

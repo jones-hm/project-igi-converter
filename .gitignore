@@ -79,3 +79,8 @@ scratch/
 5.15.2/
 build32/
 *.zip
+
+# Manual test artifacts
+tests_temp/
+test_tone.wav
+*.wav

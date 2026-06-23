@@ -20,6 +20,7 @@ This document lists the supported file formats, their conversion targets, and wh
 | **.ctr** | Terrain Cube properties | Info, export to JSON | Supported |
 | **graph*.dat** | AI Navigation Graph | Info, export to JSON | Supported |
 | **.IFF** | Skeletal Animation | Info, decompile to text, convert to `.BEF`, create from `.BEF` / decompile text, rebuild round trip, export animated GIF | Supported |
+| **.wav** (IGI) | ILSF audio container | Info, convert RAW / RAW_RESIDENT / ADPCM / ADPCM_RESIDENT to standard `.wav` (no external deps, single binary), batch convert-dir | Supported (all four methods) |
 
 ---
 

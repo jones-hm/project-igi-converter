@@ -2,6 +2,184 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.7] - 2026-06-24
+
+### Added
+- **Apply Animation on Model** — right-click any `.iff`/`.bff` to select a MEF model from the current level (IDs `000_00_0`–`030_00_0`) and play the IFF animation skinned onto the chosen model. Scans all subdirectories under the configured `globalModelsDir`.
+- **Play Animation right-click on `.mef`** files — context menu entry for `.mef`/`.mex` files (model IDs `000_00_0`–`030_00_0` only) that loads the model and starts the animation set from `objects.qsc`.
+
+### Fixed
+- **MEF V-coordinate explosion in collision geometry** (`mef_native.cpp:ParseCollisionGeometry`) — synthetic UVs (`x*0.1, z*0.1`) for Type‑3 collision models now wrapped into `[0,1)` via `std::fmod` so exported OBJ V values stay in range.
+- **IFF Play Animation loading wrong file** — `playAnimationForFile()` now guards against signal re-triggering by blocking `viewModeCombo` signals during the mode switch.
+- **Animation transport buttons missing** — `iffMediaBar->show()` added in `onAnimationPlayClicked()` so Play/Pause/Step‑Back/Step‑Forward appear when playing a QSC‑based animation.
+- **`applyIffOnModel` MEF file not found** — replaced the broken path reconstruction (`searchDir + "/" + chosen + ext`) with a persistent `modelIdToPath` map built during the directory scan, so models in subdirectories are found correctly.
+- **Test corpus picking text `.IFF` files** — `FindCorpusFileByRegex()` now skips files starting with `\r\n\\` (decompiled IFF text), preventing 6 IFF tests from failing on invalid binary input.
+- **UV tests picking Type‑3 lightmap models** — `MefExportObjHasRealUvs` and `MefExportVFlipMatchesModelType` now use `FindCorpusMefOfModelType(1/0)` to avoid Type‑3 lightmap files whose UV range spans `-11..1`.
+
+### Changed
+- **Version bumped to 1.9.7**.
+- **Model ID range filter** — `applyIffOnModel` limits the selectable model IDs to `000_00_0`–`030_00_0` to match the game's core HumanSoldier set.
+- **IFF context menu** now always shows "Play Animation" at the top, followed by "Apply Animation on Model...", then the convert/decompile/export actions.
+
+## [1.9.6] - 2026-06-23
+
+### Changed
+- **Audio cache directory now falls back to the "Cache Folder" setting**
+  when no explicit `AudioCacheDir` is set.  Resolution order:
+  `Settings > Audio Cache Folder...` (per-setting), then
+  `Settings > Cache Folder...` (the existing temp dir shared with
+  textures / models), then `<temp>/igi_audio_cache` (default).
+  This means a user who only picked `Settings > Cache Folder` once
+  no longer sees audio land in `C:\Users\...\AppData\Local\Temp\...`.
+- **Right-click "Convert to .wav (Windows PCM)..."** now opens a
+  standard `Save As` dialog.  The user picks the destination file
+  (and folder), the file lands wherever they pointed, no
+  cache.  `Play in default media player` and the Audio mode
+  toolbar still use the SHA-256-keyed audio cache so re-plays are
+  instant.
+
+### Added
+- **New `wav` CLI tests** (in addition to the existing 14):
+  - `WavConvertDirHonoursNoRecursive` — `--no-recursive` flag works.
+  - `WavConvertDirEmptyIsNotAnError` — empty source dir exits 0.
+  - `WavConvertAutoDerivesWavInDir` — `-o <dir>` auto-derives
+    `<src-stem>.wav` inside the directory.
+  - `WavConvertRejectsMp3` — `.mp3` output is refused with rc=1
+    and no file produced.
+  - `WavConvertRejectsUnknownExtension` — `.flac`, `.ogg`,
+    `.txt`, `.bin` all refused with rc=1.
+- **Version bumped to 1.9.6** (minor; full audio flow change).
+
+## [1.9.5] - 2026-06-23
+
+### Added
+- **WAV (IGI audio) decoder** — new `wav` command reads the proprietary
+  InnerLoop `ILSF` `.wav` files shipped with the game and decodes the two
+  RAW methods to standard PCM `.wav` that plays in any Windows media
+  player. MP3 output is also available by routing the intermediate WAV
+  through the LAME encoder (auto-detected on `PATH`, common install paths
+  probed, or supplied via `--lame`).
+  - `igi1conv wav info <file>` — prints signature, method, sample width,
+    channels, frame rate, frame count, duration, and a per-method
+    "supported: yes / no" line.
+  - `igi1conv wav convert <file> -o <out.wav|out.mp3>` — single file;
+    the output format is chosen by `-o`'s extension (`.wav` and `.mp3`
+    are the only valid outputs). If `-o` is a directory (or has no
+    extension), the output basename is derived from the input basename;
+    `--mp3` forces `.mp3` in that case.
+  - `igi1conv wav convert-dir <src_dir> -o <dst_dir> [--mp3] [--lame PATH]`
+    — recursive walker (opt out with `--no-recursive`) that converts
+    every `*.wav` it finds, preserving the directory tree under `dst_dir`.
+    Per-file failures are reported inline; the batch exits 0 when at
+    least one file is converted, 3 only when every input failed.
+  - **All four methods now decode**: methods 0 (`RAW`) and 1
+    (`RAW_RESIDENT`) copy the payload straight to PCM; methods 2
+    (`ADPCM`) and 3 (`ADPCM_RESIDENT`) run the new 4-bit IMA/Intel
+    ADPCM decoder (`igi1conv::wav::decode_ima_adpcm` in
+    `igi1conv/wav_adpcm.h`) with initial state `predictor=0,
+    step_index=0` - matching the `audioop.adpcm2lin(data, 2, None)`
+    call from the Python dconv reference at
+    `D:\IGI-Tools\GM_123\IGI MEF CONV\tools\dconv\format\wav.py`.
+- **GUI integration for the `wav` command** — right-click on any `.wav`
+  in the file tree now offers:
+  - **Play in default media player** — converts the file to a sibling
+    `<name>.playback.wav` and hands the URL to `QDesktopServices`, so
+    the OS picks the user's preferred audio app (WMP / VLC / foobar).
+  - **Convert to .wav (Windows PCM)** — saves a sibling
+    `<name>.wav` (standard PCM, playable on any Windows PC, no extra
+    deps). Overwrite prompt included.
+  - **Convert to .mp3** — saves a sibling `<name>.mp3`. Errors from
+    LAME (if not on `PATH`) are surfaced in a modal message box.
+  - **Info** — runs `wav info` in the text viewer.
+  Right-click on a *folder* that contains `.wav` files adds a
+  **Batch Convert N .wav file(s) in Folder** submenu with separate
+  entries for `.wav` and `.mp3` output.  The folder scan is
+  **recursive** so right-clicking a parent folder that only contains
+  wav files in subfolders still surfaces the option, and the
+  destination folder is picked at click time.
+- **`tex to-spr` CLI subcommand** — convert any PNG / TGA / BMP / JPG
+  (or existing `.tex`/`.spr`/`.pic`) to a LOOP v11 `.spr` with mode 3
+  (ARGB8888, full alpha).  Mirrors `to-png` / `to-tga`; supports
+  `--resize W H` and the same `-o` defaulting.
+- **Shared LOOP encoder** — `TEX_WriteLOOP` in `source/parsers/tex_parser.{h,cpp}`
+  is the single source of truth for "pack RGBA into a `.tex`/`.spr`/`.pic`".
+  Both `tex to-spr` and the GUI's `saveAsTex` (used by `Save` /
+  `Convert to TEX` / `Convert to .spr`) call it, so the CLI and GUI
+  produce bit-identical output.
+- **Image-editor Flip H / Flip V buttons** — new `↔ Flip H` and
+  `↕ Flip V` toolbar buttons in the texture viewer.  The flip is
+  baked into `currentImage`, so the next `💾 Save` writes the flipped
+  pixels (no separate "commit" step).  `⟳ Reset` still goes back to
+  the pristine file as loaded from disk, so a flip can always be
+  undone.
+- **Bundled LAME 3.100 MP3 encoder** — the old "shell out to
+  `lame.exe`" path is replaced with an in-process `lame_enc.dll`
+  load (dynamically linked via `LoadLibrary`, no extra Qt module).
+  The DLL is downloaded from
+  <https://www.rarewares.org/mp3-lame-bundle.php> into
+  `third_party/lame_enc.dll` and the CMake post-build step copies
+  it next to `igi1conv.exe`.  No external binary, no PATH / quoting
+  mess, no "LAME not found" install prompt.
+- **Audio Cache Folder setting + SHA256-keyed cache** — new
+  `Settings > Audio Cache Folder...` (defaults to
+  `<temp>/igi_audio_cache`) plus `Settings > Clear Audio Cache`.
+  Every right-click audio action (Play / Convert to .wav /
+  Convert to .mp3) and the Audio mode "play this file" path now
+  writes to this directory using a content-addressed filename
+  (`<sha256>_<mtime>.<ext>`); re-opening the same source is
+  instant.  The legacy "sibling <name>.wav" location is detected
+  and a one-shot info dialog tells the user where the new cache
+  lives.
+- **ADPCM warmup skip** — the IMA ADPCM decoder now drops the
+  first 16 decoded samples (~0.7 ms at 22 kHz) and replaces them
+  with silence, eliminating the audible "click" the initial
+  `0xF / 0xF / 0x7 / 0xF` nibble run produced with state
+  `(0, 0)`.  The rest of the file decodes unchanged.
+- **GUI: Audio mode (Mode 6)** — the Mode combo now has an `Audio`
+  entry.  Clicking any `.wav` in the file tree auto-routes to Audio
+  mode and runs `igi1conv wav convert` to a sibling
+  `<name>.playback.wav` (standard Windows PCM), which is loaded into
+  an in-process MCI music player.  The audio bar has the standard
+  transport controls — `⏮` restart, `⏪` -5s, `▶ / ⏸` play-pause-resume,
+  `⏹` stop, `⏩` +5s, `⏭` end — plus a clickable scrubber, a
+  `m.mmm / m.mmm s` time readout, and a volume slider.  Already-standard
+  `.wav` files (any `RIFF` header) are loaded directly without
+  re-conversion.  No new Qt modules are required — playback is
+  backed by `winmm` (MCI) which is always present on Windows.
+- **"Convert to .spr" right-click option** — alongside the existing
+  "Convert to TEX", PNG / TGA / BMP / JPG files in the file tree
+  can now be converted to a sibling `.spr` (ARGB8888) with one click.
+
+### Tests
+- New `tests/test_igi1conv_wav.cpp` with 14 end-to-end cases: header
+  parsing for all four methods, mono and stereo round trip, ADPCM
+  refusal, bad-signature rejection, missing-file exit code, directory
+  walker with mixed good/bad inputs, `-o <dir>` extension inference, and
+  the MP3 path (auto-skipped when `lame.exe` is not on `PATH`).
+- New `TexToSprFromTex` (corpus-dependent) and `TexToSprFromSynthesizedTga`
+  (corpus-free) in `tests/test_igi1conv_commands.cpp`.  The synthesized
+  TGA test creates a 4x4 red TGA, runs `tex to-spr`, and verifies the
+  resulting `.spr` has the expected LOOP v11 header (mode 3, 4x4,
+  depth 4) and a total size of 96 bytes (32-byte header + 64 bytes
+  of ARGB8888 pixels).
+- Updated `VersionFlagReportsOneNineFour` / `HelpReportsOneNineFour`
+  to the new 1.9.5 sentinel.
+
+### Fixed
+- **`wav convert-dir` exit code on partial failure**: a batch with some
+  per-file failures used to return 3 even when most files converted
+  successfully.  It now exits 0 when at least one file was converted
+  and 3 only when every input failed, matching the standard "partial
+  success is not a fatal error" convention used elsewhere in the
+  project.
+
+### Changed
+- **Version bumped to 1.9.5**.
+- `docs/SUPPORTED_FORMATS.md` and `docs/COMMANDS.md` now document the
+  `wav` command, the `tex to-spr` subcommand, and the new image-editor
+  flip controls; `docs/ISSUES.md` is updated to mark the RAW decode as
+  done and split the ADPCM encode/decode work into separate open items.
+
 ## [1.9.4] - 2026-06-22
 
 ### Added

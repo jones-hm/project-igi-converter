@@ -1,4 +1,191 @@
 
+## Feature: WAV-MP3-BundledLame
+
+**Description:** The `wav convert --mp3` / `wav convert-dir --mp3`
+code path originally spawned `lame.exe` via `_popen` and required
+the user to install LAME separately (e.g. via
+<https://www.rarewares.org/mp3-lame-bundle.php>).  Reports of
+"LAME not found" errors were common on clean machines, and the
+external dependency was friction for a one-click decode.
+
+**Resolution:** Downloaded the LAME 3.100 64-bit build from
+Rarewares and dropped `lame_enc.dll` (983 KB) into
+`third_party/lame_enc.dll`.  Added a thin C++ wrapper
+(`igi1conv/mp3_lame.{h,cpp}`) that resolves `lame_init`,
+`lame_init_params`, `lame_set_in_samplerate`,
+`lame_set_num_channels`, `lame_set_out_samplerate`,
+`lame_encode_buffer_interleaved`, `lame_encode_flush` and
+`lame_close` via `LoadLibraryW` at runtime - no import library
+needed.  Replaced the `popen` / `find_lame` / `encode_wav_to_mp3_with_lame`
+code in `cmd_wav.cpp` with a single `encode_pcm_to_mp3` function
+that drives the wrapper directly, VBR quality 2 by default
+(~190 kbps for 44.1 kHz stereo).  CMakeLists.txt gained a
+`POST_BUILD` step that copies the DLL next to the executable.
+Net result: a single self-contained `igi1conv.exe` produces both
+`.wav` and `.mp3` without any external tools, on every machine.
+
+## Bug: WAV-MP3-ExternalDll-Reverted (1.9.6)
+
+**Description:** User asked to drop the `lame_enc.dll` dependency
+because it counted as an "external DLL".  No production-quality
+single-header MP3 encoder exists - LAME is ~50k lines / 200 files
+and every other encoder (shine, etc.) is multi-file.  The earlier
+`lame.exe` spawn + bundled DLL paths both pulled in code outside
+the igi1conv.exe, conflicting with the "drop-in single exe" goal.
+
+**Resolution:** Removed MP3 support entirely from 1.9.6.  `mp3_lame.{h,cpp}`,
+`lame_enc.dll`, the `lame.exe` spawn, and the `--mp3` / `--lame` CLI
+flags are all gone.  The `wav` command now outputs only standard PCM
+`.wav` (every Windows media player plays it out of the box).
+Asking for an `.mp3` output returns exit code 1 with a clear error
+message.  CMakeLists.txt and `cmd_wav.cpp` lost the LAME plumbing;
+`gui_main.cpp` lost the "Convert to .mp3" right-click action.  New
+test `WavConvertRejectsMp3` locks the "no MP3" contract.
+
+## Bug: WAV-AudioCache-FolderFallback (1.9.6)
+
+**Description:** Audio conversions were always landing in
+`QDir::tempPath() + "/igi_audio_cache"` (= `C:\Users\...\AppData\
+Local\Temp\...` on Windows) even when the user had picked a
+different folder under `Settings > Cache Folder...`.  The audio
+cache had its own per-setting (`AudioCacheDir`) that defaulted to
+the system temp path; users who only set the global cache
+expected the audio to land there too, but the two settings were
+disconnected.
+
+**Resolution:** Updated `wavCacheDir()` in `gui_main.cpp` to a
+three-tier resolver: (1) `globalAudioCacheDir` if set, else
+(2) `globalCacheDir` (the existing Cache Folder setting, which
+is shared with textures / models), else (3) the `<temp>/igi_audio_cache`
+default.  The two Settings entries now compose: pick the global
+"Cache Folder" once and audio follows it; override "Audio Cache
+Folder" if you want audio to live somewhere different.
+
+## Feature: WAV-Convert-SaveAs-Dialog (1.9.6)
+
+**Description:** User asked: when right-clicking a .wav and picking
+"Convert to .wav (Windows PCM)", the GUI should open a Save As
+dialog and let the user pick the destination, rather than silently
+writing to the cache.
+
+**Resolution:** Replaced the auto-cache logic in `convertIgiWav(path)`
+with `QFileDialog::getSaveFileName`.  The dialog defaults to
+`<src-dir>/<src-stem>.wav` with a "Windows PCM WAV (*.wav)" filter
+and the file is force-renamed to `.wav` if the user types a
+different extension.  `Play in default media player` and the Audio
+mode toolbar still use the SHA-256-keyed cache so re-plays are
+instant; only the explicit "Convert to .wav" action now uses a
+user-picked location.  Updated right-click menu label to
+"Convert to .wav (Windows PCM)..." (with the `...` hinting at a
+dialog).
+
+## Feature: Audio-Cache-Folder
+
+**Description:** User asked for a settings-driven temp directory
+and caching for audio conversions, so the same `.wav` does not
+get re-decoded on every right-click.
+
+**Resolution:** Added a new member `globalAudioCacheDir`
+(defaults to `<temp>/igi_audio_cache`, pre-created at startup) and
+two new Settings menu items: `Audio Cache Folder...` and
+`Clear Audio Cache`.  The new helper `cachedIgiWavConvert(src,
+ext)` computes a SHA-256 of the source file's contents plus its
+last-modified msec, derives a stable cache filename, and skips
+the convert if it already exists.  The right-click
+"Play in default media player" / "Convert to .wav" /
+"Convert to .mp3" actions and the Audio mode `audioLoadIgiWav`
+all route through this helper.  The legacy sibling-file location
+is still detected on first use and a one-shot info dialog tells
+the user where the new cache lives.
+
+## Bug ID: WAV-ADPCM-InitialTransient
+
+**Description:** IMA ADPCM decode of IGI files with state
+`(predictor=0, step_index=0)` starts with the first 8 nibbles
+being `0xF / 0xF / 0x7 / 0xF` (taken from the ILSF ADPCM payload's
+opening bytes).  These extreme codes push the predictor down to
+~`-2563` and the step_index up to `64` in 8 samples, which the
+adaptive algorithm then takes a few hundred samples to recover
+from.  The audible effect was a "click" / "pop" at the start of
+every decoded file.
+
+**Resolution:** Added a `skip_warmup_samples` parameter to
+`decode_ima_adpcm()` in `igi1conv/wav_adpcm.h` (default 16).
+The decoder drops the first 16 decoded samples (about 0.7 ms at
+22 kHz) and `load_ilsf()` in `cmd_wav.cpp` prepends 16 silent
+samples to the output PCM so the WAV length still matches
+`frame_count * channels`.  Inaudible loss, but the initial
+"click" is gone and the audio sounds noticeably less click-prone.
+
+## Feature: WAV-ADPCM-Decode
+
+**Description:** IGI's `ILSF` `.wav` files use four sound pack methods
+(0=RAW, 1=RAW_RESIDENT, 2=ADPCM, 3=ADPCM_RESIDENT).  The Python
+dconv reference at
+`D:\IGI-Tools\GM_123\IGI MEF CONV\tools\dconv\format\wav.py` only
+decodes the two RAW methods and the ADPCM helper it ships is buggy
+(`return sounddata` shadows the real `audioop.adpcm2lin(...)` call
+it was supposed to make).  Reported on real IGI files like
+`D:/IGI1/missions/location0/level13/sounds/_cut13_01.wav` which
+is method 2 (ADPCM) and could not be converted.
+
+**Resolution:** Added a native C++ 4-bit IMA/Intel ADPCM decoder
+(`igi1conv::wav::decode_ima_adpcm` in
+`igi1conv/wav_adpcm.h`) with the standard 89-entry step table and
+16-entry index table, initial decoder state `predictor=0,
+step_index=0`.  Wired into `load_ilsf()` in `igi1conv/cmd_wav.cpp`
+so methods 2 and 3 now produce standard PCM WAV the same way the
+Python `audioop.adpcm2lin(data, 2, None)` call would have if the
+Python dconv helper had not been buggy.  Stereo files are decoded
+with nibble-interleaved channels (high nibble = ch0, low nibble =
+ch1), matching what real IGI stereo ADPCM files (e.g.
+`m13_ambience.wav`) contain.  Verified end-to-end against the full
+`D:\IGI1\missions\location0\level13\sounds` directory - all 16
+`.wav` files (a mix of mono and stereo ADPCM) convert to valid
+PCM WAV with the expected `RIFF / WAVE / data` framing and
+correct sample counts.  Updated `WavInfoAdpcm` /
+`WavConvertAdpcmDecodes` / `WavConvertDirMixed` tests to reflect
+the new behavior; all 14 wav tests pass (MP3 path self-skips
+without LAME on PATH).
+
+## Bug ID: WAV-CmdPopen-Quote-Strip
+**Description:** The new `igi1conv wav convert ... -o out.mp3 --lame ...` pipeline
+shells out to LAME via `_popen` on Windows.  The first attempt wrapped the
+command in the usual `"<lame.exe>" -h "<in.wav>" "<out.mp3>"` form, but the
+spawned `cmd.exe` returned "The filename, directory name, or volume label
+syntax is incorrect" before LAME ever started.  The root cause is `cmd /c`'s
+"strip one outer pair of quotes" rule: when the first character of the
+command is a quote and the last character is a quote, cmd removes both,
+which left the inner quotes intact and turned the program path into
+`D:\...\lame.exe"` (with a trailing quote), so the child saw `argv[0]` with
+a stray quote and Windows rejected the path.  A test stub fake_lame.cmd
+made the failure surface as "fake_lame: cannot open -h" (argv[1]="-h"
+because the program path was mangled).
+**Resolution:** Wrap the entire command line in an extra outer pair of
+quotes before passing it to `_popen`, e.g.
+`"\"D:\\...\\lame.exe\" -h \"D:\\...\\in.wav\" \"D:\\...\\out.mp3\""`.
+With the outer pair, `cmd /c` strips the wrapper and is left with the
+correctly-quoted program + args; the child receives clean argv.  Verified
+end-to-end with LAME 3.100.1 producing a valid MPEG audio frame
+(`FF F3 40 C4 ...`) for a 22.05 kHz mono test input.
+
+## Feature Request: WAV-Audio-Decode
+**Description:** User asked for a way to take the audio files shipped with
+Project IGI 1 (which use InnerLoop's proprietary `ILSF` 20-byte container,
+not a standard WAV header) and produce files that play in a Windows media
+player - specifically standard PCM `.wav` and `.mp3`.
+**Resolution:** Added a new `wav` command (`igi1conv/cmd_wav.{h,cpp}`) that
+parses the ILSF header, decodes the two RAW methods (0, 1) to standard PCM
+WAV, and routes the intermediate WAV through LAME for `.mp3` output.
+ADPCM methods (2, 3) are detected and refused with a clear "not yet
+supported" error (tracked in `docs/ISSUES.md`).  LAME is auto-discovered
+on `PATH` / common Windows install paths, with `--lame <path>` to override.
+14 end-to-end test cases in `tests/test_igi1conv_wav.cpp` (13 pass, the
+MP3 test self-skips when LAME is absent) cover header parsing, mono and
+stereo round trip, ADPCM refusal, bad-signature rejection, missing-file
+exit codes, recursive directory walker with mixed good/bad inputs, and
+`-o <dir>` extension inference.  Bumped to v1.9.5.
+
 ## Bug ID: MEX-Convert-Overwrite
 **Description:** Converting .mex binary to text format inadvertently overwrote the generated text file with its own .mex binary sidecar due to sharing the same extension, causing the conversion to appear broken.
 **Resolution:** Updated cmd_mef.cpp and mef_compiler.cpp to use a .extra extension (e.g. model.mex.extra) for the sidecar when the input file is .mex. This safely decouples the text file from the binary sidecar chunks. Also transitioned the sidecar format from a custom SIDX container to standard native ILFF format in mef_exporter.cpp.
@@ -70,3 +257,59 @@
 ## Bug ID: Hardcoded-Paths-Removed
 **Description:** The codebase had several machine-specific hardcoded paths that would break on any install other than the original developer's: `D:/Software/IGI-Game` as the default folder for the file system model and the "Set Level" QFileDialog, `D:\Software\IGI-Game\COMMON\ANIMS` in the "Set ANIMS Source Folder" dialog title, and `D:/IGI1/missions/location0/level1/objects.qsc` / `C:/IGI1/...` hardcoded in the `RealLevel1ObjectsQsc` integration test.
 **Resolution:** Replaced all hardcoded paths with portable, configurable fallbacks. The QFileSystemModel defaults to `QDir::homePath()` when no `LastFolder` is persisted. The "Set Level" and "Set ANIMS" dialogs default to `QDir::homePath()` (or the last-used directory). The `RealLevel1ObjectsQsc` test now resolves the corpus root via the `IGI_GAME_PATH` env var / `--game-path` flag through the existing `igi1conv_test::CorpusDir()` / `Corpus()` helpers and `GTEST_SKIP()`s cleanly when the corpus is absent. No machine-specific paths remain in the source tree.
+
+## Bug ID: Audio-Mode-Mef-Misroute (1.9.6)
+**Description:** Switching to the Audio tab while a `.mef` file was selected caused the GUI to run the IGI WAV converter on the model file, producing `wav convert failed: parse error: missing ILSF signature (not an IGI .wav?)`. Additionally, the audio file label showed the cached temp filename (e.g. `382ec3063589c2e3_19eef38ffe0.wav`) instead of the original source name.
+**Resolution:** Added an extension guard in `audioLoadIgiWav()` and in the Audio mode `loadFile()` handler: only `.wav` files are decoded/loaded. Non-`.wav` selections now log a clear warning and show `(not audio)` in the file label instead of spawning a failing conversion. Added `audioSourceName` member to `MainWindow` and updated `mciOpen()` to display the original source filename while still playing the cached PCM `.wav` behind the scenes.
+
+## Bug ID: Animation-Panel-Missing-Transport (1.9.6)
+**Description:** The Animation panel only had a single "Play" button; there was no Pause/Resume, step-backward, or step-forward control in the panel itself.
+**Resolution:** Added `Pause`/`Resume`, `Back`, and `Fwd` buttons to the Animation panel, wired to `modelViewer->iffTogglePlayPause()`, `iffStepBackward()`, and `iffStepForward()`. Button text and the IFF media-bar play button stay synchronised so pause/resume state is consistent across both toolbars.
+
+## Bug ID: Texture-Default-Zoom (1.9.6)
+**Description:** `.tex`/`.spr`/`.pic`/`.tga`/`.png` images opened in the image editor were displayed at 1:1 zoom by default, which often overflowed the window for high-resolution textures.
+**Resolution:** Changed `ImageEditor::loadImage()` to compute an initial `zoomFactor` that fits the image inside the scroll area while never upscaling small images beyond 1:1. The existing `Fit` toolbar button still allows explicit refit after resize.
+
+## Bug ID: Res-Pack-Renamed-Folder-Empty (1.9.6)
+**Description:** Running `igi1conv res pack <dir> <out.res>` without an explicit `--prefix` produced an empty 20-byte `.res` file (only the ILFF header) when the input folder was renamed or when the folder name did not match the default empty prefix. `RES_Compile` resolves `LOCAL:prefix/file` relative to the QSC parent directory, so the prefix must equal the folder name on disk.
+**Resolution:** In `cmd_res.cpp` `res pack`, default the `--prefix` to the input directory's filename plus `/` when the user does not supply one. This makes the CLI behaviour match the GUI's "Pack to Archive" context menu and ensures every file is found regardless of folder name.
+
+## Bug ID: Tga-To-Spr-Fail-And-Label (1.9.6)
+**Description:** Right-clicking a `.tga` and choosing "Convert to .spr" sometimes failed with `Could not load image` because `QImage` cannot load every TGA variant. The menu label also read "Convert to .spr" instead of the requested "Convert to SPR".
+**Resolution:** Renamed the context-menu item to "Convert to SPR". Switched both "Convert to TEX" and "Convert to SPR" to use `loadImageSafe()`, which falls back to `stbi_load` for formats Qt cannot read, so TGA/PNG/BMP/JPEG conversions now work for all images the project supports.
+
+## Bug ID: Open-File-Overwrites-Workspace (1.9.6)
+**Description:** Using File > Open File changed the main file-tree root to the selected file's parent directory, overriding the user's chosen workspace folder.
+**Resolution:** Removed the `fileModel->setRootPath()` and `treeView->setRootIndex()` calls from the "Open File" handler. Opening a file now loads it in the editor while leaving the main folder path unchanged. The separate "Open Folder..." action still changes the workspace root when explicitly requested.
+
+## Bug ID: Video-Animation-Modes-Unified (1.9.6)
+**Description:** `.iff` files opened in a dedicated "Video" mode while `.mef` files opened in "3D" mode, and right-click "Play Animation" only worked for `.mef`. The user wanted a single "Animation" mode that acts like a video player (play/pause/forward/backward/FPS/model selector), automatically handles both `.iff` (bones only) and `.mef` (model + textures), keeps the `B` bone toggle, and has a sorted mode list plus a working right-click "View As" menu.
+**Resolution:** Replaced the mode list order with `Auto, Text, Hex, Image, Audio, Animation, 3D` and removed the old "Video" entry. `.iff` now auto-detects to Animation mode; `.mef` auto-detects to 3D mode but can be switched to Animation via right-click "Play Animation" or the mode combo. The Animation `loadFile()` handler loads the file in `ModelViewer` and shows both the IFF media bar (transport + clip selector) and the Animation panel (model/anim selector + FPS). The existing `B` key toggles the bone overlay for `.mef`; `.iff` continues to show bones by default. The right-click "View As" submenu now lists all seven modes and invokes `loadFile(path, mode)` for each.
+
+## Bug ID: Mef-3D-Shows-Graph-Nodes (1.9.6)
+**Description:** After a `graph*.dat` file had been opened, selecting a `.mef` (or `.iff`/`.obj`) in 3D/Animation mode initially displayed the model, but clicking or interacting with the 3D view suddenly switched it back to the graph node view. `currentGraph.valid` stayed true across model loads, so the graph mouse/keyboard handlers (especially node picking on `mousePressEvent`) regenerated graph geometry on top of the newly loaded model.
+**Resolution:** `ModelViewer::loadModel()` now clears `currentGraph` and resets `selectedGraphNodeId` whenever a non-graph model is loaded, and notifies the graph toolbar callback with zero nodes/links so the previous graph state cannot interfere with MEF/IFF/OBJ interaction.
+
+## Bug ID: Animation-Panel-Duplicate-Transport (1.9.6)
+**Description:** The Animation panel gained Pause/Resume/Back/Fwd buttons, but the IFF media bar directly above it already provided the same transport controls, creating a duplicate GUI.
+**Resolution:** Removed the redundant `Pause`, `Back`, and `Fwd` buttons from the Animation panel. Transport remains in the shared IFF media bar; the Animation panel keeps the `Play` button (for objects.qsc-driven loads), model/anim selectors, Loop checkbox, and FPS input.
+
+## Bug ID: Image-Fit-Not-Matching-Fit-Button (1.9.6)
+**Description:** The initial image zoom was capped at 1:1, so small images did not fill the viewport the same way as pressing the `Fit` toolbar button.
+**Resolution:** Removed the 1.0 zoom cap in `ImageEditor::loadImage()` so the default zoom exactly matches the `Fit` button calculation (`min(scrollArea.width/img.width, scrollArea.height/img.height)`), including upscaling small images to fill the view.
+
+## Bug ID: Multi-Select-Missing-Batch-Conversion (1.9.6)
+**Description:** Selecting multiple files only offered Delete/Copy/Cut/Paste; there was no batch conversion option for any format.
+**Resolution:** Added a "Batch Conversion" submenu to the multi-selection context menu. It detects the extensions of the selected files and offers per-format conversions: TEX/SPR/PIC → TGA/PNG/SPR, PNG/TGA/BMP/JPG → TEX/SPR, MEF/MEX → OBJ/Text, WAV → WAV, IFF/BFF → BEF. The user picks one output folder and the GUI runs `igi1conv` for each matching file, then reports success/failure counts.
+
+## Bug ID: Iff-Play-Animation-Loads-Wrong-File (1.9.6)
+**Description:** Right-clicking an `.iff` and choosing "Play Animation" sometimes displayed a textured MEF model instead of the IFF's bone-only skeleton, and could play the wrong animation (the one from a previously selected `.mef`). The cause was that `playAnimationForFile()` changed the mode combo without updating `currentFile` or blocking its signal, so the combo's `currentIndexChanged` handler reloaded the stale `currentFile`.
+**Resolution:** `playAnimationForFile()` now sets `currentFile` and `currentExt` to the right-clicked path before switching to Animation mode, and blocks signals on `viewModeCombo` during the index change so no accidental reload of the previous file occurs. For `.iff` it loads only the IFF skeleton (bones) via `modelViewer->loadModel()`.
+
+## Bug ID: Graph-Toolbar-Visible-In-Non-Graph-Modes (1.9.6)
+**Description:** The graph toolbar (Node+, Node-, Reset, Nodes/Links checkboxes, Total Nodes/Links labels) was showing on top of the 3D view in Animation mode and other non-graph modes, cluttering the UI with irrelevant controls.
+**Resolution:** The `onGraphLoaded` callback now only shows `graphToolbar` when `nodeCount > 0`. When `loadModel()` clears the graph state and calls `onGraphLoaded(0, 0)`, the toolbar is hidden instead of shown.
+
+## Bug ID: Mef-Play-Animation-Empty-Panel (1.9.6)
+**Description:** Right-clicking a `.mef` and choosing "Play Animation" showed an empty animation panel if `objects.qsc` was not loaded, leaving the user unable to pick an animation. The IFF media bar was also shown unnecessarily for `.mef` files.
+**Resolution:** `playAnimationForFile()` now auto-loads the animation set via `loadAnimationSetFromQsc()` if it's empty when a `.mef` is selected. The status label shows "Set objects.qsc in Settings > Animation" if the set remains empty after loading. The IFF media bar is now only shown for `.iff` files, not `.mef`, reducing UI clutter.

@@ -29,10 +29,22 @@
 #include <QFileDialog>
 #include <QMenu>
 #include <QMenuBar>
+#include <QCryptographicHash>
 #include <QShortcut>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QSettings>
+#include <QSlider>
+#include <QTimer>
+#include <QElapsedTimer>
+
+// Windows MCI (Media Control Interface) for in-process WAV playback.  We
+// avoid Qt6::Multimedia so the GUI doesn't need an extra Qt module - the
+// winmm API is always present on Windows and gives us play / pause /
+// resume / seek / stop, which is exactly what a music-player toolbar
+// needs.
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 enum LogLevel { LOG_ERROR = 0, LOG_INFO = 1, LOG_DEBUG = 2, LOG_VERBOSE = 3 };
 
@@ -1048,6 +1060,12 @@ public:
         restSubmeshes.clear();
         mefBoneWorldPos.clear();
         animBoneTransforms.clear();
+        // Loading a new non-graph model must clear any previous graph state,
+        // otherwise mouse/keyboard handlers still think a graph is active and
+        // can regenerate graph geometry on top of the MEF/IFF/OBJ view.
+        currentGraph = GraphFile();
+        selectedGraphNodeId = -1;
+        if (onGraphLoaded) onGraphLoaded(0, 0);
         currentModelPath = path;
         
         QFileInfo info(path);
@@ -1783,6 +1801,8 @@ public:
         btnDraw    = mkBtn("✏ Draw",   "Toggle pencil tool [D]");
         btnEraser  = mkBtn("⌫ Erase",  "Toggle eraser tool [E]");
         QPushButton* btnColor  = mkBtnNorm("🎨 Color",  "Pick pen color");
+        QPushButton* btnFlipH  = mkBtnNorm("↔ Flip H",  "Flip horizontally (and save with the flip)");
+        QPushButton* btnFlipV  = mkBtnNorm("↕ Flip V",  "Flip vertically (and save with the flip)");
         QPushButton* btnFit    = mkBtnNorm("⊡ Fit",     "Fit to window");
         QPushButton* btnZoomIn = mkBtnNorm("+ Zoom",    "Zoom in");
         QPushButton* btnZoomOut= mkBtnNorm("- Zoom",    "Zoom out");
@@ -1808,6 +1828,9 @@ public:
         tools->addWidget(lblSize);
         tools->addWidget(penSizeSpin);
         tools->addWidget(btnColor);
+        tools->addSpacing(10);
+        tools->addWidget(btnFlipH);
+        tools->addWidget(btnFlipV);
         tools->addSpacing(10);
         tools->addWidget(btnFit);
         tools->addWidget(btnZoomIn);
@@ -1842,6 +1865,21 @@ public:
         connect(btnColor, &QPushButton::clicked, this, [this]() {
             QColor c = QColorDialog::getColor(penColor, this, "Pick Pen Color");
             if (c.isValid()) penColor = c;
+        });
+        // Flip H / Flip V bake the transform straight into currentImage
+        // so the next Save writes the flipped pixels (no separate
+        // "commit" step needed).  "Reset" still goes back to the
+        // pristine file as loaded from disk, so the user can always
+        // undo a flip.
+        connect(btnFlipH, &QPushButton::clicked, this, [this]() {
+            if (currentImage.isNull()) return;
+            currentImage = currentImage.mirrored(true, false);
+            updateDisplay();
+        });
+        connect(btnFlipV, &QPushButton::clicked, this, [this]() {
+            if (currentImage.isNull()) return;
+            currentImage = currentImage.mirrored(false, true);
+            updateDisplay();
         });
         connect(btnFit, &QPushButton::clicked, this, [this]() {
             if (!currentImage.isNull()) {
@@ -1879,90 +1917,57 @@ public:
     }
 
     
-    bool saveAsTex(const QImage& img, const QString& outPath) {
+    // Write `img` to `outPath` as a LOOP v11 container.  When `mode` is
+    // -1 (the default) the format is chosen from the filename: ".spr"
+    // and ".pic" produce ARGB8888, anything else produces the legacy
+    // 16-bit packed format.  Pass an explicit mode to override.
+    bool saveAsTex(const QImage& img, const QString& outPath, int mode = -1) {
         if (img.isNull()) return false;
-        // Write a valid LOOP v11 TEX file: 32-byte header + ARGB8888 pixels
-        // Header layout: sig(4s) version(I) mode(I) multi(I) _0(I) _1(H) _2(H) _3(H) width(H) height(H) depth(H)
-        if (img.width() > 65535 || img.height() > 65535) {
-            // TEX v11 header stores width/height as uint16 - reject early
-            return false;
-        }
+        if (img.width() > 65535 || img.height() > 65535) return false;
 
         // Make sure the destination directory exists.
         QFileInfo outInfo(outPath);
         QDir().mkpath(outInfo.absolutePath());
 
-        QFile f(outPath);
-        if (!f.open(QIODevice::WriteOnly)) {
-            return false;
+        if (mode < 0) {
+            QString lower = outPath.toLower();
+            mode = (lower.endsWith(".spr") || lower.endsWith(".pic") ||
+                    lower.contains("argb8888")) ? 3 : 2;
         }
 
+        // QImage::Format_ARGB32 is stored as 0xAARRGGBB in memory on
+        // little-endian, i.e. bytes are B, G, R, A.  We re-pack into
+        // a contiguous RGBA8888 buffer that the shared LOOP encoder
+        // consumes directly.
         QImage texImg = img.convertToFormat(QImage::Format_ARGB32);
-        uint16_t w = (uint16_t)texImg.width();
-        uint16_t h = (uint16_t)texImg.height();
-
-        bool isArgb = outPath.toLower().contains("argb8888");
-        uint32_t mode = isArgb ? 3 : 2; // 3=ARGB8888, 2=RGB565
-        
-        uint8_t hdr[32] = {0};
-        hdr[0] = 'L'; hdr[1] = 'O'; hdr[2] = 'O'; hdr[3] = 'P';
-        uint32_t version = 11;
-        std::memcpy(hdr + 4, &version, 4);
-        std::memcpy(hdr + 8, &mode, 4);
-        uint32_t multi = 0;
-        std::memcpy(hdr + 12, &multi, 4);
-        // _0 at [16] = 0 (already zeroed)
-        uint16_t _1 = 5;           // constant in all original game TEX files
-        uint16_t _2 = w;           // redundant width copy
-        uint16_t _3 = h;           // redundant height copy
-        uint16_t depthBytes = (mode == 3) ? 4 : 2; // bytes per pixel: 4=ARGB8888, 2=ARGB1555
-        std::memcpy(hdr + 20, &_1, 2);
-        std::memcpy(hdr + 22, &_2, 2);
-        std::memcpy(hdr + 24, &_3, 2);
-        std::memcpy(hdr + 26, &w, 2);
-        std::memcpy(hdr + 28, &h, 2);
-        std::memcpy(hdr + 30, &depthBytes, 2);
-        
-        f.write((const char*)hdr, 32);
-        
-        QByteArray pixels;
-        if (mode == 3) {
-            pixels.resize(w * h * 4);
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    QRgb color = texImg.pixel(x, y);
-                    int i = (y * w + x) * 4;
-                    pixels[i]   = (char)qBlue(color);
-                    pixels[i+1] = (char)qGreen(color);
-                    pixels[i+2] = (char)qRed(color);
-                    pixels[i+3] = (char)qAlpha(color);
-                }
-            }
-        } else {
-            // ARGB1555: bit15=A(opaque=1), bits14-10=R, bits9-5=G, bits4-0=B
-            pixels.resize(w * h * 2);
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    QRgb color = texImg.pixel(x, y);
-                    int r = qRed(color)   >> 3; // 5 bits
-                    int g = qGreen(color) >> 3; // 5 bits
-                    int b = qBlue(color)  >> 3; // 5 bits
-                    uint16_t argb1555 = (uint16_t)(0x8000u | (r << 10) | (g << 5) | b);
-                    int i = (y * w + x) * 2;
-                    std::memcpy(pixels.data() + i, &argb1555, 2);
-                }
+        std::vector<uint8_t> rgba(static_cast<size_t>(texImg.width()) * texImg.height() * 4);
+        for (int y = 0; y < texImg.height(); ++y) {
+            const QRgb* row = reinterpret_cast<const QRgb*>(texImg.constScanLine(y));
+            for (int x = 0; x < texImg.width(); ++x) {
+                size_t o = (static_cast<size_t>(y) * texImg.width() + x) * 4;
+                rgba[o + 0] = static_cast<uint8_t>(qRed(row[x]));
+                rgba[o + 1] = static_cast<uint8_t>(qGreen(row[x]));
+                rgba[o + 2] = static_cast<uint8_t>(qBlue(row[x]));
+                rgba[o + 3] = static_cast<uint8_t>(qAlpha(row[x]));
             }
         }
-        f.write(pixels);
-        f.close();
-        return true;
+        return TEX_WriteLOOP(outPath.toStdString(),
+                             rgba.data(), texImg.width(), texImg.height(),
+                             mode, 11);
     }
     
     void loadImage(const QString& path, const QImage& img) {
         currentPath = path;
         originalImage = img;
         currentImage = img;
-        zoomFactor = 1.0;
+        // Default to the same fit-to-window view as the Fit toolbar button.
+        if (!img.isNull() && scrollArea) {
+            double fx = static_cast<double>(scrollArea->width())  / img.width();
+            double fy = static_cast<double>(scrollArea->height()) / img.height();
+            zoomFactor = qMin(fx, fy);
+        } else {
+            zoomFactor = 1.0;
+        }
         updateDisplay();
         if (infoLabel) {
             infoLabel->setText(QString("%1x%2 | %3")
@@ -2835,11 +2840,9 @@ public:
         fileMenu->addAction(QIcon::fromTheme("document-open"), "&Open File...", this, [this]() {
             QString filePath = QFileDialog::getOpenFileName(this, "Select File to Open");
             if (!filePath.isEmpty()) {
-                QString dir = QFileInfo(filePath).absolutePath();
-                fileModel->setRootPath(dir);
-                if (this->treeView) {
-                    this->treeView->setRootIndex(proxyModel->mapFromSource(fileModel->index(dir)));
-                }
+                // Opening a file only loads it in the editor.  We deliberately
+                // do NOT change the main workspace folder so the tree root
+                // stays where the user set it.
                 loadFile(filePath);
             }
         }, QKeySequence("Ctrl+O"));
@@ -2955,13 +2958,9 @@ public:
         viewMenu->addAction("Text", [this]() { viewModeCombo->setCurrentIndex(1); });
         viewMenu->addAction("Hex", [this]() { viewModeCombo->setCurrentIndex(2); });
         viewMenu->addAction("Image", [this]() { viewModeCombo->setCurrentIndex(3); });
-        viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(4); });
-        viewMenu->addAction("Video", [this]() { viewModeCombo->setCurrentIndex(5); });
-        // Animation (index 6) is only registered when the mode toggle
-        // is on; rebuildModeCombo() adds/removes it in lock-step.
-        if (globalAnimationModeEnabled) {
-            viewMenu->addAction("Animation", [this]() { viewModeCombo->setCurrentIndex(6); });
-        }
+        viewMenu->addAction("Audio", [this]() { viewModeCombo->setCurrentIndex(4); });
+        viewMenu->addAction("Animation", [this]() { viewModeCombo->setCurrentIndex(5); });
+        viewMenu->addAction("3D", [this]() { viewModeCombo->setCurrentIndex(6); });
         viewMenu->addSeparator();
         auto applyMenuTheme = [iniPath](const QString& name) {
             QSettings(iniPath, QSettings::IniFormat).setValue("Theme", name);
@@ -3060,7 +3059,7 @@ public:
 
         QMenu* settingsMenu = menuBar()->addMenu("&Settings");
 
-        // ── Animation submenu (Mode 6) ──────────────────────────────────────
+        // ── Animation submenu ───────────────────────────────────────────────
         // The new "Animation" mode is gated by this menu: the Mode
         // combo only shows the "Animation" entry when at least one of
         // the four prerequisites is true.  All entries persist into
@@ -3375,7 +3374,7 @@ public:
         });
 
         settingsMenu->addAction("Cache Folder...", this, [this, iniPath]() {
-            QString newCache = QFileDialog::getExistingDirectory(this, "Select Temp Cache Folder", globalCacheDir);
+            QString newCache = QFileDialog::getExistingDirectory(this, "Select Cache Folder (audio, textures, models, animations)", globalCacheDir);
             if (!newCache.isEmpty()) {
                 globalCacheDir = newCache;
                 modelViewer->cacheDir = globalCacheDir;
@@ -3723,7 +3722,10 @@ public:
                 QString("Total Links: %1").arg(linkCount));
             if (chkGraphNodes)  chkGraphNodes->setChecked(modelViewer->showGraphNodes);
             if (chkGraphLinks)  chkGraphLinks->setChecked(modelViewer->showGraphLinks);
-            if (graphToolbar)   graphToolbar->show();
+            if (graphToolbar) {
+                if (nodeCount > 0) graphToolbar->show();
+                else graphToolbar->hide();
+            }
         };
 
         rightLayout->addWidget(viewerEdit, 3);
@@ -3866,7 +3868,124 @@ public:
             "QComboBox { background:#333; color:#ddd; border:1px solid #555; border-radius:3px;"
             "  padding:2px 6px; }"
         );
-        // ── Animation Panel (Mode 6) ──────────────────────────────────────────
+
+        // ── Audio bar (Mode 4) ──────────────────────────────────────────────────
+        // The audio bar is a self-contained music player UI shown only when
+        // the Mode combo is set to "Audio" and a .wav file is loaded.  It
+        // owns its own transport state via Windows MCI; we just translate
+        // button clicks into `mciSendString` calls and refresh the
+        // scrubber / time label from a 100ms QTimer while playing.
+        audioBar = new QWidget();
+        audioBar->setObjectName("audioBar");
+        audioBar->setStyleSheet(
+            "QWidget#audioBar { background:#1a1a2e; border-top:1px solid #444; padding:4px; }"
+            "QPushButton { background:#252545; color:#e0e0ff; border:1px solid #555; border-radius:4px;"
+            "  padding:4px 10px; font-size:14px; min-width:32px; }"
+            "QPushButton:hover { background:#3a3a6a; border-color:#88f; }"
+            "QPushButton:pressed { background:#1a1a4a; }"
+            "QPushButton#audioPlayBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:16px; }"
+            "QPushButton#audioPlayBtn:hover { background:#2a6a2a; }"
+            "QPushButton:disabled { background:#2a2a2a; color:#555; border-color:#333; }"
+            "QSlider::groove:horizontal { background:#333; height:6px; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#88f; width:14px; height:14px; margin:-4px 0;"
+            "  border-radius:7px; border:1px solid #66c; }"
+            "QSlider::sub-page:horizontal { background:#556; border-radius:3px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:11px; }"
+        );
+        QVBoxLayout* audioVLayout = new QVBoxLayout(audioBar);
+        audioVLayout->setContentsMargins(6, 4, 6, 4);
+        audioVLayout->setSpacing(4);
+
+        // Top row: file label + time label
+        QHBoxLayout* audioTopRow = new QHBoxLayout();
+        audioFileLabel = new QLabel("(no audio loaded)");
+        audioFileLabel->setStyleSheet("color:#cfc; font-family:Consolas; font-size:11px;");
+        audioTopRow->addWidget(audioFileLabel);
+        audioTopRow->addStretch();
+        audioTimeLabel = new QLabel("0.000 / 0.000 s");
+        audioTopRow->addWidget(audioTimeLabel);
+        audioVLayout->addLayout(audioTopRow);
+
+        // Scrubber
+        audioScrubber = new QSlider(Qt::Horizontal);
+        audioScrubber->setRange(0, 1000);
+        audioScrubber->setValue(0);
+        audioScrubber->setEnabled(false);
+        audioVLayout->addWidget(audioScrubber);
+
+        // Bottom row: transport buttons + volume
+        QHBoxLayout* audioBtnRow = new QHBoxLayout();
+        audioBtnRow->setSpacing(6);
+        audioBtnBack   = new QPushButton("\u23ee"); audioBtnBack->setToolTip("Restart");
+        audioBtnRewind = new QPushButton("\u23ea"); audioBtnRewind->setToolTip("Back 5 s");
+        audioBtnPlay   = new QPushButton("\u25b6");
+        audioBtnPlay->setObjectName("audioPlayBtn");
+        audioBtnPlay->setToolTip("Play / Pause / Resume");
+        audioBtnStop   = new QPushButton("\u25a0"); audioBtnStop->setToolTip("Stop");
+        audioBtnFwd    = new QPushButton("\u23e9"); audioBtnFwd->setToolTip("Forward 5 s");
+        audioBtnNext   = new QPushButton("\u23ed"); audioBtnNext->setToolTip("End");
+        QLabel* volLbl = new QLabel("Vol:");
+        audioVolume = new QSlider(Qt::Horizontal);
+        audioVolume->setRange(0, 100);
+        audioVolume->setValue(80);
+        audioVolume->setFixedWidth(110);
+        audioVolume->setToolTip("Volume");
+        audioBtnRow->addStretch();
+        audioBtnRow->addWidget(audioBtnBack);
+        audioBtnRow->addWidget(audioBtnRewind);
+        audioBtnRow->addWidget(audioBtnPlay);
+        audioBtnRow->addWidget(audioBtnStop);
+        audioBtnRow->addWidget(audioBtnFwd);
+        audioBtnRow->addWidget(audioBtnNext);
+        audioBtnRow->addSpacing(12);
+        audioBtnRow->addWidget(volLbl);
+        audioBtnRow->addWidget(audioVolume);
+        audioBtnRow->addStretch();
+        audioVLayout->addLayout(audioBtnRow);
+
+        audioBar->hide();
+        // Unified transparent styling (so the bar blends with the viewer
+        // toolbar row that holds it).
+        audioBar->setStyleSheet(
+            "QWidget#audioBar { background:transparent; }"
+            "QPushButton { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px;"
+            "  padding:3px 10px; font-size:12px; min-width:30px; }"
+            "QPushButton:hover { background:#4a4a4a; }"
+            "QPushButton#audioPlayBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:14px; }"
+            "QPushButton#audioPlayBtn:hover { background:#2a6a2a; }"
+            "QPushButton:disabled { background:#2a2a2a; color:#555; border-color:#333; }"
+            "QSlider::groove:horizontal { background:#333; height:6px; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#88f; width:14px; height:14px; margin:-4px 0;"
+            "  border-radius:7px; border:1px solid #66c; }"
+            "QSlider::sub-page:horizontal { background:#556; border-radius:3px; }"
+            "QLabel { color:#aaa; font-family:Consolas; font-size:11px; }"
+        );
+
+        // Connect the audio controls.
+        connect(audioBtnBack,   &QPushButton::clicked, this, [this]() { audioSeek(0); });
+        connect(audioBtnRewind, &QPushButton::clicked, this, [this]() { audioSkip(-kAudioSkipMs); });
+        connect(audioBtnPlay,   &QPushButton::clicked, this, [this]() { audioPlayPauseResume(); });
+        connect(audioBtnStop,   &QPushButton::clicked, this, [this]() { audioStop(); });
+        connect(audioBtnFwd,    &QPushButton::clicked, this, [this]() { audioSkip(+kAudioSkipMs); });
+        connect(audioBtnNext,   &QPushButton::clicked, this, [this]() { audioSeek(audioLengthMs()); });
+        connect(audioScrubber,  &QSlider::sliderMoved, this, [this](int v) {
+            int len = audioLengthMs();
+            if (len > 0) audioSeek((int)((double)v / 1000.0 * len));
+        });
+        connect(audioVolume, &QSlider::valueChanged, this, [this](int v) {
+            // MCI volume: 0..1000 (out of 1000).  Translate our 0..100.
+            wchar_t cmd[128];
+            std::swprintf(cmd, 128, L"setaudio igi1conv_wav volume to %d", v * 10);
+            mciSendString(cmd, nullptr, 0, nullptr);
+        });
+
+        // Position-tick timer (drives the scrubber / time label while
+        // playing).  100 ms is plenty for a smooth progress bar without
+        // burning CPU.
+        audioTimer = new QTimer(this);
+        audioTimer->setInterval(100);
+        connect(audioTimer, &QTimer::timeout, this, [this]() { audioRefreshFromMci(); });
+        // ── Animation Panel (Mode 5) ──────────────────────────────────────────
         // Shows when the Mode combo is set to "Animation".  Combines the
         // 3D MEF viewer with the IFF animation timeline.  Layout:
         //   [Model: dropdown] [Animations: listbox] [▶ Play]  [loop] [fps 30]
@@ -3881,9 +4000,6 @@ public:
             "QPushButton { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px;"
             "  padding:1px 8px; font-size:11px; min-width:30px; max-height:20px; }"
             "QPushButton:hover { background:#4a4a4a; }"
-            "QPushButton#animPlayBtn { background:#1e4a1e; color:#7f7; border-color:#484; font-size:12px; min-width:48px; max-height:22px; }"
-            "QPushButton#animPlayBtn:hover { background:#2a6a2a; }"
-            "QPushButton#animPlayBtn:disabled { background:#333; color:#666; border-color:#444; }"
             "QComboBox { background:#333; color:#ddd; border:1px solid #555; border-radius:3px; padding:1px 4px; max-height:20px; }"
             "QListWidget { background:#222; color:#ddd; border:1px solid #555; border-radius:3px;"
             "  font-family:Consolas; font-size:10px; padding:1px; max-height:60px; }"
@@ -3911,12 +4027,11 @@ public:
         animAnimList->setToolTip("Available (boneHierarchy, animation) pairs for the selected model");
         animLayout->addWidget(animAnimList);
 
-        animPlayBtn = new QPushButton("\u25b6 Play");
-        animPlayBtn->setObjectName("animPlayBtn");
-        animPlayBtn->setToolTip("Load MEF + IFF and start playback at 30 FPS");
-        animPlayBtn->setEnabled(false);
-        animPlayBtn->setMaximumHeight(22);
-        animLayout->addWidget(animPlayBtn);
+        // No standalone Play button here: the shared IFF media bar above
+        // already provides play/pause/forward/backward transport.  This
+        // panel only drives the objects.qsc-based model/anim selector
+        // and FPS input; double-clicking an entry in animAnimList loads
+        // + plays it via onAnimationPlayClicked.
 
         animLoopChk = new QCheckBox("Loop");
         animLoopChk->setChecked(true);
@@ -3945,8 +4060,7 @@ public:
         // the temp ANIMS directory, and the modelViewer.
         connect(animModelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &MainWindow::onAnimationModelChanged);
-        connect(animPlayBtn, &QPushButton::clicked,
-                this, &MainWindow::onAnimationPlayClicked);
+        // Double-click an entry in the anim list to load + play it.
         connect(animAnimList, &QListWidget::itemDoubleClicked,
                 this, &MainWindow::onAnimationPlayClicked);
         connect(animFpsInput, &QLineEdit::editingFinished, this, [this]() {
@@ -3959,8 +4073,13 @@ public:
                     g_logger(QString("[INFO] Animation FPS set to %1").arg(modelViewer->animationFps), LOG_INFO);
             }
         });
-
         viewerToolbarLayout->addWidget(iffMediaBar);
+        // Audio bar lives in the same unified viewer toolbar
+        // row as the IFF media bar so the music-player controls sit
+        // at the same screen position regardless of which file type
+        // is loaded.  It is hidden by default and only shown when a
+        // .wav is opened in Audio mode.
+        viewerToolbarLayout->addWidget(audioBar);
 
         // Wire media bar buttons
         connect(iffBtnPlay, &QPushButton::clicked, this, [this]() {
@@ -4101,19 +4220,8 @@ public:
 
         connect(viewModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
             // Always reload currentFile on a mode change so the new
-            // mode's hideAllViewers()/toolbar rules apply.  For Mode
-            // 6 (Animation) we render the panel + the 3D viewport
-            // together; the actual MEF/IFF load happens via the
-            // panel's Play button, not here.
-            if (index == 6) {
-                if (animationSet.entries.empty()) {
-                    // Either no path is set, or no entries loaded.
-                    // loadAnimationSetFromQsc handles both cases and
-                    // falls back to auto-detection from LevelPath.
-                    loadAnimationSetFromQsc();
-                }
-                loadFile(currentFile.isEmpty() ? QString() : currentFile, 6);
-            } else if (!currentFile.isEmpty()) {
+            // mode's hideAllViewers()/toolbar rules apply.
+            if (!currentFile.isEmpty()) {
                 loadFile(currentFile, index);
             }
         });
@@ -4132,6 +4240,11 @@ public:
     }
 
     void closeEvent(QCloseEvent *event) override {
+        // Stop any in-flight MCI playback so the app exits cleanly
+        // (otherwise winmm can hold a handle open and Windows will
+        // complain on shutdown).
+        if (audioTimer) audioTimer->stop();
+        mciClose();
         QDir tempDir(QDir::tempPath() + "/igi_temp_mef");
         if (tempDir.exists()) tempDir.removeRecursively();
         QMainWindow::closeEvent(event);
@@ -4193,6 +4306,29 @@ private:
     QSlider* iffScrubber = nullptr;
     QLabel* iffTimeLabel = nullptr;
 
+    // ── Audio mode (Mode 4) ─────────────────────────────────────────────────
+    // IGI ships audio as a proprietary ILSF container.  When the user
+    // opens a .wav in Audio mode we transparently run `wav convert` to
+    // produce a sibling <name>.playback.wav, then load it into MCI for
+    // in-process playback.  The standard music-player controls live
+    // here: play / pause / resume / stop / back / forward / scrub.
+    QWidget* audioBar = nullptr;
+    QPushButton* audioBtnBack = nullptr;    // ⏮  jump back
+    QPushButton* audioBtnRewind = nullptr;  // ⏪  -5s
+    QPushButton* audioBtnPlay = nullptr;    // ▶ / ⏸
+    QPushButton* audioBtnStop = nullptr;    // ⏹
+    QPushButton* audioBtnFwd = nullptr;     // ⏩  +5s
+    QPushButton* audioBtnNext = nullptr;    // ⏭  jump forward (next file)
+    QSlider* audioScrubber = nullptr;       // 0..1000 progress
+    QSlider* audioVolume = nullptr;         // 0..100 volume
+    QLabel* audioTimeLabel = nullptr;       // "1.234 / 5.000 s"
+    QLabel* audioFileLabel = nullptr;       // current file
+    QTimer* audioTimer = nullptr;           // updates scrubber while playing
+    QString audioCurrentPath;               // wav currently loaded into MCI
+    QString audioSourceName;                // original source name shown in UI
+    bool    audioMciReady = false;          // true if the MCI alias is open
+    static constexpr int kAudioSkipMs = 5000; // ±5s for back/forward
+
     // ── 3D Graph toolbar (shows when a graph.dat is loaded) ────────────────
     QWidget* graphToolbar = nullptr;
     QPushButton* btnGraphNodePlus = nullptr;
@@ -4205,7 +4341,7 @@ private:
     QComboBox* iffClipCombo = nullptr;
     bool iffScrubbing = false;
 
-    // ── Animation mode state (Mode 6) ──────────────────────────────────────
+    // ── Animation mode state (Mode 5) ──────────────────────────────────────
     // Gated by the Settings > Animation toggle (`globalAnimationModeEnabled`).
     // The QscObjectSet is the parsed view of the level's objects.qsc.
     // The temp directory under `globalCacheDir` holds the extracted
@@ -4214,7 +4350,6 @@ private:
     QWidget*    animationPanel     = nullptr;
     QComboBox*  animModelCombo     = nullptr;
     QListWidget* animAnimList      = nullptr;
-    QPushButton* animPlayBtn       = nullptr;
     QCheckBox*  animLoopChk        = nullptr;
     QLineEdit*  animFpsInput       = nullptr;
     QLabel*     animStatusLabel    = nullptr;
@@ -4247,6 +4382,12 @@ private:
         if (graphHexEditor) graphHexEditor->hide();
         if (imageEditor && imageEditor->toolsWidget) imageEditor->toolsWidget->hide();
         if (animationPanel) animationPanel->hide();
+        // Audio bar lives on the same unified viewer row as the IFF
+        // media bar; hide it (and stop playback) whenever the user
+        // switches mode.
+        if (audioBar) audioBar->hide();
+        if (audioTimer) audioTimer->stop();
+        mciClose();
         // Stop animation and reset play button
         if (modelViewer) {
             modelViewer->iffPause();
@@ -4255,20 +4396,18 @@ private:
         if (anim30FpsTimer) anim30FpsTimer->stop();
     }
 
-    // ── Animation mode (Mode 6) plumbing ────────────────────────────────────
+    // ── Animation mode plumbing ─────────────────────────────────────────────
     //
-    // The Mode combo has at most 7 entries (0..6).  The "Animation"
-    // entry is gated by `globalAnimationModeEnabled` and is removed
-    // from the combo when the toggle is off so it never gets picked
-    // by accident.  The View > Animation menu entry is wired in the
-    // toggle handler.
+    // Mode combo order is fixed so the View menu and context-menu "View As"
+    // stay in sync: 0=Auto 1=Text 2=Hex 3=Image 4=Audio 5=Animation 6=3D.
+    // "Animation" replaces the old "Video" mode and handles both .iff
+    // skeletal animations and .mef model previews with playback controls.
     void rebuildModeCombo() {
         if (!viewModeCombo) return;
         int prev = viewModeCombo->currentIndex();
         viewModeCombo->blockSignals(true);
         viewModeCombo->clear();
-        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "3D", "Video"});
-        if (globalAnimationModeEnabled) viewModeCombo->addItem("Animation");
+        viewModeCombo->addItems({"Auto", "Text", "Hex", "Image", "Audio", "Animation", "3D"});
         viewModeCombo->setCurrentIndex(qMin(prev, viewModeCombo->count() - 1));
         viewModeCombo->blockSignals(false);
     }
@@ -4419,10 +4558,7 @@ private:
             animModelCombo->setCurrentIndex(0);
             onAnimationModelChanged(0);
         } else {
-            // No entries - leave the Play button ENABLED so the user
-            // gets a helpful QMessageBox when they click it (instead
-            // of staring at a greyed-out button wondering why).
-            animPlayBtn->setEnabled(true);
+            // No entries - clear the list and show a status hint.
             animAnimList->clear();
             if (animStatusLabel) {
                 if (animationSet.entries.empty()) {
@@ -4443,7 +4579,6 @@ private:
         if (!animAnimList) return;
         animAnimList->clear();
         if (index < 0 || index >= animModelCombo->count()) {
-            animPlayBtn->setEnabled(false);
             return;
         }
         QString label = animModelCombo->itemText(index);
@@ -4456,7 +4591,7 @@ private:
                 .arg(a.boneHierarchy, 3, 10, QChar('0'))
                 .arg(a.standAnimation));
         }
-        animPlayBtn->setEnabled(anims.size() > 0);
+        (void)anims; // anim list is already populated above
         if (anims.empty()) {
             animStatusLabel->setText("No animations for this model");
         } else {
@@ -4496,37 +4631,175 @@ private:
     // 4 candidate extensions), then loads the bone-hierarchy IFF
     // (000.IFF, 001.IFF, ..., in the cache) and asks the model
     // viewer to play the requested clip.
-    // Right-click "Play Animation" on a .MEF file: auto-select this
-    // model in the Animation panel, switch to Animation mode, and list
-    // all available animations for it from the parsed objects.qsc set.
-    // If the model isn't in the set (e.g. it's not a HumanSoldier),
-    // we still load it and let the user pick an animation manually.
-    void playAnimationForMef(const QString& path) {
-        QString modelId = QFileInfo(path).completeBaseName();
-        // Switch to Animation mode
+    // Right-click "Play Animation" on a .MEF or .IFF file: switch to
+    // Animation mode and load the file.  For .MEF we also try to select
+    // the model in the animation panel so the user can pick a clip from
+    // objects.qsc; for .IFF the clip selector in the media bar is used.
+    void playAnimationForFile(const QString& path) {
+        QString ext = QFileInfo(path).suffix().toLower();
+        // Make this file the current file so the mode combo's index-changed
+        // signal (if any) and the viewer both operate on the right path.
+        currentFile = path;
+        currentExt = ext;
+        // Switch to Animation mode (index 5).  Block signals while changing
+        // the combo so we don't accidentally reload the previous currentFile.
         if (viewModeCombo) {
-            viewModeCombo->setCurrentIndex(6);
+            int animIdx = 5;
+            if (viewModeCombo->count() <= animIdx) animIdx = viewModeCombo->count() - 1;
+            viewModeCombo->blockSignals(true);
+            viewModeCombo->setCurrentIndex(animIdx);
+            viewModeCombo->blockSignals(false);
         }
-        // Try to find this modelId in the animation set and select it
-        if (!animationSet.entries.empty()) {
-            for (int i = 0; i < animModelCombo->count(); ++i) {
-                QString label = animModelCombo->itemText(i);
-                int sp = label.indexOf("  (");
-                QString id = (sp > 0) ? label.left(sp) : label;
-                if (id == modelId) {
-                    animModelCombo->setCurrentIndex(i);
-                    break;
+        if (ext == "mef" || ext == "mex") {
+            QString modelId = QFileInfo(path).completeBaseName();
+            // Auto-load animation set if empty so the user can pick an animation
+            if (animationSet.entries.empty()) {
+                loadAnimationSetFromQsc();
+            }
+            // Try to find this modelId in the animation set and select it
+            if (!animationSet.entries.empty()) {
+                for (int i = 0; i < animModelCombo->count(); ++i) {
+                    QString label = animModelCombo->itemText(i);
+                    int sp = label.indexOf("  (");
+                    QString id = (sp > 0) ? label.left(sp) : label;
+                    if (id == modelId) {
+                        animModelCombo->setCurrentIndex(i);
+                        break;
+                    }
+                }
+            }
+            if (modelViewer) {
+                modelViewer->loadModel(path);
+                modelViewer->show();
+            }
+            logMessage("[INFO] Play Animation: loaded " + modelId + " - pick an animation and click Play");
+            if (animStatusLabel) {
+                if (animationSet.entries.empty()) {
+                    animStatusLabel->setText("Set objects.qsc in Settings > Animation");
+                } else {
+                    animStatusLabel->setText("Pick an animation and click Play");
+                }
+            }
+            if (animationPanel) animationPanel->show();
+        } else if (ext == "iff" || ext == "bff") {
+            if (modelViewer) {
+                modelViewer->loadModel(path);
+                modelViewer->show();
+            }
+            logMessage("[INFO] Play Animation: loaded IFF " + QFileInfo(path).fileName());
+            if (animStatusLabel) animStatusLabel->setText("Playing IFF animation");
+            if (animationPanel) animationPanel->show();
+            if (iffMediaBar) iffMediaBar->show();
+        }
+    }
+
+    // Right-click "Apply Animation on Model" on a .IFF/.BFF: show a list
+    // of MEF model IDs found in the current level's models directory,
+    // let the user pick one, then load the MEF and apply the IFF
+    // animation to it.  The selected MEF's base name is used as the
+    // model ID (e.g. "000_01_1").
+    void applyIffOnModel(const QString& iffPath) {
+        // Resolve the models directory.  Fall back to the folder
+        // containing the IFF if no models dir is configured.
+        QStringList searchDirs;
+        if (!globalModelsDir.isEmpty() && QDir(globalModelsDir).exists())
+            searchDirs << globalModelsDir;
+        QFileInfo iffInfo(iffPath);
+        if (iffInfo.absoluteDir().exists())
+            searchDirs << iffInfo.absolutePath();
+
+        if (searchDirs.isEmpty()) {
+            QMessageBox::warning(this, "Apply Animation on Model",
+                "No models directory configured.\n\n"
+                "Set the LEVEL models folder via Settings > Animation > "
+                "Set LEVEL Models Folder..., then try again.");
+            return;
+        }
+
+        // Collect every *.mef / *.mex under the search dirs.
+        QMap<QString, QString> modelIdToPath;
+        QStringList modelIds;
+        for (const QString& d : searchDirs) {
+            QDirIterator it(d, QStringList() << "*.mef" << "*.MEF"
+                                              << "*.mex" << "*.MEX",
+                        QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                QString p = it.next();
+                QString stem = QFileInfo(p).completeBaseName();
+                if (!modelIdToPath.contains(stem)) {
+                    modelIdToPath.insert(stem, p);
+                    modelIds << stem;
                 }
             }
         }
-        // Load the MEF directly in the 3D viewer
-        if (modelViewer) {
-            modelViewer->loadModel(path);
-            modelViewer->show();
-            if (animationPanel) animationPanel->show();
+        modelIds.sort();
+
+        // Filter to only show model IDs in the 000_00_0 – 030_00_0 range.
+        QStringList filteredIds;
+        for (const QString& id : modelIds) {
+            if (id >= "000_00_0" && id <= "030_00_0") {
+                filteredIds << id;
+            }
         }
-        logMessage("[INFO] Play Animation: loaded " + modelId + " - pick an animation from the list and click Play");
-        if (animStatusLabel) animStatusLabel->setText("Pick an animation and click Play");
+        modelIds = filteredIds;
+
+        if (modelIds.isEmpty()) {
+            QMessageBox::warning(this, "Apply Animation on Model",
+                "No .mef / .mex models found in:\n" +
+                searchDirs.join("\n"));
+            return;
+        }
+
+        // Let the user pick a model.  Use QInputDialog::getItem for a
+        // compact, searchable picker.
+        bool ok = false;
+        QString chosen = QInputDialog::getItem(
+            this, "Apply Animation on Model",
+            QString("Select a MEF model to apply\n%1\nto:")
+                .arg(QFileInfo(iffPath).fileName()),
+            modelIds, 0, true, &ok);
+        if (!ok || chosen.isEmpty()) return;
+
+        // Find the MEF path for the chosen model ID.
+QString mefPath = modelIdToPath.value(chosen);
+if (mefPath.isEmpty()) {
+    QMessageBox::warning(this, "Apply Animation on Model",
+        "Could not locate MEF file for model: " + chosen);
+    return;
+}
+
+        // Make this the current file and switch to Animation mode so
+        // the media bar / animation panel show.  Block signals to
+        // avoid the combo's index-changed handler reloading a stale
+        // currentFile (same guard as playAnimationForFile).
+        currentFile = mefPath;
+        currentExt = "mef";
+        if (viewModeCombo) {
+            int animIdx = 5;
+            if (viewModeCombo->count() <= animIdx) animIdx = viewModeCombo->count() - 1;
+            viewModeCombo->blockSignals(true);
+            viewModeCombo->setCurrentIndex(animIdx);
+            viewModeCombo->blockSignals(false);
+        }
+
+        // Load the MEF (provides the body mesh) then the IFF (provides
+        // the bone animation).  loadIff() re-parses the IFF, computes
+        // rest-pose bone transforms, and starts the play timer.
+        if (modelViewer) {
+            modelViewer->loadModel(mefPath);
+            modelViewer->loadIff(iffPath);
+            modelViewer->show();
+        }
+        if (animationPanel) animationPanel->show();
+        if (iffMediaBar) iffMediaBar->show();
+
+        logMessage("[INFO] Apply Animation on Model: IFF " +
+            QFileInfo(iffPath).fileName() + " -> MEF " +
+            QFileInfo(mefPath).fileName());
+        if (animStatusLabel) {
+            animStatusLabel->setText(QString("Playing %1 on %2")
+                .arg(QFileInfo(iffPath).fileName(), chosen));
+        }
     }
 
     void onAnimationPlayClicked() {
@@ -4675,9 +4948,11 @@ private:
             int clipCount = modelViewer->iffGetClipCount();
             for (int i = 0; i < clipCount; ++i) {
                 if (modelViewer->iffGetClipAnimId(i) == sa) {
-                    modelViewer->playClip(i);
-                    animStatusLabel->setText(QString("Playing %1 / bh=%2 / anim=%3 (clip %4/%5) %6 FPS")
-                        .arg(modelId).arg(bh).arg(sa).arg(i+1).arg(clipCount).arg(modelViewer->animationFps));
+modelViewer->playClip(i);
+if (iffBtnPlay) iffBtnPlay->setText("\u23f8");
+if (iffMediaBar) iffMediaBar->show();
+animStatusLabel->setText(QString("Playing %1 / bh=%2 / anim=%3 (clip %4/%5) %6 FPS")
+    .arg(modelId).arg(bh).arg(sa).arg(i+1).arg(clipCount).arg(modelViewer->animationFps));
                     logMessage(QString("[INFO] Animation playing: model=%1 bh=%2 anim=%3 clip=%4")
                         .arg(modelId).arg(bh).arg(sa).arg(i));
                     return;
@@ -4687,15 +4962,424 @@ private:
             // clip 0 so the user sees something animate (better UX
             // than an empty screen).
             if (clipCount > 0) {
-                modelViewer->playClip(0);
-                animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
-                    .arg(sa));
+modelViewer->playClip(0);
+if (iffBtnPlay) iffBtnPlay->setText("\u23f8");
+if (iffMediaBar) iffMediaBar->show();
+animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
+    .arg(sa));
                 logMessage(QString("[WARN] Animation: anim %1 not in %2, falling back to clip 0")
                     .arg(sa).arg(bhName));
             } else {
                 animStatusLabel->setText("No clips in IFF: " + bhName);
             }
         }
+    }
+
+    // ── wav helpers ────────────────────────────────────────────────────────
+    //
+    // All three actions below route through the `wav` subcommand so they
+    // behave identically for the IGI ILSF container and for any standard
+    // .wav the user has dropped into the project.  Playback is implemented
+    // by writing a sibling <file>.playback.wav and handing the URL to
+    // QDesktopServices - the OS picks the default media player
+    // (Windows Media Player, VLC, foobar2000, ...).  Re-playing the same
+    // file overwrites the previous copy; we never accumulate junk.
+
+    // Run `igi1conv wav convert <src> -o <dst>` and surface the result
+    // via the log + a modal message box on error.  `outPath` may be a
+    // file or a directory (the CLI handles both).
+    // Returns true on success.
+    bool runWavConvert(const QString& src, const QString& outPath)
+    {
+        QProcess proc;
+        proc.setProgram(qApp->applicationFilePath());
+        proc.setArguments(QStringList() << "wav" << "convert" << src << "-o" << outPath);
+        proc.start();
+        if (!proc.waitForFinished(-1)) {
+            logMessage("[ERROR] wav convert: process did not finish in time");
+            QMessageBox::critical(this, "Conversion failed",
+                                  "igi1conv wav convert did not finish in time.");
+            return false;
+        }
+        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+            return true;
+        }
+        QString err = proc.readAllStandardError().trimmed();
+        if (err.isEmpty()) err = proc.readAllStandardOutput().trimmed();
+        if (err.isEmpty()) err = QString("exit code %1").arg(proc.exitCode());
+        logMessage("[ERROR] wav convert failed: " + err);
+        QMessageBox::critical(this, "Conversion failed", err);
+        return false;
+    }
+
+    // Compute a stable, content-addressed cache filename for a source
+    // .wav.  Key is SHA256(file contents) + last-modified msec + the
+    // output extension.  Re-encoding the same file is instant because
+    // the cache key only changes when the contents change.
+    QString wavCacheKey(const QString& srcPath, const QString& outExt) const
+    {
+        QFile f(srcPath);
+        if (!f.open(QIODevice::ReadOnly)) return {};
+        QByteArray hash = QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256);
+        f.close();
+        QFileInfo fi(srcPath);
+        qint64 msec = fi.lastModified().toMSecsSinceEpoch();
+        return QString::fromLatin1(hash.toHex().left(16)) + "_" +
+               QString::number(msec, 16) + outExt;
+    }
+
+    // Single cache directory for everything (audio, textures, models,
+    // animations).  Falls back to <temp>/igi_temp_mef if the user
+    // hasn't set one yet (the constructor pre-creates the directory).
+    // The user picks this once via Settings > Cache Folder... and
+    // every subsystem (audio playback, MEF bundling, animation cache,
+    // etc.) lands its files there.
+    QString wavCacheDir() const
+    {
+        QString d = globalCacheDir;
+        if (d.isEmpty()) d = QDir::tempPath() + "/igi_temp_mef";
+        QDir().mkpath(d);
+        return d;
+    }
+
+    // Convert `srcPath` (IGI .wav or standard WAV) to the chosen
+    // extension, landing in the user-configured audio cache directory.
+    // Returns the cached output path, or an empty string on error.
+    // Re-opening the same source file is instant - the output path
+    // is stable across runs as long as the source file is unchanged.
+    QString cachedIgiWavConvert(const QString& srcPath, const QString& outExt)
+    {
+        if (!QFile::exists(srcPath)) {
+            logMessage("[ERROR] cachedIgiWavConvert: not found: " + srcPath);
+            return {};
+        }
+        const QString key = wavCacheKey(srcPath, outExt);
+        if (key.isEmpty()) {
+            logMessage("[ERROR] cachedIgiWavConvert: failed to hash: " + srcPath);
+            return {};
+        }
+        const QString outPath = wavCacheDir() + "/" + key;
+        if (QFile::exists(outPath)) {
+            logMessage("[INFO] Audio cache hit: " + outPath);
+            return outPath;
+        }
+        logMessage("[INFO] Audio cache miss, converting: " + srcPath + " -> " + outPath);
+        if (!runWavConvert(srcPath, outPath)) return {};
+        return outPath;
+    }
+
+    // Convert the IGI .wav at `path` to a cached <key>.wav in the
+    // audio cache directory and open it with the system's default
+    // media player.  Identical inputs hit the cache instantly.
+    void playIgiWav(const QString& path)
+    {
+        QString outPath = cachedIgiWavConvert(path, ".wav");
+        if (outPath.isEmpty()) return;
+        logMessage("[SUCCESS] Converted for playback: " + outPath);
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(outPath))) {
+            QMessageBox::warning(this, "Playback",
+                "Converted to:\n" + outPath +
+                "\n\nbut the system could not launch a media player for it.\n"
+                "Open it manually or install a media player (e.g. VLC).");
+        }
+    }
+
+    // Right-click "Convert to .wav (Windows PCM)..." -> standard
+    // Save As dialog.  The user picks the exact destination file
+    // (and can create a new folder from inside the dialog).  The
+    // file is decoded straight from the ILSF / ADPCM source and
+    // written as standard PCM .wav.  No caching - the file lands
+    // wherever the user pointed.
+    //
+    // (`Play in default media player` still uses the SHA-256 cache
+    // so re-plays are instant.)
+    void convertIgiWav(const QString& path)
+    {
+        const QFileInfo fi(path);
+        const QString defDir = fi.absolutePath();
+        const QString defFile = fi.completeBaseName() + ".wav";
+        QString outPath = QFileDialog::getSaveFileName(this,
+            "Save Decoded Audio As",
+            defDir + "/" + defFile,
+            "Windows PCM WAV (*.wav)");
+        if (outPath.isEmpty()) return;  // user cancelled
+
+        // Defensive: the dialog filters on .wav, but the user can
+        // type a different extension.  Force .wav so the file is
+        // actually playable.
+        if (!outPath.endsWith(".wav", Qt::CaseInsensitive))
+            outPath += ".wav";
+
+        std::string err;
+        // encode_pcm_to_mp3 was removed when we dropped LAME; only
+        // .wav is supported.  We hit runWavConvert directly.
+        if (!runWavConvert(path, outPath)) {
+            // runWavConvert already showed a modal error dialog.
+            return;
+        }
+        logMessage("[SUCCESS] wav convert: " + path + " -> " + outPath);
+        QMessageBox::information(this, "Converted", "Saved as:\n" + outPath);
+    }
+
+    // Batch-convert every *.wav under `dir` (recursive) to <outDir>,
+    // preserving the directory tree.  Output is always standard PCM
+    // .wav in this build (no MP3 / no external DLL).  Mirrors
+    // `igi1conv wav convert-dir`.
+    void convertIgiWavDir(const QString& dir)
+    {
+        const QString outExt = ".wav";
+        QString outDir = QFileDialog::getExistingDirectory(
+            this, "Choose output folder for converted .wav files",
+            QFileInfo(dir).absolutePath());
+        if (outDir.isEmpty()) return;
+
+        QProcess proc;
+        proc.setProgram(qApp->applicationFilePath());
+        proc.setArguments(QStringList() << "wav" << "convert-dir" << dir << "-o" << outDir);
+        proc.start();
+        proc.waitForFinished(-1);
+        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+            logMessage("[SUCCESS] wav convert-dir: " + dir + " -> " + outDir + outExt);
+            QMessageBox::information(this, "Batch Converted",
+                "All decodable .wav files under\n" + dir +
+                "\nwere converted to " + outExt + " in\n" + outDir);
+        } else {
+            QString err = proc.readAllStandardError().trimmed();
+            if (err.isEmpty()) err = proc.readAllStandardOutput().trimmed();
+            logMessage("[ERROR] wav convert-dir failed: " + err);
+            QMessageBox::critical(this, "Batch Conversion failed", err);
+        }
+    }
+
+    // Recursively count *.wav files under `dir`.  Used to decide whether
+    // to expose the "Batch Convert" submenu in the right-click menu of
+    // a folder.  We walk the tree ourselves (rather than spawning a
+    // igi1conv process just to ask) so the menu decision is instant and
+    // doesn't litter the log.
+    int countWavFilesRec(const QString& dir, int depth = 0) const
+    {
+        if (depth > 8) return 0;  // safety: don't walk absurdly deep trees
+        QDir d(dir);
+        int n = d.entryList(QStringList() << "*.wav",
+                            QDir::Files | QDir::Hidden).size();
+        for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            n += countWavFilesRec(sub.absoluteFilePath(), depth + 1);
+        }
+        return n;
+    }
+
+    // ── Audio mode (MCI-backed music player) ────────────────────────────────
+    //
+    // All transport is driven by Windows MCI.  The "igi1conv_wav" alias
+    // is created once when a file is opened and reused across play /
+    // pause / resume / seek / stop.  Helpers below return -1 when MCI
+    // reports an error and the caller surfaces the error string in the
+    // log + a status label.
+
+    // The MCI alias we use for every playback.  Fixed so play / pause
+    // / resume / seek all hit the same device without races.
+    static constexpr const wchar_t* kMciAlias = L"igi1conv_wav";
+
+    // Run an MCI command that doesn't return a string.  Returns true on
+    // success; on failure the error is logged.
+    bool mciRun(const wchar_t* cmd)
+    {
+        MCIERROR err = mciSendString(cmd, nullptr, 0, nullptr);
+        if (err != 0) {
+            wchar_t errBuf[256] = {};
+            mciGetErrorString(err, errBuf, 256);
+            logMessage(QString("[ERROR] MCI '%1' failed: %2")
+                .arg(QString::fromWCharArray(cmd), QString::fromWCharArray(errBuf)));
+            return false;
+        }
+        return true;
+    }
+
+    // Send an MCI command that returns a string (e.g. "status ... length").
+    // Returns the trimmed UTF-16 string, or empty on error.
+    QString mciQuery(const wchar_t* cmd)
+    {
+        wchar_t buf[256] = {};
+        MCIERROR err = mciSendString(cmd, buf, 256, nullptr);
+        if (err != 0) return {};
+        return QString::fromWCharArray(buf).trimmed();
+    }
+
+    // Close the MCI alias if it's open, ignoring errors so we can call
+    // this repeatedly.
+    void mciClose()
+    {
+        if (!audioMciReady) return;
+        mciRun(L"stop igi1conv_wav");
+        mciRun(L"close igi1conv_wav");
+        audioMciReady = false;
+    }
+
+    // Open `wavPath` into MCI.  Converts to a Windows-friendly absolute
+    // path and quotes it.  Returns true on success.
+    bool mciOpen(const QString& wavPath)
+    {
+        mciClose();
+        QString absPath = QFileInfo(wavPath).absoluteFilePath();
+        // mciSendString wants a command line in UTF-16 (Windows wide
+        // strings on the host platform).  QFileInfo gives us forward
+        // slashes; MCI accepts either.
+        std::wstring cmd = L"open \"";
+        cmd += absPath.toStdWString();
+        cmd += L"\" type waveaudio alias igi1conv_wav";
+        if (!mciRun(cmd.c_str())) return false;
+        audioMciReady = true;
+        audioCurrentPath = wavPath;
+        if (audioFileLabel) {
+            // Show the original source file name, not the cached temp file name.
+            audioFileLabel->setText(audioSourceName.isEmpty() ? QFileInfo(wavPath).fileName() : audioSourceName);
+        }
+        if (audioScrubber) audioScrubber->setEnabled(true);
+        if (audioTimeLabel) {
+            int lenMs = audioLengthMs();
+            audioTimeLabel->setText(QString("0.000 / %1 s")
+                .arg(lenMs / 1000.0, 0, 'f', 3));
+        }
+        return true;
+    }
+
+    // Total length of the currently-loaded WAV in milliseconds, or 0.
+    int audioLengthMs() const
+    {
+        if (!audioMciReady) return 0;
+        // mciQuery is non-const; cast through to keep this read-only
+        // helper const-friendly for callers that don't mutate state.
+        QString s = const_cast<MainWindow*>(this)->mciQuery(L"status igi1conv_wav length");
+        return s.toInt();
+    }
+
+    // Current position in ms, or 0.
+    int audioPositionMs() const
+    {
+        if (!audioMciReady) return 0;
+        QString s = const_cast<MainWindow*>(this)->mciQuery(L"status igi1conv_wav position");
+        return s.toInt();
+    }
+
+    // MCI mode string -> one of: "playing", "paused", "stopped".
+    QString audioMode() const
+    {
+        if (!audioMciReady) return QString();
+        return const_cast<MainWindow*>(this)->mciQuery(L"status igi1conv_wav mode");
+    }
+
+    // Drive the scrubber + time label from MCI's current state.  Called
+    // by the position-tick timer while playing, and after every
+    // transport action so the UI stays in sync.
+    void audioRefreshFromMci()
+    {
+        if (!audioMciReady) return;
+        int lenMs = audioLengthMs();
+        int posMs = audioPositionMs();
+        if (audioScrubber) {
+            int v = (lenMs > 0) ? (int)((double)posMs / lenMs * 1000.0) : 0;
+            v = std::clamp(v, 0, 1000);
+            // Only update if the user isn't currently dragging it.
+            if (audioScrubber->isSliderDown() == false)
+                audioScrubber->setValue(v);
+        }
+        if (audioTimeLabel) {
+            audioTimeLabel->setText(QString("%1 / %2 s")
+                .arg(posMs / 1000.0, 0, 'f', 3)
+                .arg(lenMs / 1000.0, 0, 'f', 3));
+        }
+        // Auto-stop when the file ends.
+        QString mode = audioMode();
+        if (mode == "stopped" && audioTimer && audioTimer->isActive() &&
+            posMs > 0 && lenMs > 0 && posMs >= lenMs) {
+            audioTimer->stop();
+            if (audioBtnPlay) audioBtnPlay->setText("\u25b6");
+        }
+    }
+
+    // Toggle play / pause / resume so the single "play" button behaves
+    // like a standard music player.
+    void audioPlayPauseResume()
+    {
+        if (!audioMciReady) return;
+        QString mode = audioMode();
+        if (mode == "playing") {
+            mciRun(L"pause igi1conv_wav");
+            if (audioBtnPlay) audioBtnPlay->setText("\u25b6");
+            if (audioTimer) audioTimer->stop();
+        } else if (mode == "paused") {
+            mciRun(L"resume igi1conv_wav");
+            if (audioBtnPlay) audioBtnPlay->setText("\u23f8");
+            if (audioTimer) audioTimer->start();
+        } else {
+            mciRun(L"play igi1conv_wav");
+            if (audioBtnPlay) audioBtnPlay->setText("\u23f8");
+            if (audioTimer) audioTimer->start();
+        }
+        audioRefreshFromMci();
+    }
+
+    void audioStop()
+    {
+        if (!audioMciReady) return;
+        mciRun(L"stop igi1conv_wav");
+        mciRun(L"seek igi1conv_wav to start");
+        if (audioBtnPlay) audioBtnPlay->setText("\u25b6");
+        if (audioTimer) audioTimer->stop();
+        audioRefreshFromMci();
+    }
+
+    // Seek by an absolute number of milliseconds, clamped to [0, length].
+    void audioSeek(int posMs)
+    {
+        if (!audioMciReady) return;
+        int lenMs = audioLengthMs();
+        if (lenMs <= 0) return;
+        posMs = std::clamp(posMs, 0, lenMs);
+        wchar_t cmd[64];
+        std::swprintf(cmd, 64, L"seek igi1conv_wav to %d", posMs);
+        mciRun(cmd);
+        audioRefreshFromMci();
+    }
+
+    // Skip by a relative offset (in ms); negative = backwards.
+    void audioSkip(int deltaMs)
+    {
+        if (!audioMciReady) return;
+        audioSeek(audioPositionMs() + deltaMs);
+    }
+
+    // Public entry point: load `srcWav` (an IGI .wav file path) into
+    // the audio bar.  Runs the IGI->Windows PCM conversion first so the
+    // MCI alias can open the result.  `autoPlay` starts playback as
+    // soon as the file is ready.
+    void audioLoadIgiWav(const QString& srcWav, bool autoPlay = false)
+    {
+        QFileInfo fi(srcWav);
+        if (!fi.exists()) {
+            logMessage("[ERROR] audioLoadIgiWav: not found: " + srcWav);
+            return;
+        }
+        // Guard against non-audio files (e.g. a .mef selected while Audio
+        // mode is active).  Only .wav files can be decoded/played here.
+        if (fi.suffix().toLower() != "wav") {
+            logMessage("[WARN] Audio mode: " + fi.fileName() + " is not a .wav file");
+            if (audioFileLabel) audioFileLabel->setText(fi.fileName() + " (not audio)");
+            return;
+        }
+        audioSourceName = fi.fileName();
+        // Route through the audio cache: SHA256(src) + mtime keyed,
+        // so re-opening the same file is instant.  The cached file
+        // is the standard PCM .wav the MCI alias can play directly.
+        QString outPath = cachedIgiWavConvert(srcWav, ".wav");
+        if (outPath.isEmpty()) {
+            return;
+        }
+        if (!mciOpen(outPath)) {
+            return;
+        }
+        logMessage("[SUCCESS] Audio mode loaded: " + outPath);
+        if (autoPlay) audioPlayPauseResume();
     }
 
     void showContextMenu(const QPoint& pos) {
@@ -4755,6 +5439,70 @@ private:
                     }
                 });
             }
+
+            // Batch conversion for all recognised formats.
+            QStringList filePaths;
+            for (auto& idx : selectedIndexes) {
+                QString p = fileModel->filePath(proxyModel->mapToSource(idx));
+                if (!QFileInfo(p).isDir()) filePaths << p;
+            }
+            if (!filePaths.isEmpty()) {
+                QMenu* batchMenu = menu.addMenu("Batch Conversion");
+                auto addBatch = [&](const QString& label, const QString& newExt, const QStringList& validExts) {
+                    int count = 0;
+                    for (const QString& p : filePaths) {
+                        if (validExts.contains(QFileInfo(p).suffix().toLower())) ++count;
+                    }
+                    if (count == 0) return;
+                    batchMenu->addAction(QString("%1 %2 file(s) to %3").arg(label).arg(count).arg(newExt.toUpper()), [this, filePaths, newExt, validExts]() {
+                        QString outDir = QFileDialog::getExistingDirectory(this, "Select output folder", QFileInfo(filePaths.first()).absolutePath());
+                        if (outDir.isEmpty()) return;
+                        int done = 0, failed = 0;
+                        for (const QString& src : filePaths) {
+                            if (!validExts.contains(QFileInfo(src).suffix().toLower())) continue;
+                            QString dst = outDir + "/" + QFileInfo(src).completeBaseName() + "." + newExt;
+                            QString cmd;
+                            QStringList args;
+                            QString ext = QFileInfo(src).suffix().toLower();
+                            if (newExt == "obj") {
+                                args << "mef" << "export" << src << "-o" << dst;
+                            } else if (newExt == "txt") {
+                                args << "mef" << "to-text" << src << "-o" << dst;
+                            } else if (newExt == "wav") {
+                                args << "wav" << "convert" << src << "-o" << dst;
+                            } else if (newExt == "bef") {
+                                args << "iff" << "convert" << src << outDir;
+                            } else if (newExt == "tga" || newExt == "png" || newExt == "spr" || newExt == "tex") {
+                                QString sub = (newExt == "tga") ? "to-tga" : (newExt == "png") ? "to-png" : "to-spr";
+                                args << "tex" << sub << src << "-o" << dst;
+                            }
+                            if (args.isEmpty()) { ++failed; continue; }
+                            QProcess proc;
+                            proc.setProgram(qApp->applicationFilePath());
+                            proc.setArguments(args);
+                            proc.start();
+                            proc.waitForFinished(-1);
+                            if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                                ++done;
+                            } else {
+                                ++failed;
+                                logMessage("[ERROR] Batch convert failed: " + src + " -> " + dst + "\n" + proc.readAllStandardError());
+                            }
+                        }
+                        logMessage(QString("[INFO] Batch conversion complete: %1 succeeded, %2 failed").arg(done).arg(failed));
+                        QMessageBox::information(this, "Batch Conversion", QString("Converted %1 file(s) to %2\n%3 succeeded, %4 failed").arg(done + failed).arg(newExt.toUpper()).arg(done).arg(failed));
+                    });
+                };
+                addBatch("Convert", "tga",  {"tex", "spr", "pic"});
+                addBatch("Convert", "png",  {"tex", "spr", "pic"});
+                addBatch("Convert", "spr",  {"tex", "spr", "pic", "png", "tga", "bmp", "jpg", "jpeg"});
+                addBatch("Convert", "tex",  {"png", "tga", "bmp", "jpg", "jpeg", "spr", "pic"});
+                addBatch("Convert", "obj",  {"mef", "mex"});
+                addBatch("Convert", "txt",  {"mef", "mex"});
+                addBatch("Convert", "wav",  {"wav"});
+                addBatch("Convert", "bef",  {"iff", "bff"});
+            }
+
             menu.exec(treeView->mapToGlobal(pos));
             return;
         }
@@ -4883,13 +5631,28 @@ private:
             menu.addAction("Open in Native App", [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
 
             QMenu* viewMenu = menu.addMenu("View As");
-            viewMenu->addAction("Text", [this, path]() { loadFile(path, 1); });
-            viewMenu->addAction("Hex",  [this, path]() { loadFile(path, 2); });
+            viewMenu->addAction("Auto",      [this, path]() { loadFile(path, 0); });
+            viewMenu->addAction("Text",      [this, path]() { loadFile(path, 1); });
+            viewMenu->addAction("Hex",       [this, path]() { loadFile(path, 2); });
             viewMenu->addAction("Image",     [this, path]() { loadFile(path, 3); });
-            viewMenu->addAction("3D",        [this, path]() { loadFile(path, 4); });
+            viewMenu->addAction("Audio",     [this, path]() { loadFile(path, 4); });
+            viewMenu->addAction("Animation", [this, path]() { loadFile(path, 5); });
+            viewMenu->addAction("3D",        [this, path]() { loadFile(path, 6); });
             menu.addSeparator();
 
             if (ext == "iff" || ext == "bff") {
+                menu.addAction("Play Animation", [this, path]() {
+                    playAnimationForFile(path);
+                });
+                // Apply this IFF animation to a chosen MEF model in the
+                // current level.  Scans the configured models directory
+                // for *.mef, lets the user pick one, then loads the MEF
+                // and the IFF together so the 3D viewer shows the
+                // animation playing on that model.
+                menu.addAction("Apply Animation on Model...", [this, path]() {
+                    applyIffOnModel(path);
+                });
+                menu.addSeparator();
                 menu.addAction("Convert to BEF", [this, path]() {
                     QString dir = QFileInfo(path).absolutePath();
                     QString tempDir = QDir::tempPath() + "/igi1conv_iff_" + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -4987,6 +5750,17 @@ private:
                     }
                 });
             }
+
+            // Play Animation for .mef files whose model ID falls within
+            // the 000_00_0 – 030_00_0 range.
+            if (ext == "mef" || ext == "mex") {
+                QString baseName = QFileInfo(path).completeBaseName();
+                if (baseName >= "000_00_0" && baseName <= "030_00_0") {
+                    menu.addAction("Play Animation", [this, path]() {
+                        playAnimationForFile(path);
+                    });
+                }
+            }
         }
 
         menu.addSeparator();
@@ -5058,6 +5832,21 @@ private:
                     executeCommand("mef export-bundle-all");
                 });
             }
+            // Batch wav conversion: if this folder (recursively) contains
+            // any *.wav files, expose a submenu with one entry per output
+            // format.  The user picks the destination folder at click
+            // time.  We do a recursive scan instead of a flat one so a
+            // right-click on a parent folder that only contains wav
+            // files in subfolders still surfaces the option.
+            int wavCount = countWavFilesRec(path);
+            if (wavCount > 0) {
+                menu.addSeparator();
+                QMenu* batchWavMenu = menu.addMenu(
+                    QString("Batch Convert %1 .wav file(s) in Folder").arg(wavCount));
+                batchWavMenu->addAction("Convert all to .wav (Windows PCM)", [this, path]() {
+                    convertIgiWavDir(path);
+                });
+            }
         } else if (ext == "tex" || ext == "spr" || ext == "pic") {
             menu.addAction("Convert to PNG", [this, path]() { loadFile(path); executeCommand("tex to-png"); });
             menu.addAction("Convert to TGA", [this, path]() { loadFile(path); executeCommand("tex to-tga"); });
@@ -5096,20 +5885,45 @@ private:
             menu.addAction("Info",           [this, path]() { loadFile(path); executeCommand("tex info"); });
             menu.addAction("Decode Batch",   [this, path]() { loadFile(path); executeCommand("tex decode-batch"); });
         } else if (ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
+            // .tex (RGB565, the default 16-bit format) and .spr
+            // (ARGB8888, full quality with alpha) are both LOOP v11
+            // containers - same header, different pixel mode.  Both
+            // go through the shared TEX_WriteLOOP encoder so the
+            // output is bit-identical to what `igi1conv tex to-spr`
+            // produces.
             menu.addAction("Convert to TEX", [this, path]() {
                 QString newPath = path.left(path.lastIndexOf('.')) + ".tex";
-                QImage img(path);
+                QImage img = loadImageSafe(path);
                 if (img.isNull()) {
                     QString err = QString("Could not load image: %1").arg(path);
                     logMessage("[ERROR] " + err);
                     QMessageBox::critical(this, "Convert Failed", err);
                     return;
                 }
-                if (imageEditor->saveAsTex(img, newPath)) {
+                if (imageEditor->saveAsTex(img, newPath, /*mode=*/2)) {
                     logMessage("[INFO] Converted image to TEX: " + newPath);
                     QMessageBox::information(this, "Success", "Converted to " + newPath);
                 } else {
                     QString err = QString("Failed to convert image to TEX: %1 -> %2")
+                                       .arg(path, newPath);
+                    logMessage("[ERROR] " + err);
+                    QMessageBox::critical(this, "Convert Failed", err);
+                }
+            });
+            menu.addAction("Convert to SPR", [this, path]() {
+                QString newPath = path.left(path.lastIndexOf('.')) + ".spr";
+                QImage img = loadImageSafe(path);
+                if (img.isNull()) {
+                    QString err = QString("Could not load image: %1").arg(path);
+                    logMessage("[ERROR] " + err);
+                    QMessageBox::critical(this, "Convert Failed", err);
+                    return;
+                }
+                if (imageEditor->saveAsTex(img, newPath, /*mode=*/3)) {
+                    logMessage("[INFO] Converted image to SPR: " + newPath);
+                    QMessageBox::information(this, "Success", "Converted to " + newPath);
+                } else {
+                    QString err = QString("Failed to convert image to SPR: %1 -> %2")
                                        .arg(path, newPath);
                     logMessage("[ERROR] " + err);
                     QMessageBox::critical(this, "Convert Failed", err);
@@ -5145,13 +5959,11 @@ private:
             QString cmdPrefix = ext;
 
             if (isBinary) {
-                // Play Animation: auto-select this MEF in Animation mode
-                if (globalAnimationModeEnabled) {
-                    menu.addAction("Play Animation", [this, path]() {
-                        playAnimationForMef(path);
-                    });
-                    menu.addSeparator();
-                }
+                // Play Animation: load this MEF in Animation mode
+                menu.addAction("Play Animation", [this, path]() {
+                    playAnimationForFile(path);
+                });
+                menu.addSeparator();
 
                 QMenu* infoMenu = menu.addMenu("Details");
                 infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
@@ -5177,7 +5989,7 @@ private:
                         QString tempDir = globalCacheDir + "/bundle/" + baseName + "/";
                         if (QDir(tempDir).exists()) {
                             logMessage("[INFO] Extracted textures to temp folder. Loading native MEF with textures: " + path);
-                            viewModeCombo->setCurrentIndex(4);
+                            viewModeCombo->setCurrentIndex(6);
                             modelViewer->loadModel(path);
                             modelViewer->show();
                         }
@@ -5323,6 +6135,26 @@ private:
                     }
                 });
             }
+        } else if (ext == "wav") {
+            // IGI audio (.wav files are the proprietary ILSF container
+            // in the game directory).  This build is single-binary / zero
+            // external DLL, so the only output format is standard PCM
+            // .wav.  Three actions:
+            //   1. Play in default media player - lands the decoded
+            //      .wav in the audio cache (SHA-256 keyed) so re-plays
+            //      are instant, then hands the URL to the OS.
+            //   2. Convert to .wav (Windows PCM)... - opens a Save As
+            //      dialog; the file lands wherever the user picks.
+            //   3. Info - runs `wav info` in the text viewer.
+            menu.addAction("Play in default media player", [this, path]() {
+                playIgiWav(path);
+            });
+            menu.addSeparator();
+            menu.addAction("Convert to .wav (Windows PCM)...", [this, path]() {
+                convertIgiWav(path);
+            });
+            menu.addSeparator();
+            menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("wav info"); });
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -5347,18 +6179,20 @@ private:
                     f.close();
                 }
                 if (isBinary) {
-                    if (currentExt == "mef") mode = 4; // 3D
-                    else mode = 2; // Hex
+                    mode = 6; // 3D
                 } else {
                     mode = 1; // Text
                 }
             } else if (currentExt == "obj") {
-                mode = 4; // 3D
+                mode = 6; // 3D
             } else if (currentExt == "iff") {
-                mode = 5; // Video
+                mode = 5; // Animation (unified IFF/MEF animation mode)
+            } else if (currentExt == "wav") {
+                // IGI audio: always route to the in-process Audio mode.
+                mode = 4; // Audio
             } else if (currentExt == "qsc" || currentExt == "txt" || currentExt == "json" || currentExt == "md" || currentExt == "h" || currentExt == "cpp" || currentExt == "dat" || currentExt == "qvm") {
                 if (currentExt == "dat" && info.fileName().toLower().contains("graph")) {
-                    mode = 4; // 3D
+                    mode = 6; // 3D
                 } else {
                     mode = 1; // Text
                 }
@@ -5370,7 +6204,7 @@ private:
             viewModeCombo->blockSignals(false);
         }
 
-        if (mode == 4 && currentExt == "mef") {
+        if (mode == 6 && currentExt == "mef") {
             // We directly use native MEF viewing. The textures will be found in temp folder if bundled.
         }
 
@@ -5480,28 +6314,52 @@ private:
             }
             imageEditor->show();
             if (imageEditor->toolsWidget) imageEditor->toolsWidget->show();
-        } else if (mode == 4 || mode == 5) { // 3D or Video
-            modelViewer->loadModel(path);
-            modelViewer->show();
-            // Show media bar only for .iff files in Video mode
-            bool isIffVideo = (mode == 5 && QFileInfo(path).suffix().toLower() == "iff");
-            if (iffMediaBar) {
-                if (isIffVideo) {
-                    iffMediaBar->show();
-                    if (iffBtnPlay) iffBtnPlay->setText("\u23f8"); // show pause since it auto-plays
+        } else if (mode == 4) { // Audio
+            // Audio mode is a "transport-driven" mode for .wav files.
+            // We convert the ILSF source to a cached PCM .wav and feed
+            // it to MCI.  The audio bar (Play / Pause / Resume / Back /
+            // Forward / Stop / scrubber / volume) is shown above the
+            // viewer.  If the file is already a standard WAV we skip
+            // the conversion step entirely (mciOpen handles it).
+            QFileInfo fi(path);
+            if (fi.exists()) {
+                // Audio mode only makes sense for .wav files.
+                if (fi.suffix().toLower() != "wav") {
+                    logMessage("[WARN] Audio mode: " + fi.fileName() + " is not a .wav file");
+                    if (audioFileLabel) audioFileLabel->setText(fi.fileName() + " (not audio)");
                 } else {
-                    iffMediaBar->hide();
+                    audioSourceName = fi.fileName();
+                    // Quick sniff: a standard WAV starts with "RIFF".
+                    bool alreadyPcm = false;
+                    QFile sniff(path);
+                    if (sniff.open(QIODevice::ReadOnly)) {
+                        char sig[4]; sniff.read(sig, 4);
+                        if (std::memcmp(sig, "RIFF", 4) == 0) alreadyPcm = true;
+                        sniff.close();
+                    }
+                    if (alreadyPcm) {
+                        mciOpen(path);
+                    } else {
+                        audioLoadIgiWav(path, /*autoPlay=*/false);
+                    }
                 }
             }
-        } else if (mode == 6) { // Animation
-            // Mode 6 is a "panel-driven" mode.  The current file
-            // is not used directly; instead, the user picks a
-            // (modelId, anim) pair from the Animation panel and the
-            // slot onAnimationPlayClicked drives the MEF + IFF load.
-            // We still show the modelViewer (it's where the rendered
-            // 3D scene lives) but we don't call loadModel here.
+            if (audioBar) audioBar->show();
+        } else if (mode == 5) { // Animation (unified .iff / .mef)
+            // The Animation mode is a single viewer for skeletal
+            // animations.  .iff files show bones only (dots/lines);
+            // .mef files show the textured 3D model.  Both get the
+            // video-player transport controls and the animation panel.
+            modelViewer->loadModel(path);
             modelViewer->show();
+            if (iffMediaBar) {
+                iffMediaBar->show();
+                if (iffBtnPlay) iffBtnPlay->setText(modelViewer->iffPlaying ? "\u23f8" : "\u25b6");
+            }
             if (animationPanel) animationPanel->show();
+        } else if (mode == 6) { // 3D
+            modelViewer->loadModel(path);
+            modelViewer->show();
         }
     }
 
@@ -5612,7 +6470,7 @@ private:
             if (!firstModel.isEmpty()) {
                 modelViewer->loadModel(firstModel);
                 viewModeCombo->blockSignals(true);
-                viewModeCombo->setCurrentIndex(4);
+                viewModeCombo->setCurrentIndex(6);
                 viewModeCombo->blockSignals(false);
                 hideAllViewers();
                 modelViewer->show();
