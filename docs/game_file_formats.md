@@ -17,6 +17,8 @@
 8. [QSC -- Script Source](#8-qsc----script-source)
 9. [MagicObject System](#9-magicobject-system)
 10. [FNT -- Font Format](#10-fnt----font-format)
+11. [IFF -- Skeletal Animation](#11-iff----skeletal-animation)
+12. [BEF -- Animation Text Format](#12-bef----animation-text-format)
 
 ---
 
@@ -1065,6 +1067,21 @@ A model can have both: e.g., an AK47 has XTVM magic vertices for muzzle/clip pos
 | TEXF   | -          | MTP       | Texture filenames               |
 | INST   | -          | MTP       | Instance mappings               |
 | LOOP   | 0x504F4F4C | TEX/QVM   | TEX & QVM file magic            |
+| BOBJ   | 0x4A424F42 | IFF       | Root IFF container (Body Object) |
+| BOBH   | 0x48424F42 | IFF       | Bone block container (BOdy Bone Header) |
+| BOAL   | 0x4C414F42 | IFF       | Animation list container (BOdy Animation List) |
+| BOAN   | 0x4E414F42 | IFF       | Animation clip container (BOdy ANimation) |
+| BOSH   | 0x48534F42 | IFF       | Bone sheet header (BOdy SHeet) |
+| PLST   | 0x54534C50 | IFF       | Parent list |
+| TLST   | 0x54534C54 | IFF       | Translation list |
+| BALH   | 0x484C4142 | IFF       | Animation list header |
+| BOAH   | 0x48414F42 | IFF       | Animation header |
+| BOEH   | 0x48454F42 | IFF       | Event track header |
+| BOED   | 0x44454F42 | IFF       | Event track data |
+| BOTH   | 0x48544F42 | IFF       | Root translation track header |
+| BOTD   | 0x44544F42 | IFF       | Root translation track data |
+| BORH   | 0x48524F42 | IFF       | Bone rotation track header |
+| BORD   | 0x44524F42 | IFF       | Bone rotation track data |
 
 ## Appendix B: Constants
 
@@ -1122,6 +1139,126 @@ def parse_mef(data: bytes):
 
     # 5. Parse triangles from DNER (packed path shown)
     # ... (see section 2.5 for full algorithm)
+```
+
+### Reading an IFF file
+
+```python
+def parse_iff(data: bytes):
+    pos = 0
+    assert data[pos:pos+4] == b"FORM"
+    # FORM size (big-endian) — broken in IGI 1, don't trust
+    form_size = struct.unpack_from(">I", data, pos + 4)[0]
+    form_type = data[pos+8:pos+12].decode("ascii")
+    pos += 12  # past FORM header
+
+    iff = {"skeleton": {}, "clips": []}
+    bone_count = 0
+    current_clip = None
+
+    while pos < len(data):
+        tag = data[pos:pos+4].decode("ascii")
+        chunk_size = struct.unpack_from(">I", data, pos + 4)[0]  # BE
+        next_pos = pos + 8 + chunk_size
+        if chunk_size % 2 != 0: next_pos += 1  # IFF alignment
+
+        if tag == "FORM":
+            ftype = data[pos+8:pos+12].decode("ascii")
+            if ftype == "BOBH":
+                pos += 12  # enter bone block
+                continue
+            elif ftype == "BOAL":
+                pos += 12
+                continue
+            elif ftype == "BOAN":
+                current_clip = {"id": 0, "duration": 0, "events": [],
+                                "root_trans": [], "bone_rots": []}
+                iff["clips"].append(current_clip)
+                pos += 12
+                continue
+            else:
+                pos = next_pos; continue
+
+        elif tag == "BOSH":
+            object_id = struct.unpack_from("<I", data, pos + 8)[0]
+            bone_count = struct.unpack_from("<I", data, pos + 12)[0]
+            iff["skeleton"]["object_id"] = object_id
+            iff["skeleton"]["bone_count"] = bone_count
+
+        elif tag == "PLST":
+            parents = []
+            off = pos + 8
+            for i in range(bone_count):
+                parents.append(struct.unpack_from("<i", data, off)[0])
+                off += 4
+            iff["skeleton"]["parents"] = parents
+
+        elif tag == "TLST":
+            trans = []
+            off = pos + 8
+            for i in range(bone_count):
+                px, py, pz = struct.unpack_from("<fff", data, off)
+                trans.append((px, py, pz))
+                off += 12
+            iff["skeleton"]["translations"] = trans
+
+        elif tag == "BALH":
+            num = struct.unpack_from("<I", data, pos + 8)[0]
+            iff["anim_count"] = num
+
+        elif tag == "BOAH" and current_clip is not None:
+            off = pos + 8
+            dur = struct.unpack_from("<f", data, off)[0]
+            _, flags_raw = struct.unpack_from("<HH", data, off + 4)
+            anim_id = struct.unpack_from("<I", data, off + 8)[0]
+            current_clip.update({"duration": dur, "flags": flags_raw,
+                                 "animation_id": anim_id})
+
+        elif tag == "BOTH" and current_clip is not None:
+            count = struct.unpack_from("<I", data, pos + 8)[0]
+            current_clip["trans_count"] = count
+
+        elif tag == "BOTD" and current_clip is not None:
+            off = pos + 8
+            for i in range(current_clip.get("trans_count", 0)):
+                px, py, pz, t = struct.unpack_from("<ffff", data, off)
+                tin = struct.unpack_from("<fff", data, off + 16)
+                tout = struct.unpack_from("<fff", data, off + 28)
+                current_clip["root_trans"].append(
+                    (px, py, pz, t, tin, tout))
+                off += 40
+
+        elif tag == "BORH" and current_clip is not None:
+            count = struct.unpack_from("<I", data, pos + 8)[0]
+            current_clip["bone_rots"].append([])
+            current_clip.setdefault("rot_counts", []).append(count)
+
+        elif tag == "BORD" and current_clip is not None:
+            rots = current_clip["bone_rots"][-1]
+            off = pos + 8
+            for i in range(current_clip["rot_counts"][-1]):
+                q0 = struct.unpack_from("<ffff", data, off)
+                t = struct.unpack_from("<f", data, off + 16)[0]
+                q1 = struct.unpack_from("<ffff", data, off + 20)
+                q2 = struct.unpack_from("<ffff", data, off + 36)
+                rots.append((q0, t, q1, q2))
+                off += 52
+
+        elif tag == "BOEH" and current_clip is not None:
+            count = struct.unpack_from("<I", data, pos + 8)[0]
+            current_clip["event_count"] = count
+
+        elif tag == "BOED" and current_clip is not None:
+            off = pos + 8
+            for i in range(current_clip.get("event_count", 0)):
+                eid, bid = struct.unpack_from("<ii", data, off)
+                t, px, py, pz = struct.unpack_from("<ffff", data, off + 8)
+                current_clip["events"].append((eid, bid, t, px, py, pz))
+                off += 24
+
+        pos = next_pos
+
+    return iff
 ```
 
 ### Reading a TEX file
@@ -1275,3 +1412,420 @@ The texture stores glyphs as follows:
 | A       | Glyph shape / opacity                             |
 
 Some fonts (e.g. `font2.fnt`) are strictly binary — only values `0x00` and `0xFF` — producing sharp pixel fonts. Others (e.g. `fontmp.fnt`) use grayscale alpha values for anti-aliased rendering.
+
+---
+
+## 11. IFF -- Skeletal Animation
+
+**Extension:** `.iff`
+**Container:** FORM/IFF (EA IFF-85 variant with big-endian sizes)
+
+IFF files store skeletal animation data used by IGI 1's runtime engine to animate 3D character models. Each file bundles a shared bone skeleton with one or more animation clips (translations, rotations, and trigger events).
+
+### 11.1 IFF Container Structure
+
+The file uses a nested FORM/IFF structure. All chunk sizes are big-endian; all multi-byte data values are little-endian.
+
+```
+FORM <size BE> BOBJ                          root container (Body Object)
+  FORM <size BE> BOBH                        bone block (Body Object Bone Header)
+    BOSH  <size=8>  <objectID:u32LE> <boneCount:u32LE>
+    PLST  <size>     <parent:i32LE> x boneCount
+    TLST  <size>     <px,py,pz:f32LE> x boneCount
+  FORM <size BE> BOAL                        animation list block
+    BALH  <size=8>  <numAnims:u32LE> <lidAnims:u32LE>
+    FORM <size BE> BOAN  (one per animation)
+      BOAH <size=12> <length:f32LE> <_:u16> <_:u16> <id:u32LE>
+      BOEH <size=4>  <eventCount:u32LE>
+      BOED <size>     <event records> x N
+      BOTH <size=4>  <rootTransCount:u32LE>
+      BOTD <size>     <translation keys> x N
+      BORH <size=4>  <boneRotCount:u32LE>  (one per bone)
+      BORD <size>     <rotation keys> x N
+      ...  (BOEH/BOED, BORH/BORD repeat per bone / per event group)
+```
+
+**Broken root FORM size:** The root `FORM BOBJ` size field is intentionally incorrect (a small number). The game engine walks the tree by tag rather than by size. The same convention applies to `FORM BOAL`, `FORM BOBH`, and `FORM BOAN` — the parser must not trust their declared sizes but instead traverse by tag name.
+
+### 11.2 Chunk Reference
+
+| FourCC | Container | Description |
+|--------|-----------|-------------|
+| `FORM` | root      | IFF container (generic) |
+| `BOBJ` | root      | Root container type (Body Object) |
+| `BOBH` | BOBJ      | Bone block container |
+| `BOAL` | BOBJ      | Animation list container |
+| `BOAN` | BOAL      | Single animation clip container |
+| `BOSH` | BOBH      | Bone sheet header: `objectID`, `boneCount` |
+| `PLST` | BOBH      | Parent list: one `int32` parent index per bone |
+| `TLST` | BOBH      | Translation list: one `(px,py,pz)` triplet per bone |
+| `BALH` | BOAL      | Animation list header: `numAnims`, `capacity` |
+| `BOAH` | BOAN      | Animation header: duration, flags, animation ID |
+| `BOEH` | BOAN      | Event track header: event count |
+| `BOED` | BOAN      | Event track data |
+| `BOTH` | BOAN      | Root translation track header: key count |
+| `BOTD` | BOAN      | Root translation track data |
+| `BORH` | BOAN      | Bone rotation track header: key count (per bone) |
+| `BORD` | BOAN      | Bone rotation track data |
+
+### 11.3 BOSH -- Bone Sheet Header (8 bytes)
+
+| Offset | Size | Type   | Description |
+|--------|------|--------|-------------|
+| 0x00   | 4    | uint32 LE | objectID — model identifier (e.g. `3` for `003.IFF`) |
+| 0x04   | 4    | uint32 LE | boneCount — number of bones in the skeleton |
+
+### 11.4 PLST -- Parent List
+
+Flat array of `boneCount` × `int32 LE` parent bone indices. A value of `-1` (0xFFFFFFFF) means the bone has no parent (root bone).
+
+### 11.5 TLST -- Translation List
+
+Flat array of `boneCount` × (3 × `float32 LE`) rest-pose position triplets. Values are in IGI world units (pre-multiplied by `Sc = 40.96`).
+
+### 11.6 BALH -- Animation List Header (8 bytes)
+
+| Offset | Size | Type   | Description |
+|--------|------|--------|-------------|
+| 0x00   | 4    | uint32 LE | numAnims — number of animation clips |
+| 0x04   | 4    | uint32 LE | lidAnims — capacity (usually matches numAnims) |
+
+### 11.7 BOAH -- Animation Header (12 bytes)
+
+| Offset | Size | Type   | Description |
+|--------|------|--------|-------------|
+| 0x00   | 4    | float32 LE | length — animation duration in milliseconds |
+| 0x04   | 2    | uint16 LE | (reserved, usually 0) |
+| 0x06   | 2    | uint16 LE | flags — clip flags (bit 0 = tp_flag) |
+| 0x08   | 4    | uint32 LE | animation_id — numeric identifier for this clip |
+
+### 11.8 BOTD -- Root Translation Key (40 bytes per key)
+
+Each key contains 10 × `float32 LE`:
+
+| Offset | Size | Type    | Field |
+|--------|------|---------|-------|
+| 0x00   | 12   | float32[3] | Position `(px, py, pz)` in IGI world units |
+| 0x0C   | 4    | float32    | Time in milliseconds |
+| 0x10   | 12   | float32[3] | Incoming cubic spline tangent `(tx_in, ty_in, tz_in)` |
+| 0x1C   | 12   | float32[3] | Outgoing cubic spline tangent `(tx_out, ty_out, tz_out)` |
+
+### 11.9 BORD -- Bone Rotation Key (52 bytes per key)
+
+Each key contains 13 × `float32 LE` (three quaternions plus time):
+
+| Offset | Size | Type    | Field |
+|--------|------|---------|-------|
+| 0x00   | 16   | float32[4] | Quaternion q0 `(x, y, z, w)` — control point 0 |
+| 0x10   | 4    | float32    | Time in milliseconds |
+| 0x14   | 16   | float32[4] | Quaternion q1 `(x, y, z, w)` — control point 1 |
+| 0x24   | 16   | float32[4] | Quaternion q2 `(x, y, z, w)` — control point 2 |
+
+Three quaternions per keyframe represent the three cubic interpolation control points used by the IGI 1 engine.
+
+### 11.10 BOED -- Event Key (24 bytes per event)
+
+Each event contains 2 × `int32 LE` + 4 × `float32 LE`:
+
+| Offset | Size | Type   | Field |
+|--------|------|--------|-------|
+| 0x00   | 4    | int32 LE  | event_id — event type identifier |
+| 0x04   | 4    | int32 LE  | bone_id — target bone index (-1 = root) |
+| 0x08   | 4    | float32 LE | time — time in milliseconds |
+| 0x0C   | 12   | float32[3] | position `(px, py, pz)` in IGI world units |
+
+### 11.11 IFF C++ Struct Layout
+
+```cpp
+struct IffTranslationKey {
+    float pos[3];         // IGI world units (x * Sc)
+    float time;           // milliseconds
+    float tangent_in[3];  // incoming spline tangent
+    float tangent_out[3]; // outgoing spline tangent
+};
+
+struct IffRotationKey {
+    float rot[4];    // quaternion q0 (x,y,z,w)
+    float time;      // milliseconds
+    float rot_b[4];  // quaternion q1 (x,y,z,w)
+    float rot_c[4];  // quaternion q2 (x,y,z,w)
+};
+
+struct IffEvent {
+    uint32_t event_id;
+    int32_t  bone_id;     // -1 = root
+    float time;           // milliseconds
+    float pos[3];         // IGI world units
+};
+
+struct IffClip {
+    float duration;
+    uint32_t flags;
+    uint32_t animation_id;
+    std::vector<IffTranslationKey> root_translations;
+    std::vector<std::vector<IffRotationKey>> bone_rotations;
+    std::vector<IffEvent> events;
+};
+
+struct IffSkeleton {
+    int32_t object_id;
+    int32_t bone_count;
+    std::vector<int32_t> parents;       // parent index per bone (-1 = root)
+    std::vector<float> translations;    // 3 floats per bone (px,py,pz)
+};
+```
+
+### 11.12 Parsing Algorithm
+
+```
+1. Read "FORM" magic + BE size
+2. Read FORM type tag:
+   - "BOBJ" -> enter root, walk children
+   - "BOBH" -> enter bone block, read BOSH/PLST/TLST
+   - "BOAL" -> enter anim list, read BALH then walk per-anim children
+   - "BOAN" -> create new IffClip, read BOAH then BOEH/BOED/BOTH/BOTD/BORH/BORD
+3. For non-FORM chunks, read chunk tag + BE size:
+   - BOSH:   objectID + boneCount
+   - PLST:   boneCount × parent index (int32 LE)
+   - TLST:   boneCount × (px, py, pz) (float32 LE)
+   - BALH:   numAnims + capacity
+   - BOAH:   duration + flags + animation_id
+   - BOEH:   event count
+   - BOED:   event count × (event_id, bone_id, time, px, py, pz)
+   - BOTH:   root translation key count
+   - BOTD:   key count × 10 floats
+   - BORH:   rotation key count for this bone
+   - BORD:   key count × 13 floats
+4. All FORM containers have "broken" sizes — walk by tag, not by size
+5. IFF alignment: 2-byte boundaries (standard IFF convention)
+```
+
+---
+
+## 12. BEF -- Animation Text Format
+
+**Extension:** `.bef`
+**Container:** None (plain text)
+
+BEF ("Behaviour/Build Extended Format") is the human-readable text representation of one IFF animation clip plus the bone skeleton it references. Each BEF file corresponds to a single animation clip and is usually written as `<model>_<anim>.BEF` (e.g. `003_anim_004.BEF`) by `igi1conv iff convert`.
+
+The format is line-oriented with `//` line comments. Each line is a function-call-style statement terminated by a semicolon.
+
+### 12.1 BEF File Structure
+
+```
+// comments are // prefixed
+AnimInit("<name>", <flags>, <length_ms+1>, <tp_flag>);
+BreakScript();
+Bone(<idx>, "<name>", <parent>, <px>, <py>, <pz>);
+...
+BuildHierarchy();
+BreakScript();
+TranslationKeyFrameData(<track>, <flag>, <time_ms>, <px>, <py>, <pz>);
+RotationKeyFrameData(<bone>, <flag>, <time_ms>,
+                     <qx0>, <qy0>, <qz0>, <qw0>,
+                     <qx1>, <qy1>, <qz1>, <qw1>,
+                     <qx2>, <qy2>, <qz2>, <qw2>);
+TriggerData(<idx>, <event_id>, <time_ms>, <bone_id>, <px>, <py>, <pz>);
+```
+
+### 12.2 Statement Reference
+
+#### AnimInit
+
+```
+AnimInit("<name>", <flags>, <length_ms>, <tp_flag>);
+```
+
+| Argument    | Type   | Description |
+|-------------|--------|-------------|
+| `name`      | string | Animation name, e.g. `"003_anim_004"` |
+| `flags`     | int    | Animation flags (typically 0) |
+| `length_ms` | int    | Duration in milliseconds (+1 from actual duration per engine convention) |
+| `tp_flag`   | int    | Clip type flag (0 or 1, becomes `flags` bit 0 in binary IFF) |
+
+#### Bone
+
+```
+Bone(<idx>, "<name>", <parent>, <px>, <py>, <pz>);
+```
+
+| Argument | Type   | Description |
+|----------|--------|-------------|
+| `idx`    | int    | Bone index (0-based) |
+| `name`   | string | Bone name (e.g. `"Bone_00"`, `"Bone_01"`) |
+| `parent` | int    | Parent bone index (-1 = no parent / root) |
+| `px,py,pz` | float | Rest-pose position in IGI units (already divided by `Sc = 40.96`) |
+
+#### TranslationKeyFrameData
+
+```
+TranslationKeyFrameData(<track>, <flag>, <time_ms>, <px>, <py>, <pz>);
+```
+
+| Argument | Type   | Description |
+|----------|--------|-------------|
+| `track`  | int    | Track index (always 0 for root bone) |
+| `flag`   | int    | Key flag (always 0 in practice) |
+| `time_ms` | int   | Time in milliseconds |
+| `px,py,pz` | float | Translation in IGI units (divided by Sc) |
+
+Note: The IFF binary format stores incoming/outgoing cubic spline tangents (10 floats per key), but the BEF text format does **not** carry tangent data. Tangents are written as zero on round-trip.
+
+#### RotationKeyFrameData
+
+```
+RotationKeyFrameData(<bone>, <flag>, <time_ms>,
+                     <qx0>, <qy0>, <qz0>, <qw0>,
+                     <qx1>, <qy1>, <qz1>, <qw1>,
+                     <qx2>, <qy2>, <qz2>, <qw2>);
+```
+
+| Argument | Type   | Description |
+|----------|--------|-------------|
+| `bone`   | int    | Bone index this rotation belongs to |
+| `flag`   | int    | Key flag (always 0 in practice) |
+| `time_ms` | int   | Time in milliseconds |
+| `q0...`  | float[4] | Quaternion control point 0 `(x, y, z, w)` |
+| `q1...`  | float[4] | Quaternion control point 1 `(x, y, z, w)` |
+| `q2...`  | float[4] | Quaternion control point 2 `(x, y, z, w)` |
+
+Three quaternions per keyframe provide the three cubic interpolation control points used by the IGI 1 engine.
+
+#### TriggerData
+
+```
+TriggerData(<idx>, <event_id>, <time_ms>, <bone_id>, <px>, <py>, <pz>);
+```
+
+| Argument  | Type   | Description |
+|-----------|--------|-------------|
+| `idx`     | int    | Sequential event index (0-based) |
+| `event_id` | int   | Event type identifier |
+| `time_ms`  | int   | Time in milliseconds |
+| `bone_id`  | int   | Bone index this event is attached to (-1 = root) |
+| `px,py,pz` | float | Position in IGI units (divided by Sc) |
+
+#### Structural Keywords
+
+| Keyword | Description |
+|---------|-------------|
+| `BreakScript()` | Separator between logical sections |
+| `BuildHierarchy()` | Signals end of bone definitions |
+
+### 12.3 Scale Factor
+
+All positions in BEF files are stored in IGI world units, already divided by the engine scale factor `Sc = 40.96`. The binary IFF format multiplies them back by 40.96 when writing. This matches the convention used elsewhere (MEF import scale is `1.0/40.96`).
+
+```
+BEF position = IFF position / 40.96
+Bone positions = IFF TLST values / 40.96
+Event positions = IFF BOED values / 40.96
+Translation key positions = IFF BOTD values / 40.96
+```
+
+### 12.4 BEF C++ Struct Layout
+
+```cpp
+struct BefBone {
+    int   index = 0;
+    std::string name;
+    int   parent = -1;
+    float px = 0, py = 0, pz = 0;  // IGI units (divided by Sc)
+};
+
+struct BefTranslationKey {
+    int   track = 0;     // always 0 for root
+    int   flag  = 0;
+    int   time_ms = 0;
+    float px = 0, py = 0, pz = 0;
+};
+
+struct BefRotationKey {
+    int   bone = 0;
+    int   flag = 0;
+    int   time_ms = 0;
+    float q0[4] = {0, 0, 0, 1};  // quaternion x,y,z,w
+    float q1[4] = {0, 0, 0, 1};
+    float q2[4] = {0, 0, 0, 1};
+};
+
+struct BefEvent {
+    int   index = 0;
+    int   event_id = 0;
+    int   time_ms = 0;
+    int   bone_id = 0;
+    float px = 0, py = 0, pz = 0;
+};
+
+struct BefFile {
+    std::string anim_name;       // e.g. "003_anim_004"
+    int   flags = 0;
+    int   length_ms = 0;         // raw value (+1 is engine convention)
+    int   tp_flag = 0;           // becomes clip.flags bit 0 in IFF
+    std::vector<BefBone>          bones;
+    std::vector<BefTranslationKey> translations;
+    std::vector<BefRotationKey>   rotations;
+    std::vector<BefEvent>         events;
+};
+```
+
+### 12.5 BEF Example
+
+```bef
+// Script for converting common models
+
+AnimInit("003_anim_004",0,3741,0);
+BreakScript();
+Bone(0,"Bone_00",-1,0.0,0.0,96.625);
+Bone(1,"Bone_01",0,0.0,7.8125,-1.875);
+Bone(2,"Bone_02",1,0.0,7.8125,-1.875);
+BuildHierarchy();
+BreakScript();
+TranslationKeyFrameData(0,0,0,0.0,0.0,0.0);
+TranslationKeyFrameData(0,0,500,0.0,0.0,50.0);
+RotationKeyFrameData(1,0,0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0);
+RotationKeyFrameData(1,0,500,-0.0674438,-0.0674438,0.0,0.994505,0.0,0.0,0.0,0.994505,0.0,0.0,0.0,0.994505);
+TriggerData(0,1,100,-1,0.0,0.0,0.0);
+TriggerData(1,2,500,1,10.0,0.0,0.0);
+```
+
+### 12.6 Naming Convention
+
+BEF files follow a strict naming convention for round-trip compatibility:
+
+```
+<model_id>_anim_<anim_id>.BEF
+```
+
+- `<model_id>` is the numeric model identifier (e.g. `003` for the third model)
+- `<anim_id>` is the animation clip number, zero-padded to 3 digits (e.g. `004`)
+
+The `iff convert` command parses these filenames to derive the `object_id` and `animation_id` when writing back to binary IFF. The naming matches the game engine's expected layout under `anims_<id>/anim_<id>.IFF`.
+
+### 12.7 Related Files
+
+Alongside BEF output, `igi1conv iff convert` also produces an `Anims.qsc` file containing `CreateAnim()` statements that the IGI 1 engine uses to register each animation:
+
+```qsc
+SetScale(40.96);
+SetTargetPlatform("PC");
+StartTexScript("commontex");
+SetLightmapResolution(1);
+CreateAnim("anims_003\\003_anim_004");
+CreateAnim("anims_003\\003_anim_005");
+...
+EndTexScript();
+BuildStatic("level");
+```
+
+### 12.8 BEF vs Decompiled IFF Text
+
+The `iff decompile` command produces a separate, higher-fidelity text format (`.IFF` text, not BEF) that preserves cubic spline tangents. The decompiled format has two file types:
+
+| File | Contents |
+|------|----------|
+| `<basename>.IFF` | Skeleton + animation list (bone parents, positions, clip references) |
+| `anims_<id>/anim_<id>.IFF` | Per-clip data (header, events, translation keys **with tangents**, rotation keys) |
+
+The decompiled format is used by `iff create` as an alternative to BEF when tangent preservation is needed. BEF is the simpler, lossy-but-more-portable format.
