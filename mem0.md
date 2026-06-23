@@ -313,3 +313,28 @@ exit codes, recursive directory walker with mixed good/bad inputs, and
 ## Bug ID: Mef-Play-Animation-Empty-Panel (1.9.6)
 **Description:** Right-clicking a `.mef` and choosing "Play Animation" showed an empty animation panel if `objects.qsc` was not loaded, leaving the user unable to pick an animation. The IFF media bar was also shown unnecessarily for `.mef` files.
 **Resolution:** `playAnimationForFile()` now auto-loads the animation set via `loadAnimationSetFromQsc()` if it's empty when a `.mef` is selected. The status label shows "Set objects.qsc in Settings > Animation" if the set remains empty after loading. The IFF media bar is now only shown for `.iff` files, not `.mef`, reducing UI clutter.
+
+## Bug ID: Mef-VCoord-Explosion-Collision-Geometry (1.9.7)
+**Description:** Type 3 lightmap (collision) models exported synthetic UVs (`x*0.1, z*0.1`) that wrapped outside `[-1,2]` in OBJ output. The raw values passed through `std::fmod` without wrapping into `[0,1)`, causing UV coordinates to explode to large negative/positive values in the exported OBJ.
+
+**Resolution:** Added `std::fmod` wrapping in `ParseCollisionGeometry()` (`mef_native.cpp`) to wrap the synthetic UVs into `[0,1)`. The UV range for Type 3 models in the corpus is now `0..0.9999` instead of `-11..1`.
+
+## Bug ID: Apply-Animation-On-Model-Mef-Not-Found (1.9.7)
+**Description:** The `applyIffOnModel()` function used a hardcoded path formula (`searchDir + "/" + chosen + ext`) to locate the selected MEF file, which failed when the model lived in a subdirectory of `globalModelsDir`.
+
+**Resolution:** The function now builds a `QMap<QString, QString>` during directory scan that maps each model ID (`000_00_0`) to its full discovered path, and uses the map for lookup. Models in subdirectories are now found correctly.
+
+## Bug ID: Animation-Transport-Buttons-Missing (1.9.7)
+**Description:** After `playAnimationForFile()` loaded a `.mef` and started animation, the IFF media bar (play/pause/step-back/step-forward/scrubber/clip selector) was not visible, so there was no way to control playback.
+
+**Resolution:** Added `iffMediaBar->show()` in `onAnimationPlayClicked()` after `modelViewer->playClip()` and after the `OnNotFoundAnimation` fallback, so transport controls appear whenever animation clips are actually playing.
+
+## Bug ID: Test-Corpus-Text-IFF-Skip (1.9.7)
+**Description:** `FindCorpusFileByRegex()` picked up decompiled text `.IFF` files (starting with `\r\n`) in the game corpus's `Decompiled` directory, causing 6 IFF tests (`IffConvert`, `IffRebuild`, `IffCreateFromBefs`, `IffExportGif`, `IffRoundTripSizeMatches`, `IffDecompileCreateRoundTrip`) to fail when trying to parse them as binary IFFs.
+
+**Resolution:** Added a first-4-bytes check in `FindCorpusFileByRegex()` that skips files whose first bytes are `\r` or `\n` (text IFF signatures), ensuring only binary IFF files are returned.
+
+## Bug ID: UV-Tests-Picking-Type3-Lightmap-Models (1.9.7)
+**Description:** `MefExportObjHasRealUvs` and `MefExportVFlipMatchesModelType` used `IGI1CONV_NEED(f, "\\.mef$")` which could pick Type 3 lightmap models. Type 3 models have synthetic UVs spanning `-11..1` (before fix) and no real texture coordinates, causing the tests' expected UV range assertions to fail.
+
+**Resolution:** Both tests now use `FindCorpusMefOfModelType(1)` (for Type 1 skinned) and `FindCorpusMefOfModelType(0)` (for Type 0 rigid) to guarantee they test only models with real texture coordinates. Type 3 models are excluded entirely from these assertions.
