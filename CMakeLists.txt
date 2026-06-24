@@ -143,6 +143,13 @@ if (IGI1CONV_BUILD_TESTS)
 
     target_link_libraries(igi1conv_tests PRIVATE gtest)
 
+    target_include_directories(igi1conv_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/source
+        ${PROJECT_SOURCE_DIR}/source/parsers
+        ${PROJECT_SOURCE_DIR}/third_party/glm-1.0.1
+        ${PROJECT_SOURCE_DIR}/third_party
+    )
+
     include(GoogleTest)
     gtest_discover_tests(igi1conv_tests WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
