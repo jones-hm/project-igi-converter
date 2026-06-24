@@ -86,6 +86,49 @@ TEST(LightmapBindingParser, SiblingBuildingsUnderSharedContainerResolveIndepende
     EXPECT_FALSE(set.logicalIdForModel("Buildings").has_value());
 }
 
+TEST(LightmapBindingParser, CapturesPositionAndDisambiguatesByTaskId) {
+    std::string qsc =
+        "Task_New(1104, \"Building\", \"WaterTower\", 1.0, 2.0, 3.0, 0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00000\"));\n"
+        "Task_New(2200, \"Building\", \"WaterTower2\", 100.0, 200.0, 300.0, 0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00014\"));\n";
+
+    LightmapBindingSet set = LightmapBindingSet::parse(qsc);
+
+    const LightmapBinding* byTask = set.bindingForModelAndTaskId("435_01_1", 2200);
+    ASSERT_NE(byTask, nullptr);
+    EXPECT_EQ(byTask->logicalId, "obj00014");
+    EXPECT_TRUE(byTask->hasPos);
+    EXPECT_DOUBLE_EQ(byTask->posX, 100.0);
+    EXPECT_DOUBLE_EQ(byTask->posY, 200.0);
+    EXPECT_DOUBLE_EQ(byTask->posZ, 300.0);
+
+    EXPECT_EQ(set.bindingForModelAndTaskId("435_01_1", 9999), nullptr);
+    EXPECT_EQ(set.bindingForModelAndTaskId("999_99_9", 1104), nullptr);
+}
+
+TEST(LightmapBindingParser, DisambiguatesByNearestPosition) {
+    std::string qsc =
+        "Task_New(1104, \"Building\", \"WaterTower\", 0.0, 0.0, 0.0, 0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00000\"));\n"
+        "Task_New(2200, \"Building\", \"WaterTower2\", 1000.0, 1000.0, 1000.0, 0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00014\"));\n";
+
+    LightmapBindingSet set = LightmapBindingSet::parse(qsc);
+
+    // A query point much closer to (0,0,0) than (1000,1000,1000).
+    const LightmapBinding* nearest = set.nearestBindingForModelAndPosition("435_01_1", 5.0, 5.0, 5.0);
+    ASSERT_NE(nearest, nullptr);
+    EXPECT_EQ(nearest->logicalId, "obj00000");
+    EXPECT_EQ(nearest->taskId, 1104);
+
+    const LightmapBinding* nearest2 = set.nearestBindingForModelAndPosition("435_01_1", 999.0, 999.0, 999.0);
+    ASSERT_NE(nearest2, nullptr);
+    EXPECT_EQ(nearest2->logicalId, "obj00014");
+
+    EXPECT_EQ(set.nearestBindingForModelAndPosition("999_99_9", 0, 0, 0), nullptr);
+}
+
 TEST(LightmapBindingParser, NoMatchWhenSiblingTreeHasNoLightmap) {
     // Two separate top-level trees: only the second has a LightmapInfo.
     // The first tree's model id must NOT pick up the second tree's id.

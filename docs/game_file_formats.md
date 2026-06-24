@@ -1843,21 +1843,38 @@ OLM ("Innerloop Lightmap") files store pre-baked lightmap textures for level geo
 
 ### 13.1 File Format
 
-**File Header (12 bytes):**
+OLM has no FourCC magic; it is identified by a `version1` float in the range `[0.11, 0.13]`.
 
-| Offset | Size | Type     | Description                    |
-|--------|------|----------|--------------------------------|
-| 0x00   | 4    | char[4]  | Magic: `"MLOI"` (ASCII)         |
-| 0x04   | 4    | uint32   | Image width (pixels)           |
-| 0x08   | 4    | uint32   | Image height (pixels)          |
+**Main Header (`OlmMainHeader`, packed, no magic field):**
 
-**Image Data:**
+| Field            | Type     | Description                              |
+|------------------|----------|-------------------------------------------|
+| `version1`       | float32  | Format version; must be in `[0.11, 0.13]` |
+| `version2`       | float32  | Secondary version field                   |
+| `year`..`millisecond` | uint32 x7 | Bake timestamp                       |
+| `unknown_0`      | uint32   | Unknown                                   |
+| `count1`         | uint32   | Unknown count                             |
+| `layer_count`    | uint32   | Number of layers                          |
+| `reserved[4]`    | uint32 x4 | Reserved                                  |
+| `width`, `height`| uint16   | Atlas grid dimensions                     |
+| `total_stride`   | uint16   | Unknown                                   |
+| `format`         | uint16   | Pixel format identifier                   |
+| `pad`            | uint32   | Padding                                   |
+| `uv_scale_u/v`   | float32  | UV scale factors                          |
+| `zero`           | float32  | Unknown (observed as 0)                   |
 
-Immediately following the 12-byte header, raw 32-bit ARGB pixel data (4 bytes per pixel) stored in row-major order (top-to-bottom, left-to-right).
+**Layer Descriptor (`OlmLayerDescriptor`, immediately follows the main header):**
 
-```c
-constexpr size_t expected_size = 12 + (width * height * 4);
-```
+| Field          | Type   | Description                  |
+|----------------|--------|-------------------------------|
+| `flags`        | uint32 | Layer flags                   |
+| `ptr1`, `ptr2` | uint32 | Unknown pointers/offsets      |
+| `pixel_width`  | uint16 | Actual lightmap pixel width   |
+| `pixel_height` | uint16 | Actual lightmap pixel height  |
+
+**Pixel Data:**
+
+Immediately following the layer descriptor: `pixel_width * pixel_height` pixels, 4 bytes each (`r, g, b, a`), row-major. Channels are stored R,G,B,A but the game's actual display order is BGRA, so exporters swap R/B before writing standard image formats (see `igi1conv/cmd_olm.cpp:SwapChannels`).
 
 ### 13.2 Lightmap Binding
 

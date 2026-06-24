@@ -13,6 +13,7 @@
 #include "cmd_iff.h"
 #include "cmd_wav.h"
 #include "cmd_olm.h"
+#include "cmd_lightmap.h"
 //   0 = success
 //   1 = bad args
 //   2 = file not found
@@ -20,7 +21,7 @@
 //   4 = write error
 
 #ifndef IGI1CONV_VERSION
-#define IGI1CONV_VERSION "1.9.7"
+#define IGI1CONV_VERSION "1.10.0"
 #endif
 
 static void print_help()
@@ -44,6 +45,7 @@ static void print_help()
         "  iff      IFF skeletal animation format (info, test, decompile, convert, create, rebuild, emit-qsc, export-gif)\n"
         "  wav      IGI audio (ILSF container -> .wav, info, convert, convert-dir)\n"
         "  olm      OLM lightmap operations (info, to-png, to-tga)\n"
+        "  lightmap Lightmap binding resolution (list, resolve by task-id/position)\n"
         "  test     Run advanced test suite on game directory\n"
         "\n"
         "Run 'igi1conv <command> --help' for command-specific help.\n";
@@ -101,6 +103,7 @@ int main(int argc, char** argv)
     if (cmd == "iff")     return cmd_iff(sub_argc, sub_argv);
     if (cmd == "wav")     return cmd_wav(sub_argc, sub_argv);
     if (cmd == "olm")     return cmd_olm(sub_argc, sub_argv);
+    if (cmd == "lightmap") return cmd_lightmap(sub_argc, sub_argv);
     if (cmd == "test")    return cmd_test(sub_argc, sub_argv);
 
     std::cerr << "igi1conv: unknown command '" << cmd << "'\n";

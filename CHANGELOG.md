@@ -14,11 +14,15 @@ All notable changes to this project will be documented in this file.
     - `igi1conv olm info <file.olm>` — print dimensions and file size
     - `igi1conv olm convert <file.olm> -o <out.png|out.tga>` — export lightmap to image
   - **OLM Documentation** — comprehensive file format reference in `game_file_formats.md` with binding resolution, vertex layout, and directory structure
+  - **`lightmap` CLI command** — model id alone is ambiguous (the same `.mef` can be placed at many locations, each with its own baked lightmap), so the binding parser now also captures each placement's Task_New id and X/Y/Z position:
+    - `igi1conv lightmap list --model <id> --qsc <objects.qsc>` — list every placement of a model bound to a lightmap (task id, name, position, logical id)
+    - `igi1conv lightmap resolve --model <id> --qsc <objects.qsc> [--task-id <id> | --pos X,Y,Z]` — resolve to one placement (exact task id match, or nearest by Euclidean distance to a given position) and print its `.olm` file paths. Exits 4 (ambiguous, lists candidates) if the model has multiple placements and no disambiguator is given.
 
 ### Fixed
 - **Lightmap Binding Resolution** — parser now resolves bindings at the nearest enclosing Task_New tree, not the outermost Container wrapper. The decompiled QSC nests multiple sibling Building tasks under a shared `Task_New(-1, "Container", "Buildings", ...)` parent; the old scanner treated the entire Container as one binding scope, causing every building's model IDs to be (wrongly) attributed to the first LightmapInfo found anywhere in the container. Fixed with bottom-up resolution: a node only binds its own + non-resolving children's model IDs if IT has a direct LightmapInfo child; otherwise they bubble unresolved to the parent.
 - **Play Animation Menu Visibility** — "Play Animation" context menu on `.mef` files is now restricted to AI model ID range (`000_00_0`–`030_00_0`), matching the existing Apply-Animation-on-Model filter. Building/prop meshes outside that range have no bone animation sets and showing the action was misleading.
 - **GUI Settings Persistence** — `ObjectsQscPath` in the `.ini` file was pointing to the wrong level during testing; fixed to match the configured level.
+- **OLM Documentation Accuracy** — corrected the OLM binary format description in `game_file_formats.md` to match the actual parser (`OlmMainHeader`/`OlmLayerDescriptor`, version-float identified rather than a FourCC magic, RGBA8 pixels with R/B channel swap on export), replacing an earlier inaccurate "MLOI magic + packed ARGB" description.
 
 ### Changed
 - **Version bumped to 1.10.0** (major: lightmap feature complete).

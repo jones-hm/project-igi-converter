@@ -81,15 +81,19 @@ struct QscObjectSet {
 // generic "435_01_1" WaterTower mesh) is commonly placed many times
 // across a level, each placement getting its own baked lightmap, so a
 // model id can legitimately have many distinct LightmapBinding entries.
-// taskId/taskName identify WHICH placed instance a binding came from
-// (the root Task_New's leading integer id and its name string, e.g.
-// 1104 / "WaterTower") so the GUI can disambiguate when there's more
-// than one match.
+// taskId/taskName/pos identify WHICH placed instance a binding came from
+// (the root Task_New's leading integer id, name string, and X/Y/Z
+// position - e.g. 1104 / "WaterTower" / (24658470, -55957188, 174412128))
+// so the GUI or CLI can disambiguate when there's more than one match.
 struct LightmapBinding {
     std::string modelId;
     std::string logicalId;   // e.g. "obj00000"
-    int32_t     taskId = -1; // root Task_New's leading Task ID; -1 = unknown
-    std::string taskName;    // root Task_New's name string (may be empty)
+    int32_t     taskId = -1; // owning Task_New's leading Task ID; -1 = unknown
+    std::string taskName;    // owning Task_New's name string (may be empty)
+    bool        hasPos = false; // false if the owning call has < 6 args (no X/Y/Z)
+    double      posX = 0.0;     // raw IGI world units (args[3] of the owning Task_New)
+    double      posY = 0.0;     // args[4]
+    double      posZ = 0.0;     // args[5]
 };
 
 // Maps a model id (any quoted string argument found anywhere inside a
@@ -101,11 +105,22 @@ struct LightmapBindingSet {
     std::vector<LightmapBinding> bindings;
 
     // First match only - use when any binding will do (e.g. a quick CLI
-    // lookup).  Prefer allBindingsForModel() in the GUI, since a model id
-    // can resolve to several different lightmaps (see LightmapBinding).
+    // lookup).  Prefer allBindingsForModel() in the GUI/CLI, since a model
+    // id can resolve to several different lightmaps (see LightmapBinding).
     std::optional<std::string> logicalIdForModel(const std::string& modelId) const;
 
     std::vector<const LightmapBinding*> allBindingsForModel(const std::string& modelId) const;
+
+    // Disambiguates among allBindingsForModel(modelId) by the exact
+    // taskId of the placed instance. nullptr if no binding for this
+    // model has that taskId.
+    const LightmapBinding* bindingForModelAndTaskId(const std::string& modelId, int32_t taskId) const;
+
+    // Disambiguates among allBindingsForModel(modelId) by Euclidean
+    // distance to (x, y, z), returning the closest one with a known
+    // position. nullptr if no binding for this model has a position.
+    const LightmapBinding* nearestBindingForModelAndPosition(const std::string& modelId,
+                                                               double x, double y, double z) const;
 
     static LightmapBindingSet parse(const std::string& qscText,
                                      std::string* err = nullptr);

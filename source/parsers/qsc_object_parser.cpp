@@ -378,6 +378,67 @@ int32_t ExtractLeadingTaskId(const std::string& s, size_t openParen, size_t clos
     }
 }
 
+// Raw top-level (depth-0, outside quotes) comma-separated argument
+// substrings of the call spanning [openParen, closeParen], trimmed of
+// surrounding whitespace. Unlike ExtractDirectStrings, this returns
+// EVERY argument (numbers, identifiers, strings) in positional order,
+// which is needed to read the X/Y/Z position fields that always sit at
+// fixed argument indices regardless of the call's class name.
+std::vector<std::string> ExtractDirectArgs(const std::string& s, size_t openParen, size_t closeParen) {
+    std::vector<std::string> out;
+    size_t j = openParen + 1;
+    int depth = 0;
+    size_t argStart = j;
+    while (j <= closeParen) {
+        if (j == closeParen || (depth == 0 && s[j] == ',')) {
+            size_t st = argStart, en = j;
+            while (st < en && std::isspace(static_cast<unsigned char>(s[st]))) ++st;
+            while (en > st && std::isspace(static_cast<unsigned char>(s[en - 1]))) --en;
+            out.push_back(s.substr(st, en - st));
+            argStart = j + 1;
+            ++j;
+            continue;
+        }
+        if (s[j] == '"') {
+            ++j;
+            while (j < closeParen && s[j] != '"') {
+                if (s[j] == '\\' && j + 1 < closeParen) ++j;
+                ++j;
+            }
+        } else if (s[j] == '(') {
+            ++depth;
+        } else if (s[j] == ')') {
+            --depth;
+        }
+        ++j;
+    }
+    return out;
+}
+
+// Schema for every observed Task_New is consistent in its first 6
+// positional args: Task_New(id, "ClassName", "name", X, Y, Z, ...).
+// Returns false (leaving x/y/z untouched) if the call has fewer than 6
+// args or args[3..5] don't parse as numbers (e.g. a LightmapInfo call,
+// whose args are all numeric/flag fields with no position).
+bool ExtractPosition3(const std::string& s, size_t openParen, size_t closeParen,
+                       double& x, double& y, double& z) {
+    auto args = ExtractDirectArgs(s, openParen, closeParen);
+    if (args.size() < 6) return false;
+    try {
+        size_t consumed;
+        double px = std::stod(args[3], &consumed);
+        if (consumed != args[3].size()) return false;
+        double py = std::stod(args[4], &consumed);
+        if (consumed != args[4].size()) return false;
+        double pz = std::stod(args[5], &consumed);
+        if (consumed != args[5].size()) return false;
+        x = px; y = py; z = pz;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 // Recursively process the Task_New call spanning [openParen, closeParen].
 //
 // The real decompiled QSC nests multiple sibling Building tasks under a
@@ -395,6 +456,7 @@ int32_t ExtractLeadingTaskId(const std::string& s, size_t openParen, size_t clos
 // children, for the PARENT to resolve (or bubble up further).
 std::vector<std::string> ProcessNode(const std::string& s, size_t openParen, size_t closeParen,
                                       int32_t taskId, const std::string& taskName,
+                                      bool hasPos, double posX, double posY, double posZ,
                                       std::vector<LightmapBinding>& bindings) {
     std::vector<std::string> unresolved = ExtractDirectStrings(s, openParen, closeParen);
     std::string ownLightmapId; // set if a DIRECT child is LightmapInfo
@@ -413,8 +475,11 @@ std::vector<std::string> ProcessNode(const std::string& s, size_t openParen, siz
                 } else {
                     int32_t childTaskId = ExtractLeadingTaskId(s, childCall.openParen, childCall.closeParen);
                     std::string childTaskName = childDirect.size() >= 2 ? childDirect[1] : std::string();
+                    double childX = 0, childY = 0, childZ = 0;
+                    bool childHasPos = ExtractPosition3(s, childCall.openParen, childCall.closeParen, childX, childY, childZ);
                     auto childUnresolved = ProcessNode(s, childCall.openParen, childCall.closeParen,
-                                                        childTaskId, childTaskName, bindings);
+                                                        childTaskId, childTaskName,
+                                                        childHasPos, childX, childY, childZ, bindings);
                     for (auto& u : childUnresolved) unresolved.push_back(std::move(u));
                 }
                 i = childCall.closeParen + 1;
@@ -425,7 +490,16 @@ std::vector<std::string> ProcessNode(const std::string& s, size_t openParen, siz
     }
 
     if (!ownLightmapId.empty()) {
-        for (auto& m : unresolved) bindings.push_back({m, ownLightmapId, taskId, taskName});
+        for (auto& m : unresolved) {
+            LightmapBinding b;
+            b.modelId = m;
+            b.logicalId = ownLightmapId;
+            b.taskId = taskId;
+            b.taskName = taskName;
+            b.hasPos = hasPos;
+            b.posX = posX; b.posY = posY; b.posZ = posZ;
+            bindings.push_back(std::move(b));
+        }
         return {};
     }
     return unresolved;
@@ -448,6 +522,31 @@ LightmapBindingSet::allBindingsForModel(const std::string& modelId) const {
         if (b.modelId == modelId) out.push_back(&b);
     }
     return out;
+}
+
+const LightmapBinding*
+LightmapBindingSet::bindingForModelAndTaskId(const std::string& modelId, int32_t taskId) const {
+    for (const auto& b : bindings) {
+        if (b.modelId == modelId && b.taskId == taskId) return &b;
+    }
+    return nullptr;
+}
+
+const LightmapBinding*
+LightmapBindingSet::nearestBindingForModelAndPosition(const std::string& modelId,
+                                                        double x, double y, double z) const {
+    const LightmapBinding* best = nullptr;
+    double bestDistSq = 0.0;
+    for (const auto& b : bindings) {
+        if (b.modelId != modelId || !b.hasPos) continue;
+        double dx = b.posX - x, dy = b.posY - y, dz = b.posZ - z;
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (!best || distSq < bestDistSq) {
+            best = &b;
+            bestDistSq = distSq;
+        }
+    }
+    return best;
 }
 
 LightmapBindingSet LightmapBindingSet::parse(const std::string& qscText, std::string* err) {
@@ -481,7 +580,10 @@ LightmapBindingSet LightmapBindingSet::parse(const std::string& qscText, std::st
             // Schema is Task_New(id, "ClassName", "name", ...) - rootDirect[0]
             // is the class name, rootDirect[1] (if present) is the name.
             std::string taskName = rootDirect.size() >= 2 ? rootDirect[1] : std::string();
-            ProcessNode(qscText, call.openParen, call.closeParen, taskId, taskName, set.bindings);
+            double posX = 0, posY = 0, posZ = 0;
+            bool hasPos = ExtractPosition3(qscText, call.openParen, call.closeParen, posX, posY, posZ);
+            ProcessNode(qscText, call.openParen, call.closeParen, taskId, taskName,
+                        hasPos, posX, posY, posZ, set.bindings);
         }
         i = call.closeParen + 1;
     }
