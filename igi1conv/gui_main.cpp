@@ -92,6 +92,7 @@ static std::function<void(const QString&, LogLevel)> g_logger;
 
 #include "tex_parser.h"
 #include "cmd_olm.h"
+#include "lightmap_resolver.h"
 #include "mef_parser.h"
 #include "mef_native.h"
 #include "qsc_object_parser.h"
@@ -143,6 +144,7 @@ public:
         int count = 0;
         QString materialName;
         std::shared_ptr<QOpenGLTexture> texture;
+        std::shared_ptr<QOpenGLTexture> lightmapTexture; // set by applyLightmapTextures()
         unsigned int drawMode = 0x0004; // GL_TRIANGLES
         bool useOverrideColor = false;
         bool disableDepthTest = false; // render on top (bones overlay)
@@ -991,6 +993,94 @@ public:
         }
     }
 
+    // Build a per-vertex lightmap UV2 buffer (separate from the main vbo
+    // so the shared pos/uv/normal layout used by every other view mode is
+    // never touched) and assign a decoded .olm texture to each matching
+    // SubMesh.  Mirrors loadMefRecursive's root-mesh block/triangle
+    // traversal exactly so vertex indices line up with the main vbo.
+    // If olmPaths.size() doesn't match the number of render blocks that
+    // produced a SubMesh, olmPaths[0] is applied to every matched block.
+    void applyLightmapTextures(const QString& mefPath, const std::vector<std::string>& olmPaths) {
+        hasLightmapUvs = false;
+        if (olmPaths.empty() || vertices.isEmpty()) return;
+
+        ParsedGeometry geo;
+        try {
+            geo = ParseMefFile(mefPath.toStdString());
+        } catch (...) { return; }
+        if (geo.modelType != 3) return;
+
+        std::vector<std::shared_ptr<QOpenGLTexture>> lightmapTextures;
+        for (const auto& olmPath : olmPaths) {
+            OLMFile olm = ParseOlm(olmPath);
+            if (!olm.valid || olm.pixels.empty() || olm.layer.pixel_width == 0 || olm.layer.pixel_height == 0) {
+                lightmapTextures.push_back(nullptr);
+                continue;
+            }
+            QImage img(olm.layer.pixel_width, olm.layer.pixel_height, QImage::Format_RGBA8888);
+            for (uint16_t y = 0; y < olm.layer.pixel_height; ++y) {
+                for (uint16_t x = 0; x < olm.layer.pixel_width; ++x) {
+                    size_t i = size_t(y) * olm.layer.pixel_width + x;
+                    const auto& p = olm.pixels[i];
+                    img.setPixelColor(x, y, QColor(p.r, p.g, p.b, p.a));
+                }
+            }
+            auto tex = std::make_shared<QOpenGLTexture>(img);
+            tex->setMinificationFilter(QOpenGLTexture::Linear);
+            tex->setMagnificationFilter(QOpenGLTexture::Linear);
+            lightmapTextures.push_back(tex);
+        }
+
+        QVector<float> uv2Data;
+        std::vector<size_t> matchedSubmeshIdxs;
+        size_t submeshIdx = 0;
+        for (const auto& block : geo.renderBlocks) {
+            int triCount = 0;
+            for (size_t i = 0; i < block.triangleCount; ++i) {
+                size_t tIdx = block.triangleStart + i;
+                if (tIdx >= geo.triangles.size()) continue;
+                const auto& tri = geo.triangles[tIdx];
+                auto addUv2 = [&](uint32_t idx) {
+                    if (idx < geo.vertices.size()) {
+                        uv2Data.push_back(geo.vertices[idx].uv2.x);
+                        uv2Data.push_back(geo.vertices[idx].uv2.y);
+                    } else {
+                        uv2Data.push_back(0.0f);
+                        uv2Data.push_back(0.0f);
+                    }
+                };
+                addUv2(tri[0]); addUv2(tri[1]); addUv2(tri[2]);
+                triCount += 3;
+            }
+            if (triCount > 0) {
+                if (submeshIdx < submeshes.size()) matchedSubmeshIdxs.push_back(submeshIdx);
+                ++submeshIdx;
+            }
+        }
+
+        bool countsMatch = (matchedSubmeshIdxs.size() == lightmapTextures.size());
+        for (size_t k = 0; k < matchedSubmeshIdxs.size(); ++k) {
+            std::shared_ptr<QOpenGLTexture> tex;
+            if (countsMatch) tex = lightmapTextures[k];
+            else if (!lightmapTextures.empty()) tex = lightmapTextures.front();
+            submeshes[matchedSubmeshIdxs[k]].lightmapTexture = tex;
+        }
+
+        // Pad with zero UV2 for any vertices beyond this mef's own (root)
+        // vertex count - i.e. recursively-loaded attachments, which never
+        // get a lightmap in this pass.
+        int totalVerts = vertices.size() / 3;
+        while (uv2Data.size() < totalVerts * 2) uv2Data.push_back(0.0f);
+        if (uv2Data.size() > totalVerts * 2) uv2Data.resize(totalVerts * 2);
+
+        if (!lightmapUvVbo.isCreated()) lightmapUvVbo.create();
+        lightmapUvVbo.bind();
+        lightmapUvVbo.allocate(uv2Data.data(), uv2Data.size() * sizeof(float));
+        lightmapUvVbo.release();
+        hasLightmapUvs = true;
+        update();
+    }
+
     void exportGif(const QString& filename) {
         if (!isIffAnimation || !currentIff.valid || currentIff.clips.empty()) return;
 
@@ -1053,6 +1143,7 @@ public:
         isIffAnimation = false;
         iffBuffersDirty = false;
         hasRestMesh = false;
+        hasLightmapUvs = false;
         makeCurrent();
         vertices.clear(); uvs.clear(); normals.clear();
         submeshes.clear();
@@ -1451,7 +1542,9 @@ protected:
             "layout(location = 0) in vec3 aPos;\n"
             "layout(location = 1) in vec2 aTex;\n"
             "layout(location = 2) in vec3 aNorm;\n"
+            "layout(location = 3) in vec2 aUV2;\n"
             "out vec2 TexCoord;\n"
+            "out vec2 LightmapCoord;\n"
             "out vec3 FragPos;\n"
             "out vec3 Normal;\n"
             "uniform mat4 model;\n"
@@ -1461,17 +1554,21 @@ protected:
             "    FragPos = vec3(view * model * vec4(aPos, 1.0));\n"
             "    Normal = mat3(transpose(inverse(view * model))) * aNorm;\n"
             "    TexCoord = aTex;\n"
+            "    LightmapCoord = aUV2;\n"
             "    gl_Position = projection * vec4(FragPos, 1.0);\n"
             "}\n";
-            
+
         const char* fsrc =
             "#version 330 core\n"
             "in vec2 TexCoord;\n"
+            "in vec2 LightmapCoord;\n"
             "in vec3 FragPos;\n"
             "in vec3 Normal;\n"
             "out vec4 FragColor;\n"
             "uniform sampler2D texture1;\n"
+            "uniform sampler2D lightmapTex;\n"
             "uniform bool hasTexture;\n"
+            "uniform bool hasLightmap;\n"
             "uniform bool useOverrideColor;\n"
             "uniform vec4 overrideColor;\n"
             "void main() {\n"
@@ -1482,6 +1579,7 @@ protected:
             "    float lighting = min(diff + ambient, 1.0);\n"
             "    vec4 baseColor = vec4(0.8, 0.8, 0.8, 1.0);\n"
             "    if (hasTexture) baseColor = texture(texture1, TexCoord);\n"
+            "    if (hasLightmap) baseColor.rgb *= texture(lightmapTex, LightmapCoord).rgb;\n"
             "    if (useOverrideColor) baseColor = overrideColor;\n"
             "    FragColor = vec4(lighting * baseColor.rgb, baseColor.a);\n"
             "}\n";
@@ -1529,6 +1627,7 @@ protected:
             QMatrix4x4 gridModel;
             program.setUniformValue("model", gridModel);
             program.setUniformValue("hasTexture", false);
+            program.setUniformValue("hasLightmap", false);
             glDrawArrays(GL_LINES, 0, gridVertexCount);
             gridVbo.release();
         }
@@ -1546,6 +1645,14 @@ protected:
         program.enableAttributeArray(2);
         program.setAttributeBuffer(2, GL_FLOAT, 5 * sizeof(float), 3, 8 * sizeof(float));
 
+        bool lightmapAttrBound = false;
+        if (hasLightmapUvs && lightmapUvVbo.isCreated()) {
+            lightmapUvVbo.bind();
+            program.enableAttributeArray(3);
+            program.setAttributeBuffer(3, GL_FLOAT, 0, 2, 2 * sizeof(float));
+            lightmapAttrBound = true;
+        }
+
         model.rotate(rotX, 1.0f, 0.0f, 0.0f);
         model.rotate(rotY, 0.0f, 1.0f, 0.0f);
         model.rotate(rotZ, 0.0f, 0.0f, 1.0f);
@@ -1556,6 +1663,7 @@ protected:
 
         if (submeshes.empty()) {
             program.setUniformValue("hasTexture", false);
+            program.setUniformValue("hasLightmap", false);
             glDrawArrays(GL_TRIANGLES, 0, vertices.size() / 3);
         } else {
             for (const auto& sm : submeshes) {
@@ -1569,7 +1677,17 @@ protected:
                 } else {
                     program.setUniformValue("hasTexture", false);
                 }
-                
+
+                if (lightmapAttrBound && sm.lightmapTexture && sm.lightmapTexture->isCreated()) {
+                    glActiveTexture(GL_TEXTURE1);
+                    sm.lightmapTexture->bind();
+                    program.setUniformValue("hasLightmap", true);
+                    program.setUniformValue("lightmapTex", 1);
+                    glActiveTexture(GL_TEXTURE0);
+                } else {
+                    program.setUniformValue("hasLightmap", false);
+                }
+
                 if (sm.useOverrideColor) {
                     program.setUniformValue("useOverrideColor", true);
                     program.setUniformValue("overrideColor", sm.overrideColor);
@@ -1577,11 +1695,20 @@ protected:
                     program.setUniformValue("useOverrideColor", false);
                 }
                 glDrawArrays(sm.drawMode, sm.startIndex, sm.count);
+                if (lightmapAttrBound && sm.lightmapTexture && sm.lightmapTexture->isCreated()) {
+                    glActiveTexture(GL_TEXTURE1);
+                    sm.lightmapTexture->release();
+                    glActiveTexture(GL_TEXTURE0);
+                }
                 if (sm.disableDepthTest)
                     glEnable(GL_DEPTH_TEST);
             }
         }
 
+        if (lightmapAttrBound) {
+            program.disableAttributeArray(3);
+            lightmapUvVbo.release();
+        }
         program.disableAttributeArray(0);
         program.disableAttributeArray(1);
         program.disableAttributeArray(2);
@@ -1752,6 +1879,15 @@ private:
     QOpenGLBuffer gridVbo;
     int gridVertexCount = 0;
     std::unique_ptr<QOpenGLTexture> texture;
+
+    // Lightmap UV2 channel - kept in a SEPARATE vbo from the main
+    // pos/uv/normal interleaved buffer so "Apply Lightmap" never touches
+    // the shared vertex layout used by every other view mode (graphs,
+    // IFF animation, etc).  Populated by applyLightmapTextures(); only
+    // covers the root mesh's vertices (attachments get zero UV2 - they
+    // are separate child meshes, out of scope for this pass).
+    QOpenGLBuffer lightmapUvVbo;
+    bool hasLightmapUvs = false;
 
     QPoint lastPos;
     float rotX = 0, rotY = 0, rotZ = 0;
@@ -4803,6 +4939,34 @@ if (mefPath.isEmpty()) {
         }
     }
 
+    // Right-click "Apply Lightmap" on a .mef: resolve its bound .olm
+    // file(s) via objects.qsc (reusing the same path the Animation
+    // settings already configure) and upload them as lightmap textures
+    // in the viewer.  Silently no-ops (with a log line) if no binding or
+    // files are found - this must never break loading a plain model.
+    void applyLightmapOnModel(const QString& mefPath) {
+        if (globalObjectsQscPath.isEmpty() || !QFile::exists(globalObjectsQscPath)) {
+            logMessage("[WARN] Apply Lightmap: no objects.qsc set (Settings > Animation > Set Objects.qsc...)");
+            return;
+        }
+        std::string mefStem = QFileInfo(mefPath).completeBaseName().toStdString();
+        std::vector<std::string> olmFiles =
+            igi1conv::ResolveLightmapFiles(globalObjectsQscPath.toStdString(), mefStem);
+
+        if (olmFiles.empty()) {
+            logMessage("[INFO] Apply Lightmap: no lightmap binding found for " + QFileInfo(mefPath).fileName());
+            return;
+        }
+
+        if (modelViewer) {
+            modelViewer->loadModel(mefPath);
+            modelViewer->applyLightmapTextures(mefPath, olmFiles);
+            modelViewer->show();
+        }
+        logMessage("[INFO] Apply Lightmap: " + QFileInfo(mefPath).fileName() +
+            " <- " + QString::number((int)olmFiles.size()) + " lightmap file(s)");
+    }
+
     void onAnimationPlayClicked() {
         if (!animModelCombo || !animAnimList) return;
         // Lazy: if the set is empty (e.g. the user just enabled the
@@ -5998,6 +6162,9 @@ animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
                     texMenu->addAction("Apply Textures (All)", [this, path]() {
                         currentFile = QFileInfo(path).absolutePath();
                         executeCommand("mef apply-tex-all");
+                    });
+                    texMenu->addAction("Apply Lightmap", [this, path]() {
+                        applyLightmapOnModel(path);
                     });
                     texMenu->addAction("Map Textures", [this, path]() {
                         QString baseName = QFileInfo(path).completeBaseName();
