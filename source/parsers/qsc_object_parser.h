@@ -37,7 +37,9 @@
 // so it can also be reused by tests and the CLI.
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace igi1conv {
@@ -72,6 +74,21 @@ struct QscObjectSet {
     // Parse the decompiled QSC text.  Returns an empty set on error.
     static QscObjectSet parse(const std::string& qscText,
                               std::string* err = nullptr);
+};
+
+// Maps a model id (any quoted string argument found anywhere inside a
+// Task_New(...) tree, including nested child Task_New calls) to the
+// logical lightmap id captured by a nested Task_New("LightmapInfo", ...,
+// "<logical_id>") call in that SAME tree.  Used to resolve which
+// obj00000_*.olm files belong to a given .mef.
+struct LightmapBindingSet {
+    // modelId -> logical lightmap id (e.g. "435_01_1" -> "obj00000")
+    std::vector<std::pair<std::string, std::string>> bindings;
+
+    std::optional<std::string> logicalIdForModel(const std::string& modelId) const;
+
+    static LightmapBindingSet parse(const std::string& qscText,
+                                     std::string* err = nullptr);
 };
 
 } // namespace igi1conv

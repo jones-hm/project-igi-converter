@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -291,6 +292,150 @@ QscObjectSet::animationsForModel(const std::string& modelId) const {
     out.reserve(uniq.size());
     for (const auto& p : uniq) out.push_back({p.first, p.second});
     return out;
+}
+
+// ─── LightmapBindingSet ──────────────────────────────────────────────────────
+//
+// Unlike QscObjectSet::parse (which only looks at one fixed Task_New schema),
+// this walks the FULL nested tree of each top-level Task_New(...) call to
+// find: (a) every quoted string anywhere in the tree (candidate model ids),
+// and (b) a nested Task_New("LightmapInfo", ..., "<logical_id>") call. Every
+// model id found in a tree that also contains a LightmapInfo child is bound
+// to that tree's logical lightmap id.
+
+namespace {
+
+struct TaskCall { size_t openParen; size_t closeParen; };
+
+// Locate the matching ')' for the Task_New call whose "Task_New" keyword
+// starts at `taskNewPos`. Honours string boundaries and nested parens.
+bool FindCallSpan(const std::string& s, size_t taskNewPos, TaskCall& out) {
+    size_t p = taskNewPos + 8; // strlen("Task_New")
+    while (p < s.size() && std::isspace(static_cast<unsigned char>(s[p]))) ++p;
+    if (p >= s.size() || s[p] != '(') return false;
+    out.openParen = p;
+    size_t depth = 1, i = p + 1;
+    while (i < s.size() && depth > 0) {
+        if (s[i] == '"') {
+            ++i;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) ++i;
+                ++i;
+            }
+        } else if (s[i] == '(') {
+            ++depth;
+        } else if (s[i] == ')') {
+            --depth;
+            if (depth == 0) { out.closeParen = i; return true; }
+        }
+        ++i;
+    }
+    return false;
+}
+
+// Quoted strings that are direct (non-nested) arguments of the call
+// spanning [openParen, closeParen].
+std::vector<std::string> ExtractDirectStrings(const std::string& s, size_t openParen, size_t closeParen) {
+    std::vector<std::string> out;
+    size_t j = openParen + 1;
+    int depth = 0;
+    while (j < closeParen) {
+        if (s[j] == '(') { ++depth; ++j; continue; }
+        if (s[j] == ')') { --depth; ++j; continue; }
+        if (depth == 0 && s[j] == '"') {
+            size_t st = j;
+            ++j;
+            while (j < closeParen && s[j] != '"') {
+                if (s[j] == '\\' && j + 1 < closeParen) ++j;
+                ++j;
+            }
+            out.push_back(s.substr(st + 1, j - st - 1));
+            ++j;
+            continue;
+        }
+        ++j;
+    }
+    return out;
+}
+
+// Recursively walk every Task_New(...) call within [from, to), collecting
+// candidate model ids into `modelIds` and the first LightmapInfo logical id
+// found into `lightmapId`.
+void CollectModelIdsAndLightmapId(const std::string& s, size_t from, size_t to,
+                                   std::vector<std::string>& modelIds,
+                                   std::string& lightmapId) {
+    size_t i = from;
+    while (i < to) {
+        if (i + 8 <= to && s.compare(i, 8, "Task_New") == 0 &&
+            (i == 0 || (!std::isalnum(static_cast<unsigned char>(s[i - 1])) && s[i - 1] != '_'))) {
+            TaskCall call;
+            if (FindCallSpan(s, i, call) && call.closeParen < to) {
+                auto direct = ExtractDirectStrings(s, call.openParen, call.closeParen);
+                bool isLightmapInfo = std::find(direct.begin(), direct.end(), "LightmapInfo") != direct.end();
+                if (isLightmapInfo) {
+                    if (lightmapId.empty() && !direct.empty()) lightmapId = direct.back();
+                } else {
+                    for (auto& d : direct) modelIds.push_back(d);
+                    CollectModelIdsAndLightmapId(s, call.openParen + 1, call.closeParen, modelIds, lightmapId);
+                }
+                i = call.closeParen + 1;
+                continue;
+            }
+        }
+        ++i;
+    }
+}
+
+} // namespace
+
+std::optional<std::string>
+LightmapBindingSet::logicalIdForModel(const std::string& modelId) const {
+    for (const auto& [model, logicalId] : bindings) {
+        if (model == modelId) return logicalId;
+    }
+    return std::nullopt;
+}
+
+LightmapBindingSet LightmapBindingSet::parse(const std::string& qscText, std::string* err) {
+    LightmapBindingSet set;
+    constexpr size_t kMaxCalls = 50000;
+    size_t scanned = 0;
+    size_t i = 0;
+    while (i < qscText.size()) {
+        if (scanned++ > kMaxCalls) {
+            if (err) *err = "Task_New scan exceeded " + std::to_string(kMaxCalls) + " occurrences";
+            break;
+        }
+        size_t p = qscText.find("Task_New", i);
+        if (p == std::string::npos) break;
+        bool leftOk = (p == 0)
+                      || (!std::isalnum(static_cast<unsigned char>(qscText[p - 1]))
+                          && qscText[p - 1] != '_');
+        if (!leftOk) { i = p + 8; continue; }
+
+        TaskCall call;
+        if (!FindCallSpan(qscText, p, call)) { i = p + 8; continue; }
+
+        auto rootDirect = ExtractDirectStrings(qscText, call.openParen, call.closeParen);
+        bool rootIsLightmapInfo = std::find(rootDirect.begin(), rootDirect.end(), "LightmapInfo") != rootDirect.end();
+
+        std::vector<std::string> modelIds;
+        std::string lightmapId;
+        if (rootIsLightmapInfo) {
+            if (!rootDirect.empty()) lightmapId = rootDirect.back();
+        } else {
+            modelIds = rootDirect;
+        }
+        CollectModelIdsAndLightmapId(qscText, call.openParen + 1, call.closeParen, modelIds, lightmapId);
+
+        if (!lightmapId.empty()) {
+            for (auto& m : modelIds) set.bindings.push_back({m, lightmapId});
+        }
+        i = call.closeParen + 1;
+    }
+
+    if (err) *err = "";
+    return set;
 }
 
 } // namespace igi1conv
