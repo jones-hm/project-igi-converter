@@ -11,18 +11,10 @@ namespace fs = std::filesystem;
 
 namespace igi1conv {
 
-std::vector<std::string> ResolveLightmapFiles(const std::string& objectsQscPath,
-                                               const std::string& mefStem) {
+std::vector<std::string> ResolveLightmapFilesForLogicalId(const std::string& objectsQscPath,
+                                                           const std::string& logicalId) {
     std::vector<std::string> result;
-
-    if (!fs::exists(objectsQscPath)) return result;
-
-    std::ifstream f(objectsQscPath);
-    std::string qscText((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    LightmapBindingSet bindings = LightmapBindingSet::parse(qscText);
-
-    auto logicalId = bindings.logicalIdForModel(mefStem);
-    if (!logicalId.has_value()) return result;
+    if (logicalId.empty() || !fs::exists(objectsQscPath)) return result;
 
     fs::path levelDir = fs::path(objectsQscPath).parent_path();
     fs::path lightmapsDir = levelDir / "lightmaps";
@@ -48,7 +40,7 @@ std::vector<std::string> ResolveLightmapFiles(const std::string& objectsQscPath,
         if (!err.empty() || !fs::exists(unpackedDir)) return result;
     }
 
-    std::regex pattern("^" + *logicalId + "_\\d{5}\\.olm$", std::regex_constants::icase);
+    std::regex pattern("^" + logicalId + "_\\d{5}\\.olm$", std::regex_constants::icase);
     for (const auto& entry : fs::directory_iterator(unpackedDir)) {
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
@@ -58,6 +50,20 @@ std::vector<std::string> ResolveLightmapFiles(const std::string& objectsQscPath,
     }
     std::sort(result.begin(), result.end());
     return result;
+}
+
+std::vector<std::string> ResolveLightmapFiles(const std::string& objectsQscPath,
+                                               const std::string& mefStem) {
+    if (!fs::exists(objectsQscPath)) return {};
+
+    std::ifstream f(objectsQscPath);
+    std::string qscText((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    LightmapBindingSet bindings = LightmapBindingSet::parse(qscText);
+
+    auto logicalId = bindings.logicalIdForModel(mefStem);
+    if (!logicalId.has_value()) return {};
+
+    return ResolveLightmapFilesForLogicalId(objectsQscPath, *logicalId);
 }
 
 } // namespace igi1conv

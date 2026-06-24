@@ -4944,17 +4944,62 @@ if (mefPath.isEmpty()) {
     // settings already configure) and upload them as lightmap textures
     // in the viewer.  Silently no-ops (with a log line) if no binding or
     // files are found - this must never break loading a plain model.
+    //
+    // The same model id can be placed many times across a level (e.g. a
+    // generic WaterTower mesh reused at several locations), each with
+    // its own baked lightmap - so a model id is not always a unique key.
+    // When more than one binding exists for this mef, the user picks
+    // which placed instance's lightmap to apply.
     void applyLightmapOnModel(const QString& mefPath) {
         if (globalObjectsQscPath.isEmpty() || !QFile::exists(globalObjectsQscPath)) {
             logMessage("[WARN] Apply Lightmap: no objects.qsc set (Settings > Animation > Set Objects.qsc...)");
             return;
         }
+
+        QFile qscFile(globalObjectsQscPath);
+        if (!qscFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            logMessage("[ERROR] Apply Lightmap: cannot read " + globalObjectsQscPath);
+            return;
+        }
+        std::string qscText = QString::fromUtf8(qscFile.readAll()).toStdString();
+        qscFile.close();
+
         std::string mefStem = QFileInfo(mefPath).completeBaseName().toStdString();
+        igi1conv::LightmapBindingSet bindingSet = igi1conv::LightmapBindingSet::parse(qscText);
+        auto matches = bindingSet.allBindingsForModel(mefStem);
+
+        if (matches.empty()) {
+            logMessage("[INFO] Apply Lightmap: no lightmap binding in " + QFileInfo(globalObjectsQscPath).fileName() +
+                " for model " + QFileInfo(mefPath).fileName());
+            return;
+        }
+
+        std::string chosenLogicalId = matches.front()->logicalId;
+        if (matches.size() > 1) {
+            QStringList options;
+            for (auto* m : matches) {
+                options << QString("%1 (task %2) -> %3")
+                    .arg(m->taskName.empty() ? "(unnamed)" : QString::fromStdString(m->taskName))
+                    .arg(m->taskId)
+                    .arg(QString::fromStdString(m->logicalId));
+            }
+            bool ok = false;
+            QString chosen = QInputDialog::getItem(
+                this, "Apply Lightmap",
+                QString("Model %1 is placed at %2 locations - pick which one's lightmap to apply:")
+                    .arg(QFileInfo(mefPath).fileName()).arg(matches.size()),
+                options, 0, false, &ok);
+            if (!ok) return;
+            int idx = options.indexOf(chosen);
+            chosenLogicalId = matches[idx >= 0 ? idx : 0]->logicalId;
+        }
+
         std::vector<std::string> olmFiles =
-            igi1conv::ResolveLightmapFiles(globalObjectsQscPath.toStdString(), mefStem);
+            igi1conv::ResolveLightmapFilesForLogicalId(globalObjectsQscPath.toStdString(), chosenLogicalId);
 
         if (olmFiles.empty()) {
-            logMessage("[INFO] Apply Lightmap: no lightmap binding found for " + QFileInfo(mefPath).fileName());
+            logMessage("[WARN] Apply Lightmap: binding " + QString::fromStdString(chosenLogicalId) +
+                " found but no .olm files on disk for " + QFileInfo(mefPath).fileName());
             return;
         }
 

@@ -358,42 +358,96 @@ std::vector<std::string> ExtractDirectStrings(const std::string& s, size_t openP
     return out;
 }
 
-// Recursively walk every Task_New(...) call within [from, to), collecting
-// candidate model ids into `modelIds` and the first LightmapInfo logical id
-// found into `lightmapId`.
-void CollectModelIdsAndLightmapId(const std::string& s, size_t from, size_t to,
-                                   std::vector<std::string>& modelIds,
-                                   std::string& lightmapId) {
-    size_t i = from;
-    while (i < to) {
-        if (i + 8 <= to && s.compare(i, 8, "Task_New") == 0 &&
+// The leading integer Task ID argument of the call spanning
+// [openParen, closeParen] (e.g. the "1104" in
+// Task_New(1104, "Building", ...)). -1 if the call has no leading
+// integer (e.g. it starts with "-1" for nested/anonymous tasks - that
+// parses fine and returns -1, which doubles as "no id" - acceptable
+// since real root-level tasks always have a positive id).
+int32_t ExtractLeadingTaskId(const std::string& s, size_t openParen, size_t closeParen) {
+    size_t j = openParen + 1;
+    while (j < closeParen && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+    size_t start = j;
+    if (j < closeParen && (s[j] == '-' || s[j] == '+')) ++j;
+    while (j < closeParen && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+    if (j == start || (j == start + 1 && (s[start] == '-' || s[start] == '+'))) return -1;
+    try {
+        return static_cast<int32_t>(std::stol(s.substr(start, j - start)));
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Recursively process the Task_New call spanning [openParen, closeParen].
+//
+// The real decompiled QSC nests multiple sibling Building tasks under a
+// shared wrapper (e.g. Task_New(-1, "Container", "Buildings", <building1>,
+// <building2>, ...)). Binding must resolve at the NEAREST enclosing scope
+// that has a LightmapInfo, not the outermost ancestor - otherwise every
+// building in a shared Container would be (wrongly) bound to whichever
+// LightmapInfo happens to appear first anywhere inside that container.
+//
+// If this node has a LightmapInfo DIRECT child, every model id collected
+// from itself and from any child that did NOT itself resolve internally
+// is bound to that LightmapInfo's logical id, and an empty vector is
+// returned (fully resolved here - nothing left to bubble up). Otherwise
+// returns the combined unresolved strings from this node and its
+// children, for the PARENT to resolve (or bubble up further).
+std::vector<std::string> ProcessNode(const std::string& s, size_t openParen, size_t closeParen,
+                                      int32_t taskId, const std::string& taskName,
+                                      std::vector<LightmapBinding>& bindings) {
+    std::vector<std::string> unresolved = ExtractDirectStrings(s, openParen, closeParen);
+    std::string ownLightmapId; // set if a DIRECT child is LightmapInfo
+
+    size_t i = openParen + 1;
+    while (i < closeParen) {
+        if (i + 8 <= closeParen && s.compare(i, 8, "Task_New") == 0 &&
             (i == 0 || (!std::isalnum(static_cast<unsigned char>(s[i - 1])) && s[i - 1] != '_'))) {
-            TaskCall call;
-            if (FindCallSpan(s, i, call) && call.closeParen < to) {
-                auto direct = ExtractDirectStrings(s, call.openParen, call.closeParen);
-                bool isLightmapInfo = std::find(direct.begin(), direct.end(), "LightmapInfo") != direct.end();
-                if (isLightmapInfo) {
-                    if (lightmapId.empty() && !direct.empty()) lightmapId = direct.back();
+            TaskCall childCall;
+            if (FindCallSpan(s, i, childCall) && childCall.closeParen < closeParen) {
+                auto childDirect = ExtractDirectStrings(s, childCall.openParen, childCall.closeParen);
+                bool childIsLightmapInfo = std::find(childDirect.begin(), childDirect.end(), "LightmapInfo") != childDirect.end();
+                if (childIsLightmapInfo) {
+                    if (ownLightmapId.empty() && !childDirect.empty()) ownLightmapId = childDirect.back();
+                    // LightmapInfo is a leaf - no model ids to bubble from it.
                 } else {
-                    for (auto& d : direct) modelIds.push_back(d);
-                    CollectModelIdsAndLightmapId(s, call.openParen + 1, call.closeParen, modelIds, lightmapId);
+                    int32_t childTaskId = ExtractLeadingTaskId(s, childCall.openParen, childCall.closeParen);
+                    std::string childTaskName = childDirect.size() >= 2 ? childDirect[1] : std::string();
+                    auto childUnresolved = ProcessNode(s, childCall.openParen, childCall.closeParen,
+                                                        childTaskId, childTaskName, bindings);
+                    for (auto& u : childUnresolved) unresolved.push_back(std::move(u));
                 }
-                i = call.closeParen + 1;
+                i = childCall.closeParen + 1;
                 continue;
             }
         }
         ++i;
     }
+
+    if (!ownLightmapId.empty()) {
+        for (auto& m : unresolved) bindings.push_back({m, ownLightmapId, taskId, taskName});
+        return {};
+    }
+    return unresolved;
 }
 
 } // namespace
 
 std::optional<std::string>
 LightmapBindingSet::logicalIdForModel(const std::string& modelId) const {
-    for (const auto& [model, logicalId] : bindings) {
-        if (model == modelId) return logicalId;
+    for (const auto& b : bindings) {
+        if (b.modelId == modelId) return b.logicalId;
     }
     return std::nullopt;
+}
+
+std::vector<const LightmapBinding*>
+LightmapBindingSet::allBindingsForModel(const std::string& modelId) const {
+    std::vector<const LightmapBinding*> out;
+    for (const auto& b : bindings) {
+        if (b.modelId == modelId) out.push_back(&b);
+    }
+    return out;
 }
 
 LightmapBindingSet LightmapBindingSet::parse(const std::string& qscText, std::string* err) {
@@ -416,20 +470,18 @@ LightmapBindingSet LightmapBindingSet::parse(const std::string& qscText, std::st
         TaskCall call;
         if (!FindCallSpan(qscText, p, call)) { i = p + 8; continue; }
 
+        // A literal top-level Task_New("LightmapInfo", ...) (no enclosing
+        // tree to bind to) has nothing to resolve - skip it rather than
+        // feeding it to ProcessNode, which only special-cases LightmapInfo
+        // when it sees it as a CHILD.
         auto rootDirect = ExtractDirectStrings(qscText, call.openParen, call.closeParen);
         bool rootIsLightmapInfo = std::find(rootDirect.begin(), rootDirect.end(), "LightmapInfo") != rootDirect.end();
-
-        std::vector<std::string> modelIds;
-        std::string lightmapId;
-        if (rootIsLightmapInfo) {
-            if (!rootDirect.empty()) lightmapId = rootDirect.back();
-        } else {
-            modelIds = rootDirect;
-        }
-        CollectModelIdsAndLightmapId(qscText, call.openParen + 1, call.closeParen, modelIds, lightmapId);
-
-        if (!lightmapId.empty()) {
-            for (auto& m : modelIds) set.bindings.push_back({m, lightmapId});
+        if (!rootIsLightmapInfo) {
+            int32_t taskId = ExtractLeadingTaskId(qscText, call.openParen, call.closeParen);
+            // Schema is Task_New(id, "ClassName", "name", ...) - rootDirect[0]
+            // is the class name, rootDirect[1] (if present) is the name.
+            std::string taskName = rootDirect.size() >= 2 ? rootDirect[1] : std::string();
+            ProcessNode(qscText, call.openParen, call.closeParen, taskId, taskName, set.bindings);
         }
         i = call.closeParen + 1;
     }

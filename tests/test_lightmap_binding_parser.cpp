@@ -30,6 +30,62 @@ TEST(LightmapBindingParser, NoMatchForUnboundModel) {
     EXPECT_FALSE(set.logicalIdForModel("999_00_0").has_value());
 }
 
+TEST(LightmapBindingParser, AllBindingsForModelDisambiguatesReusedModel) {
+    // The same model id can be placed multiple times across a level, each
+    // placement getting its own baked lightmap. allBindingsForModel must
+    // return every occurrence, with the root Task_New's id/name attached
+    // so a caller can disambiguate.
+    std::string qsc =
+        "Task_New(1104, \"Building\", \"WaterTower\", 1,2,3,0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00000\"));\n"
+        "Task_New(2200, \"Building\", \"WaterTower2\", 4,5,6,0,0,0, \"435_01_1\","
+        "    Task_New(-1, \"LightmapInfo\", \"\", 1,1,550,1650,0.8,280.0,0.08,0.08,0.08, \"obj00014\"));\n";
+
+    LightmapBindingSet set = LightmapBindingSet::parse(qsc);
+    auto all = set.allBindingsForModel("435_01_1");
+    ASSERT_EQ(all.size(), 2u);
+
+    bool found0 = false, found14 = false;
+    for (auto* b : all) {
+        if (b->logicalId == "obj00000") { EXPECT_EQ(b->taskId, 1104); EXPECT_EQ(b->taskName, "WaterTower"); found0 = true; }
+        if (b->logicalId == "obj00014") { EXPECT_EQ(b->taskId, 2200); EXPECT_EQ(b->taskName, "WaterTower2"); found14 = true; }
+    }
+    EXPECT_TRUE(found0);
+    EXPECT_TRUE(found14);
+}
+
+TEST(LightmapBindingParser, SiblingBuildingsUnderSharedContainerResolveIndependently) {
+    // Regression test for a real bug found against the IGI1 level1 corpus:
+    // the decompiled QSC nests multiple sibling Buildings under a shared
+    // wrapper (Task_New(-1, "Container", "Buildings", <building1>,
+    // <building2>, ...)). Binding must resolve at the NEAREST enclosing
+    // LightmapInfo, not flatten every building's model ids into whichever
+    // LightmapInfo happens to appear first anywhere inside the shared
+    // Container.
+    std::string qsc =
+        "Task_New(-1, \"Container\", \"Buildings\","
+        "    Task_New(1100, \"Building\", \"First\", 0,0,0,0,0,0, \"111_00_0\","
+        "        Task_New(-1, \"LightmapInfo\", \"\", 1,1,1,1,1,1,1,1,1, \"obj00000\")),"
+        "    Task_New(1101, \"Building\", \"Second\", 0,0,0,0,0,0, \"222_00_0\","
+        "        Task_New(-1, \"LightmapInfo\", \"\", 1,1,1,1,1,1,1,1,1, \"obj00001\")));\n";
+
+    LightmapBindingSet set = LightmapBindingSet::parse(qsc);
+
+    auto id111 = set.logicalIdForModel("111_00_0");
+    ASSERT_TRUE(id111.has_value());
+    EXPECT_EQ(*id111, "obj00000");
+
+    auto id222 = set.logicalIdForModel("222_00_0");
+    ASSERT_TRUE(id222.has_value());
+    EXPECT_EQ(*id222, "obj00001");
+
+    // The shared Container's own strings ("Container", "Buildings") must
+    // not have been bound to either lightmap - the Container itself has
+    // no direct LightmapInfo child, so it has nothing to bind to.
+    EXPECT_FALSE(set.logicalIdForModel("Container").has_value());
+    EXPECT_FALSE(set.logicalIdForModel("Buildings").has_value());
+}
+
 TEST(LightmapBindingParser, NoMatchWhenSiblingTreeHasNoLightmap) {
     // Two separate top-level trees: only the second has a LightmapInfo.
     // The first tree's model id must NOT pick up the second tree's id.

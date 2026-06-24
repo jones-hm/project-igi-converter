@@ -76,16 +76,36 @@ struct QscObjectSet {
                               std::string* err = nullptr);
 };
 
+// A single model-id -> lightmap binding extracted from one top-level
+// Task_New(...) tree.  Model ids are NOT unique: the same model (e.g. a
+// generic "435_01_1" WaterTower mesh) is commonly placed many times
+// across a level, each placement getting its own baked lightmap, so a
+// model id can legitimately have many distinct LightmapBinding entries.
+// taskId/taskName identify WHICH placed instance a binding came from
+// (the root Task_New's leading integer id and its name string, e.g.
+// 1104 / "WaterTower") so the GUI can disambiguate when there's more
+// than one match.
+struct LightmapBinding {
+    std::string modelId;
+    std::string logicalId;   // e.g. "obj00000"
+    int32_t     taskId = -1; // root Task_New's leading Task ID; -1 = unknown
+    std::string taskName;    // root Task_New's name string (may be empty)
+};
+
 // Maps a model id (any quoted string argument found anywhere inside a
 // Task_New(...) tree, including nested child Task_New calls) to the
 // logical lightmap id captured by a nested Task_New("LightmapInfo", ...,
 // "<logical_id>") call in that SAME tree.  Used to resolve which
 // obj00000_*.olm files belong to a given .mef.
 struct LightmapBindingSet {
-    // modelId -> logical lightmap id (e.g. "435_01_1" -> "obj00000")
-    std::vector<std::pair<std::string, std::string>> bindings;
+    std::vector<LightmapBinding> bindings;
 
+    // First match only - use when any binding will do (e.g. a quick CLI
+    // lookup).  Prefer allBindingsForModel() in the GUI, since a model id
+    // can resolve to several different lightmaps (see LightmapBinding).
     std::optional<std::string> logicalIdForModel(const std::string& modelId) const;
+
+    std::vector<const LightmapBinding*> allBindingsForModel(const std::string& modelId) const;
 
     static LightmapBindingSet parse(const std::string& qscText,
                                      std::string* err = nullptr);

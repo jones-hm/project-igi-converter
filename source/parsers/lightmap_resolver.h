@@ -16,4 +16,10 @@ namespace igi1conv {
 std::vector<std::string> ResolveLightmapFiles(const std::string& objectsQscPath,
                                                const std::string& mefStem);
 
+// Same lookup as ResolveLightmapFiles, but for a logical lightmap id that's
+// already known (e.g. one the user picked from several ambiguous bindings
+// for a reused model - see LightmapBindingSet::allBindingsForModel).
+std::vector<std::string> ResolveLightmapFilesForLogicalId(const std::string& objectsQscPath,
+                                                           const std::string& logicalId);
+
 } // namespace igi1conv
