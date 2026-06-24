@@ -763,6 +763,28 @@ TEST_F(IGI1ConvTest, TerrainExportCtr) {
     EXPECT_TRUE(NonEmptyFile(out));
 }
 
+// ─── olm ─────────────────────────────────────────────────────────────────────
+TEST_F(IGI1ConvTest, OlmInfo) {
+    IGI1CONV_NEED(f, "\\.olm$");
+    std::string out;
+    EXPECT_EQ(RunIGI1Conv("olm info " + Q(f), &out), 0);
+    EXPECT_NE(out.find("resolution:"), std::string::npos);
+}
+TEST_F(IGI1ConvTest, OlmToPng) {
+    IGI1CONV_NEED(f, "\\.olm$");
+    TempDir tmp;
+    std::string out = tmp / "lightmap.png";
+    EXPECT_EQ(RunIGI1Conv("olm to-png " + Q(f) + " -o " + Q(out)), 0);
+    EXPECT_TRUE(NonEmptyFile(out));
+}
+TEST_F(IGI1ConvTest, OlmToTga) {
+    IGI1CONV_NEED(f, "\\.olm$");
+    TempDir tmp;
+    std::string out = tmp / "lightmap.tga";
+    EXPECT_EQ(RunIGI1Conv("olm to-tga " + Q(f) + " -o " + Q(out)), 0);
+    EXPECT_TRUE(NonEmptyFile(out));
+}
+
 // ─── iff ─────────────────────────────────────────────────────────────────
 TEST_F(IGI1ConvTest, IffInfo) {
     IGI1CONV_NEED(f, "\\.iff$");
