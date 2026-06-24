@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-06-24
+
+### Added
+- **Lightmap Support for MEF Type 3 Models**
+  - Parse lightmap UV coordinates (UV2 channel) from MEF Type 3 vertex data (XTRV bytes +32..+39)
+  - Resolve bound `.olm` lightmap files from decompiled `objects.qsc` Task_New trees
+  - Support reused model IDs with disambiguation: when a model is placed at multiple locations with different baked lightmaps, the GUI shows a picker
+  - Apply Lightmap right-click menu on `.mef` files (Type 3 only) with OpenGL shader blending
+  - **OLM Format** — new `olm` command for working with lightmap files:
+    - `igi1conv olm info <file.olm>` — print dimensions and file size
+    - `igi1conv olm convert <file.olm> -o <out.png|out.tga>` — export lightmap to image
+  - **OLM Documentation** — comprehensive file format reference in `game_file_formats.md` with binding resolution, vertex layout, and directory structure
+
+### Fixed
+- **Lightmap Binding Resolution** — parser now resolves bindings at the nearest enclosing Task_New tree, not the outermost Container wrapper. The decompiled QSC nests multiple sibling Building tasks under a shared `Task_New(-1, "Container", "Buildings", ...)` parent; the old scanner treated the entire Container as one binding scope, causing every building's model IDs to be (wrongly) attributed to the first LightmapInfo found anywhere in the container. Fixed with bottom-up resolution: a node only binds its own + non-resolving children's model IDs if IT has a direct LightmapInfo child; otherwise they bubble unresolved to the parent.
+- **Play Animation Menu Visibility** — "Play Animation" context menu on `.mef` files is now restricted to AI model ID range (`000_00_0`–`030_00_0`), matching the existing Apply-Animation-on-Model filter. Building/prop meshes outside that range have no bone animation sets and showing the action was misleading.
+- **GUI Settings Persistence** — `ObjectsQscPath` in the `.ini` file was pointing to the wrong level during testing; fixed to match the configured level.
+
+### Changed
+- **Version bumped to 1.10.0** (major: lightmap feature complete).
+
 ## [1.9.7] - 2026-06-24
 
 ### Added

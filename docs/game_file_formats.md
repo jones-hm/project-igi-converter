@@ -19,6 +19,7 @@
 10. [FNT -- Font Format](#10-fnt----font-format)
 11. [IFF -- Skeletal Animation](#11-iff----skeletal-animation)
 12. [BEF -- Animation Text Format](#12-bef----animation-text-format)
+13. [OLM -- Lightmap](#13-olm----lightmap)
 
 ---
 
@@ -1829,3 +1830,89 @@ The `iff decompile` command produces a separate, higher-fidelity text format (`.
 | `anims_<id>/anim_<id>.IFF` | Per-clip data (header, events, translation keys **with tangents**, rotation keys) |
 
 The decompiled format is used by `iff create` as an alternative to BEF when tangent preservation is needed. BEF is the simpler, lossy-but-more-portable format.
+
+---
+
+## 13. OLM -- Lightmap
+
+**Extension:** `.olm`
+**Container:** Raw binary (not ILFF)
+**Associated Format:** Bound to MEF Type 3 lightmap models via QSC Task_New bindings
+
+OLM ("Innerloop Lightmap") files store pre-baked lightmap textures for level geometry. A single lightmap "atlas" (set of physical `.olm` files) contains texture fragments identified by a logical ID (e.g. `obj00000`), with each fragment stored in a separate file using the naming convention `<logical_id>_NNNNN.olm` where `NNNNN` is a 5-digit zero-padded index.
+
+### 13.1 File Format
+
+**File Header (12 bytes):**
+
+| Offset | Size | Type     | Description                    |
+|--------|------|----------|--------------------------------|
+| 0x00   | 4    | char[4]  | Magic: `"MLOI"` (ASCII)         |
+| 0x04   | 4    | uint32   | Image width (pixels)           |
+| 0x08   | 4    | uint32   | Image height (pixels)          |
+
+**Image Data:**
+
+Immediately following the 12-byte header, raw 32-bit ARGB pixel data (4 bytes per pixel) stored in row-major order (top-to-bottom, left-to-right).
+
+```c
+constexpr size_t expected_size = 12 + (width * height * 4);
+```
+
+### 13.2 Lightmap Binding
+
+OLM files are **not globally associated with models**; instead, they are bound to specific placed instances via the decompiled `objects.qsc` (QVM decompiled script). Each Building or level object can have a nested `Task_New(-1, "LightmapInfo", ...)` child that specifies which logical lightmap ID (`obj00000`, `obj00001`, etc.) applies to that particular placement.
+
+A single MEF model (e.g. `435_01_1.mef`) may be placed at multiple locations in a level, each with a different baked lightmap. The resolver (`ResolveLightmapFiles`) uses the model's ID to find all placements of that model, extracts the logical lightmap ID from each placement's `LightmapInfo` binding, and locates the corresponding `.olm` files on disk.
+
+### 13.3 OLM Naming Convention
+
+```
+<logical_id>_NNNNN.olm
+```
+
+- `<logical_id>` is the logical identifier from QSC (e.g. `obj00000`)
+- `NNNNN` is the fragment index, zero-padded to 5 digits (e.g. `00000`, `00001`, `00002`, ...)
+
+Each logical ID may have multiple `.olm` files (e.g. a large lightmap atlas split across 10+ fragments). All fragments for a logical ID are sorted by filename and concatenated in order to reconstruct the full lightmap.
+
+### 13.4 Integration with MEF Type 3
+
+MEF Type 3 models include a second UV channel (`uv2`, stored at bytes +32..+39 in the XTRV vertex structure) that defines texture coordinates for lightmap lookup. When rendering a Type 3 model with lightmap support:
+
+1. **Load the model's MEF** (Type 3) and extract vertex positions, normals, primary UVs (`uv0`), and lightmap UVs (`uv2`).
+2. **Resolve lightmap files** via `objects.qsc` bindings to obtain the list of `.olm` files.
+3. **Concatenate `.olm` fragments** by filename order to reconstruct the full lightmap texture.
+4. **Bind the lightmap texture** to the second texture sampler in the shader.
+5. **In the fragment shader**, sample the primary diffuse texture using `uv0`, sample the lightmap using `uv2`, and blend: `color = diffuse * lightmap`.
+
+### 13.5 CLI Support
+
+The `olm` command provides utilities for working with lightmap files:
+
+```bash
+igi1conv olm info <file.olm>          # Print dimensions and file size
+igi1conv olm convert <file.olm> -o out.png   # Export to PNG
+igi1conv olm convert <file.olm> -o out.tga   # Export to TGA
+```
+
+### 13.6 Directory Structure
+
+In a decompiled level, lightmaps are stored in a predictable location:
+
+```
+<level_dir>/
+  level1.dat
+  level1.mtp
+  level1.mef
+  objects.qsc            # Decompiled bytecode (contains bindings)
+  lightmaps/
+    lightmaps.res        # Packed resource archive (auto-unpacked on first use)
+    lightmaps_unpacked/
+      obj00000_00000.olm
+      obj00000_00001.olm
+      obj00001_00000.olm
+      ...
+```
+
+The resolver automatically unpacks `lightmaps.res` into `lightmaps_unpacked/` if the unpacked folder does not yet exist.
