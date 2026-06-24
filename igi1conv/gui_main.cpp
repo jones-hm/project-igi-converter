@@ -91,6 +91,7 @@ static std::function<void(const QString&, LogLevel)> g_logger;
 #include <algorithm>
 
 #include "tex_parser.h"
+#include "cmd_olm.h"
 #include "mef_parser.h"
 #include "mef_native.h"
 #include "qsc_object_parser.h"
@@ -3475,7 +3476,7 @@ public:
 
         QMenu* helpMenu = menuBar()->addMenu("&Help");
         helpMenu->addAction("About", this, [this]() {
-            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.9.4\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
+            QMessageBox::about(this, "About", "IGI Game Convertor\nVersion 1.9.7\nAuthor: HeavenHM\nDeveloped in C++ with Qt5/Qt6.\nAdvanced Edition with MEF Native Viewer and full CLI integration.");
         });
 
         QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
@@ -6155,6 +6156,11 @@ animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
             });
             menu.addSeparator();
             menu.addAction("Info", [this, path]() { loadFile(path); executeCommand("wav info"); });
+        } else if (ext == "olm") {
+            menu.addAction("Info / Dump", [this, path]() { loadFile(path); executeCommand("olm info"); });
+            QMenu* exportMenu = menu.addMenu("Export");
+            exportMenu->addAction("Export to PNG", [this, path]() { loadFile(path); executeCommand("olm to-png"); });
+            exportMenu->addAction("Export to TGA", [this, path]() { loadFile(path); executeCommand("olm to-tga"); });
         }
         menu.exec(treeView->mapToGlobal(pos));
     }
@@ -6168,7 +6174,7 @@ animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
 
         int mode = overrideViewMode;
         if (mode == 0) {
-            if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic" || currentExt == "tga") {
+            if (currentExt == "png" || currentExt == "jpg" || currentExt == "jpeg" || currentExt == "bmp" || currentExt == "tex" || currentExt == "spr" || currentExt == "pic" || currentExt == "tga" || currentExt == "olm") {
                 mode = 3; // Image
             } else if (currentExt == "mef" || currentExt == "mex") {
                 bool isBinary = true;
@@ -6275,7 +6281,21 @@ animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
                 viewerEdit->show();
             }
         } else if (mode == 3) { // Image
-            if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
+            if (currentExt == "olm") {
+                OLMFile olm = ParseOlm(path.toStdString());
+                if (olm.valid && !olm.pixels.empty()) {
+                    QImage qimg(olm.layer.pixel_width, olm.layer.pixel_height, QImage::Format_ARGB32);
+                    for (uint32_t y = 0; y < olm.layer.pixel_height; ++y) {
+                        for (uint32_t x = 0; x < olm.layer.pixel_width; ++x) {
+                            size_t i = y * olm.layer.pixel_width + x;
+                            qimg.setPixelColor(x, y, QColor(olm.pixels[i].r, olm.pixels[i].g, olm.pixels[i].b, olm.pixels[i].a));
+                        }
+                    }
+                    imageEditor->loadImage(path, qimg);
+                } else {
+                    imageEditor->clear();
+                }
+            } else if (currentExt == "tex" || currentExt == "spr" || currentExt == "pic") {
                 TEXFile tex = TEX_Parse(path.toStdString());
                 if (tex.valid && !tex.images.empty()) {
                     const auto& img = tex.images[0];

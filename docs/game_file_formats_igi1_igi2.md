@@ -36,6 +36,7 @@ switch.
 | `.dat` (MTP table) | Yes | Yes | Plain text         | Per‑level model→texture table corresponding to MTP.     |
 | `dat_graph` | Yes | Yes  | Graph data              | AI / navigation graph data.                             |
 | `.fnt`   | Yes   | Yes   | ILFF `FONT`             | Bitmap font atlas (glyph metrics + texture).            |
+| `.olm`   | Yes   | Yes   | Flat binary             | Object static lightmaps (1 layer in IGI 1, 1 or 3 in IGI 2). |
 
 **Implementation note**
 
@@ -85,7 +86,6 @@ formats in IGI 1.
 | `.thm`           | IGI 2 | Terrain heightmap metadata (referenced from `heightmaps.res`). |
 | `.tlm`           | IGI 2 | Terrain lightmap metadata.                                     |
 | `.tmm`           | IGI 2 | Terrain material/mission metadata table.                       |
-| `.olm`           | IGI 2 | Object/location mapping resources inside `.res` archives.      |
 
 These collectively replace the IGI 1 terrain pipeline based on `.hmp`/`.lmp`
 and provide a more structured level/terrain metadata layer.
@@ -96,7 +96,6 @@ These belong in an **IGI2 level/terrain module**, separate from the shared core:
 
 - IGI 2 heightmaps and lightmaps: `.thm` + `.tmm` + `.tlm`.
 - IGI 2 forest/cover: `dat_forest` + `dat_graph` + `dat_graphcover`.
-- IGI 2 object/location mapping: `.olm` + QVM scripts.
 
 ---
 
@@ -128,11 +127,11 @@ From the converter’s perspective the split looks like this:
 
 - **Shared core module** (both games):
   - `.res`, `.mef`, `.tex`, `.spr`, `.pic`, `.wav`, `.qvm`, `.qsc`,
-    `.mtp`, `.dat` (MTP table), `dat_graph`, `.fnt`.
+    `.mtp`, `.dat` (MTP table), `dat_graph`, `.fnt`, `.olm`.
 - **IGI 1–only module**:
   - `.bit`, `.cmd`, `.ctr`, `.hmp`, `.lmp`.
 - **IGI 2–only module**:
-  - `dat_forest`, `dat_graphcover`, `.syn`, `.thm`, `.tlm`, `.tmm`, `.olm`.
+  - `dat_forest`, `dat_graphcover`, `.syn`, `.thm`, `.tlm`, `.tmm`.
 
 This layout aligns `project-igi-converter` with the structure of `igipy` and
 makes it straightforward to expose a **game selector** (`--game=igi1|igi2`)
