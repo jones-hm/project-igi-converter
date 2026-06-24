@@ -6169,11 +6169,18 @@ animStatusLabel->setText(QString("Playing fallback clip 0 (anim %1 not found)")
             QString cmdPrefix = ext;
 
             if (isBinary) {
-                // Play Animation: load this MEF in Animation mode
-                menu.addAction("Play Animation", [this, path]() {
-                    playAnimationForFile(path);
-                });
-                menu.addSeparator();
+                // Play Animation only applies to HumanSoldier AI models -
+                // these are model ids in the 000_00_0..030_00_0 range (the
+                // same range applyIffOnModel's picker filters to). Building/
+                // prop meshes outside that range have no bone animation set
+                // and showing the action for them is misleading.
+                QString modelId = QFileInfo(path).completeBaseName();
+                if (modelId >= "000_00_0" && modelId <= "030_00_0") {
+                    menu.addAction("Play Animation", [this, path]() {
+                        playAnimationForFile(path);
+                    });
+                    menu.addSeparator();
+                }
 
                 QMenu* infoMenu = menu.addMenu("Details");
                 infoMenu->addAction("Info", [this, path, cmdPrefix]() { loadFile(path); executeCommand(cmdPrefix + " info"); });
